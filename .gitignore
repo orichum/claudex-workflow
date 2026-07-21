@@ -1,0 +1,12 @@
+# Machine-local runtime state, credentials, logs, backups, and downloaded release binaries.
+/runtime/
+/logs/
+/backups/
+/bin/claudex
+/bin/cli-proxy-api
+/.superpowers/
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

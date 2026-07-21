@@ -1,0 +1,15 @@
+{
+  "palacePath": "~/.mempalace/palace",
+  "contexts": [
+    {
+      "root": "~/xebia",
+      "dockerProfile": "xebia",
+      "memoryWing": "xebia"
+    },
+    {
+      "root": "~/complion",
+      "dockerProfile": "realtime",
+      "memoryWing": "complion"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+exec "$WORKFLOW_ROOT/doctor.sh" "$@"

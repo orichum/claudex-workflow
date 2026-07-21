@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+# shellcheck disable=SC1091
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+
+provider="codex"
+if [[ "$#" -gt 0 && "$1" != -* ]]; then
+  provider="$1"
+  shift
+fi
+login_flag="$(login_flag_for_provider "$provider")"
+
+umask 077
+set +e
+"$WORKFLOW_ROOT/bin/cli-proxy-api" --config "$WORKFLOW_ROOT/runtime/cliproxy.yaml" "$login_flag" "$@"
+login_status=$?
+find "$WORKFLOW_ROOT/runtime/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
+exit "$login_status"

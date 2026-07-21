@@ -1,0 +1,9 @@
+{
+  "disableWorkflows": false,
+  "disableBundledSkills": true,
+  "workflowKeywordTriggerEnabled": false,
+  "effortLevel": "high",
+  "worktree": {
+    "baseRef": "head"
+  }
+}

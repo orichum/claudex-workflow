@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+
+for argument in "$@"; do
+  case "$argument" in
+    --effort|--effort=*|\
+    --config|--config=*|\
+    --plugin-dir|--plugin-dir=*|\
+    --append-system-prompt|--append-system-prompt=*|\
+    --append-system-prompt-file|--append-system-prompt-file=*|\
+    --system-prompt|--system-prompt=*|\
+    --system-prompt-file|--system-prompt-file=*|\
+    --agent|--agent=*|\
+    --settings|--settings=*|\
+    --mcp-config|--mcp-config=*|\
+    --strict-mcp-config|\
+    --permission-mode|--permission-mode=*|\
+    --dangerously-skip-permissions|\
+    --allow-dangerously-skip-permissions)
+      printf 'ERROR: claudex-gpt owns controller option: %s\n' "$argument" >&2
+      exit 2
+      ;;
+  esac
+done
+
+while IFS= read -r inherited_claudex_variable; do
+  unset "$inherited_claudex_variable"
+done < <(compgen -A variable CLAUDEX_)
+unset inherited_claudex_variable
+
+umask 077
+launch_dir="$(physical_pwd)"
+session_json="$({
+  cd "$WORKFLOW_ROOT"
+  python3 -m integrations.common.session_config create \
+    --workflow-root "$WORKFLOW_ROOT" \
+    --launch-dir "$launch_dir"
+})"
+if ! jq -e '
+  type == "object" and
+  (keys == ["contextFile", "contextSha256", "mcpFile", "runDir", "runId"]) and
+  (.runId | type == "string" and startswith("run.")) and
+  (.runDir | type == "string" and startswith("/")) and
+  (.contextFile | type == "string" and startswith("/")) and
+  (.contextSha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  (.mcpFile | type == "string" and startswith("/")) and
+  (.contextFile == (.runDir + "/context.json")) and
+  (.mcpFile == (.runDir + "/mcp.json")) and
+  (.runId == (.runDir | split("/") | last))
+' <<<"$session_json" >/dev/null; then
+  printf 'ERROR: invalid owned session metadata\n' >&2
+  exit 1
+fi
+session_run_dir="$(jq -er '.runDir' <<<"$session_json")"
+session_mcp_config="$(jq -er '.mcpFile' <<<"$session_json")"
+session_context_sha256="$(jq -er '.contextSha256' <<<"$session_json")"
+assert_owned_session "$WORKFLOW_ROOT" "$session_run_dir" "$session_context_sha256"
+
+export CLAUDEX_MCP_CONFIG="$session_mcp_config"
+CLAUDEX_RUN_DIR="$(dirname "$session_mcp_config")"
+export CLAUDEX_RUN_DIR
+export CLAUDEX_CONTEXT_FILE="$CLAUDEX_RUN_DIR/context.json"
+export CLAUDEX_CONTEXT_SHA256="$session_context_sha256"
+CLAUDEX_RUN_ID="$(basename "$CLAUDEX_RUN_DIR")"
+export CLAUDEX_RUN_ID
+
+export CLAUDE_CONFIG_DIR="$WORKFLOW_ROOT/runtime/claude-config"
+export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3
+export CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=24
+export CLAUDE_CODE_MAX_RETRIES=2
+export ENABLE_TOOL_SEARCH=true
+export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
+export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
+unset CLAUDE_CODE_SUBAGENT_MODEL
+unset CLAUDE_CODE_DISABLE_WORKFLOWS
+unset CLAUDE_CODE_EFFORT_LEVEL
+
+exec "$WORKFLOW_ROOT/bin/claudex" \
+  --config "$WORKFLOW_ROOT/runtime/claudex.toml" \
+  run gpt \
+  --mcp-config "$CLAUDEX_MCP_CONFIG" \
+  --strict-mcp-config \
+  --effort high \
+  --append-system-prompt-file "$WORKFLOW_ROOT/controller/controller-policy.md" \
+  --plugin-dir "$WORKFLOW_ROOT/controller/plugin" \
+  "$@"
