@@ -132,6 +132,7 @@ install -m 0644 \
   "$fixture_workflow/integrations/__init__.py"
 install -m 0644 \
   "$WORKFLOW_ROOT/integrations/common/__init__.py" \
+  "$WORKFLOW_ROOT/integrations/common/context_population.py" \
   "$WORKFLOW_ROOT/integrations/common/project_context.py" \
   "$WORKFLOW_ROOT/integrations/common/session_config.py" \
   "$fixture_workflow/integrations/common/"

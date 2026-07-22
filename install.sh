@@ -519,7 +519,7 @@ if ! PYTHONDONTWRITEBYTECODE=1 python3 -B \
   workflow_die "Mempalace MCP failed protocol readiness checks"
 fi
 
-uv tool install --upgrade 'graphifyy[mcp]'
+uv tool install --upgrade 'graphifyy[mcp,terraform]'
 if ! graphify_mcp="$(command -v graphify-mcp)"; then
   workflow_die "Graphify installation did not provide graphify-mcp"
 fi
