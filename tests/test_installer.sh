@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for script in \
   install.sh doctor.sh rollback.sh smoke-test.sh discover-models.sh \
   bin/claudex-gpt bin/claudex-login bin/claudex-doctor bin/claude-headroom \
-  bin/claudex-context \
+  bin/claudex-context bin/claudex-plugin \
   controller/plugin/scripts/check-local-services.sh \
   controller/plugin/scripts/guard-orchestration.sh
 do
@@ -1140,6 +1140,8 @@ PY
 rg -Fq 'headroom --version' "$ROOT/install.sh"
 rg -q 'interrupt active Claudex sessions' "$ROOT/install.sh"
 rg -q 'claudex-context' "$ROOT/install.sh"
+rg -Fq '"$WORKFLOW_ROOT/bin/claudex-plugin" sync' "$ROOT/install.sh"
+rg -q 'for launcher in .*claudex-plugin' "$ROOT/install.sh"
 
 python3 - "$ROOT/README.md" <<'PY'
 import sys
@@ -1152,6 +1154,7 @@ required_headings = [
     "What happens automatically",
     "Install and upgrade",
     "Daily use",
+    "Manage Claudex plugins",
     "Manage workspace contexts",
     "Project MCP behavior",
     "State and safety",
@@ -1189,6 +1192,14 @@ required_copy = [
     "claudex-context update",
     "claudex-context remove",
     "claudex-context validate",
+    "claudex-plugin add",
+    "claudex-plugin list",
+    "claudex-plugin sync",
+    "claudex-plugin update",
+    "claudex-plugin remove",
+    "controller/plugins.json",
+    "installed plugin agents remain subject to the orchestration allowlist",
+    "plugin-provided MCP servers remain subject to strict per-session MCP configuration",
     "Docker MCP",
     "MemPalace",
     "graphify-out/graph.json",

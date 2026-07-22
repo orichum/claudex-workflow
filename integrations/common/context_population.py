@@ -2,9 +2,12 @@
 
 import json
 import os
+import queue
+import re
 import shutil
 import stat
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,8 +52,10 @@ class RepositoryDiscovery:
 
 def _run(
     command: list[str], *, cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     heartbeat: Callable[[float], None] | None = None,
     heartbeat_interval: float = 10.0,
+    line_observer: Callable[[str, str], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if heartbeat is not None and heartbeat_interval <= 0:
         raise ValueError("heartbeat_interval must be positive")
@@ -58,6 +63,7 @@ def _run(
         process = subprocess.Popen(
             command,
             cwd=cwd,
+            env=env,
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -69,7 +75,62 @@ def _run(
     started = time.monotonic()
     next_heartbeat = started + heartbeat_interval
     try:
-        if heartbeat is None:
+        if line_observer is not None:
+            events: queue.Queue[
+                tuple[str, str | BaseException | None]
+            ] = queue.Queue()
+
+            def read_stream(name: str, stream) -> None:
+                try:
+                    for line in stream:
+                        events.put((name, line))
+                except (OSError, UnicodeError) as error:
+                    events.put(("error", error))
+                finally:
+                    events.put((name, None))
+
+            for name, stream in (
+                ("stdout", process.stdout),
+                ("stderr", process.stderr),
+            ):
+                threading.Thread(
+                    target=read_stream,
+                    args=(name, stream),
+                    daemon=True,
+                ).start()
+
+            captured = {"stdout": [], "stderr": []}
+            closed = set()
+            while len(closed) < 2:
+                timeout = None
+                if heartbeat is not None:
+                    timeout = max(0.0, next_heartbeat - time.monotonic())
+                try:
+                    name, line = events.get(timeout=timeout)
+                except queue.Empty:
+                    heartbeat(time.monotonic() - started)
+                    current = time.monotonic()
+                    while next_heartbeat <= current:
+                        next_heartbeat += heartbeat_interval
+                    continue
+                if line is None:
+                    closed.add(name)
+                    continue
+                if name == "error":
+                    raise line
+                captured[name].append(line)
+                line_observer(name, line.rstrip("\r\n"))
+                if heartbeat is not None and time.monotonic() >= next_heartbeat:
+                    heartbeat(time.monotonic() - started)
+                    current = time.monotonic()
+                    while next_heartbeat <= current:
+                        next_heartbeat += heartbeat_interval
+            process.wait()
+            stdout = "".join(captured["stdout"])
+            stderr = "".join(captured["stderr"])
+            process.stdout.close()
+            process.stderr.close()
+        elif heartbeat is None:
             stdout, stderr = process.communicate()
         else:
             while True:
@@ -286,10 +347,18 @@ def _bounded_diagnostics(completed: subprocess.CompletedProcess[str]) -> str:
 def _require_success(
     command: list[str], *, label: str, cwd: Path | None = None,
     repository: Path | None = None,
+    env: dict[str, str] | None = None,
     heartbeat: Callable[[float], None] | None = None,
+    line_observer: Callable[[str, str], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        completed = _run(command, cwd=cwd, heartbeat=heartbeat)
+        completed = _run(
+            command,
+            cwd=cwd,
+            env=env,
+            heartbeat=heartbeat,
+            line_observer=line_observer,
+        )
     except PopulationError as error:
         subject = (
             f" for repository {_safe_field(repository)}" if repository else ""
@@ -414,6 +483,69 @@ def _heartbeat(
     return lambda elapsed: progress(
         f"{label} — {_format_elapsed(elapsed)} elapsed"
     )
+
+
+_MEMPALACE_FILE_PROGRESS = re.compile(
+    r"^\s*\+\s+\[\s*(\d+)/(\d+)\]\s+(.+?)\s+\+(\d+)\s*$"
+)
+
+
+class _MempalaceProgress:
+    def __init__(
+        self,
+        prefix: str,
+        progress: Callable[[str], None],
+        started: float,
+    ) -> None:
+        self.prefix = prefix
+        self.progress = progress
+        self.started = started
+        self.next_percent = 5
+        self.reported = False
+
+    def __call__(self, stream: str, line: str) -> None:
+        if stream != "stdout":
+            return
+        match = _MEMPALACE_FILE_PROGRESS.match(line)
+        if match is None:
+            return
+        current_text, total_text, filename, drawers = match.groups()
+        current = int(current_text)
+        total = int(total_text)
+        if total <= 0 or current <= 0 or current > total:
+            return
+        percent = current * 100 // total
+        is_first = not self.reported
+        if not is_first and current != total and percent < self.next_percent:
+            return
+        self.reported = True
+        while self.next_percent <= percent:
+            self.next_percent += 5
+        self.progress(
+            f"{self.prefix} progress {current}/{total} ({percent}%) — "
+            f"{_safe_field(filename.strip())} — +{drawers} drawers — "
+            f"{_format_elapsed(time.monotonic() - self.started)} elapsed"
+        )
+
+
+def _mempalace_mine_environment() -> dict[str, str]:
+    shim_directory = (
+        Path(__file__).resolve().parent.parent / "mempalace_sitecustomize"
+    )
+    shim = shim_directory / "sitecustomize.py"
+    if not shim.is_file() or shim.is_symlink():
+        raise PopulationError("MemPalace generated-artifact guard is unavailable")
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        str(shim_directory)
+        if not existing_pythonpath
+        else str(shim_directory) + os.pathsep + existing_pythonpath
+    )
+    environment["CLAUDEX_MEMPALACE_EXCLUDE_GENERATED"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONUNBUFFERED"] = "1"
+    return environment
 
 
 def _populate_repository(
@@ -561,7 +693,13 @@ def populate_context(
                 "--mode", "projects", "--wing", wing,
             ],
             label=f"MemPalace mine for {_safe_field(source)}",
+            env=_mempalace_mine_environment(),
             heartbeat=_heartbeat(progress, f"{prefix} mining"),
+            line_observer=(
+                _MempalaceProgress(prefix, progress, mine_started)
+                if progress is not None
+                else None
+            ),
         )
         _emit(
             progress,

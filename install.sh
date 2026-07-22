@@ -132,6 +132,10 @@ install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
 chmod 0755 "$WORKFLOW_ROOT/controller/plugin/scripts/"*.sh
 
+CLAUDEX_DATA_DIR="$WORKFLOW_DATA_ROOT" \
+  "$WORKFLOW_ROOT/bin/claudex-plugin" sync || \
+  workflow_die "declared Claude plugins could not be synchronized"
+
 export PATH="$HOME/.local/bin:$PATH"
 headroom_prior_version=
 headroom_prior_binary="$UV_TOOL_BIN_DIR/headroom"
@@ -727,7 +731,7 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     "CLIProxyAPI failed readiness checks; previous service will be restored"
 fi
 
-for launcher in claudex-gpt claude-headroom claudex-login claudex-doctor claudex-context; do
+for launcher in claudex-gpt claude-headroom claudex-login claudex-doctor claudex-context claudex-plugin; do
   ln -sfn "$WORKFLOW_ROOT/bin/$launcher" "$USER_BIN_DIR/$launcher"
 done
 

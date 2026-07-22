@@ -401,6 +401,13 @@ class ContextCommandTests(unittest.TestCase):
         self.workspace.mkdir()
         self.tool_directory = self.root / "fake-tools"
         self.tool_directory.mkdir()
+        self.fake_package_directory = self.root / "fake-packages"
+        fake_mempalace = self.fake_package_directory / "mempalace"
+        fake_mempalace.mkdir(parents=True)
+        (fake_mempalace / "__init__.py").write_text("", encoding="utf-8")
+        (fake_mempalace / "palace.py").write_text(
+            "SKIP_DIRS = set()\n", encoding="utf-8"
+        )
         self.tool_calls_path = self.root / "fake-tool-calls.jsonl"
         for name in ("mempalace", "graphify"):
             tool = self.tool_directory / name
@@ -460,6 +467,7 @@ raise SystemExit(0)
             {
                 "HOME": str(self.root),
                 "PATH": f"{self.tool_directory}{os.pathsep}{command_environment.get('PATH', '')}",
+                "PYTHONPATH": str(self.fake_package_directory),
                 "FAKE_TOOL_CALLS": str(self.tool_calls_path),
             }
         )

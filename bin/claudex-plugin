@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+
+PLUGIN_MANIFEST="$WORKFLOW_ROOT/controller/plugins.json"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+CLAUDEX_CLAUDE_CONFIG="$WORKFLOW_DATA_ROOT/claude-config"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  claudex-plugin add PLUGIN@MARKETPLACE [--source MARKETPLACE_SOURCE]
+  claudex-plugin list
+  claudex-plugin sync
+  claudex-plugin update
+  claudex-plugin remove PLUGIN@MARKETPLACE
+USAGE
+}
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_runtime() {
+  command -v jq >/dev/null || die "missing required command: jq"
+  command -v claude >/dev/null || die "Claude Code is not installed or not on PATH"
+  [[ -f "$PLUGIN_MANIFEST" && ! -L "$PLUGIN_MANIFEST" ]] || \
+    die "plugin declaration is missing or unsafe: $PLUGIN_MANIFEST"
+  jq -e '
+    type == "object" and
+    (keys == ["marketplaces", "plugins", "schemaVersion"]) and
+    .schemaVersion == 1 and
+    (.marketplaces | type == "array") and
+    (.plugins | type == "array") and
+    ([.marketplaces[] |
+      type == "object" and
+      (keys == ["name", "source"]) and
+      (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+      (.source | type == "string" and length > 0 and (startswith("-") | not))
+    ] | all) and
+    ([.plugins[] |
+      type == "string" and
+      test("^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$")
+    ] | all) and
+    ([.marketplaces[].name] | length == (unique | length)) and
+    (.plugins | length == (unique | length)) and
+    ([.marketplaces[].name] as $marketplace_names |
+      [.plugins[] |
+        split("@")[1] as $marketplace_name |
+        ($marketplace_names | index($marketplace_name)) != null
+      ] | all)
+  ' "$PLUGIN_MANIFEST" >/dev/null || die "invalid plugin declaration: $PLUGIN_MANIFEST"
+}
+
+validate_plugin_id() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+    die "plugin must use PLUGIN@MARKETPLACE syntax"
+}
+
+validate_source() {
+  [[ -n "$1" && "$1" != -* && "$1" != *$'\n'* && "$1" != *$'\r'* && \
+     "$1" != *$'\t'* ]] || die "invalid marketplace source"
+}
+
+write_manifest() {
+  local jq_filter="$1"
+  shift
+  local temporary
+  temporary="$(mktemp "$WORKFLOW_ROOT/controller/.plugins.json.XXXXXX")" || \
+    die "could not create plugin declaration update"
+  if ! jq "$@" "$jq_filter" "$PLUGIN_MANIFEST" >"$temporary" || \
+     ! chmod 0644 "$temporary" || ! mv -f "$temporary" "$PLUGIN_MANIFEST"; then
+    rm -f -- "$temporary"
+    die "could not update plugin declaration"
+  fi
+}
+
+claude_plugin() {
+  install -d -m 0700 "$CLAUDEX_CLAUDE_CONFIG"
+  CLAUDE_CONFIG_DIR="$CLAUDEX_CLAUDE_CONFIG" claude plugin "$@"
+}
+
+read_marketplaces() {
+  local result
+  result="$(claude_plugin marketplace list --json)" || return 1
+  jq -e 'type == "array"' <<<"$result" >/dev/null || \
+    die "Claude returned invalid marketplace state"
+  printf '%s' "$result"
+}
+
+read_installed_plugins() {
+  local result
+  result="$(claude_plugin list --json)" || return 1
+  jq -e 'type == "array"' <<<"$result" >/dev/null || \
+    die "Claude returned invalid plugin state"
+  printf '%s' "$result"
+}
+
+sync_plugins() {
+  local marketplaces installed name source plugin_id refreshed
+  printf 'Claudex plugin config: %s\n' "$CLAUDEX_CLAUDE_CONFIG"
+  if jq -e '.plugins | length == 0' "$PLUGIN_MANIFEST" >/dev/null; then
+    printf '[plugin] no declared plugins\n'
+    return 0
+  fi
+  marketplaces="$(read_marketplaces)" || die "could not list Claude marketplaces"
+
+  while IFS=$'\t' read -r name source; do
+    [[ -n "$name" ]] || continue
+    if jq -e --arg name "$name" 'any(.[]; .name == $name)' \
+      <<<"$marketplaces" >/dev/null; then
+      printf '[marketplace] update %s\n' "$name"
+      claude_plugin marketplace update "$name"
+    else
+      printf '[marketplace] add %s from %s\n' "$name" "$source"
+      claude_plugin marketplace add --scope user "$source"
+      refreshed="$(read_marketplaces)" || die "could not verify marketplace $name"
+      jq -e --arg name "$name" 'any(.[]; .name == $name)' \
+        <<<"$refreshed" >/dev/null || \
+        die "marketplace source did not register the declared name: $name"
+      marketplaces="$refreshed"
+    fi
+  done < <(jq -r '.marketplaces[] | [.name, .source] | @tsv' "$PLUGIN_MANIFEST")
+
+  installed="$(read_installed_plugins)" || die "could not list installed Claude plugins"
+  while IFS= read -r plugin_id; do
+    [[ -n "$plugin_id" ]] || continue
+    if jq -e --arg id "$plugin_id" 'any(.[]; .id == $id)' \
+      <<<"$installed" >/dev/null; then
+      printf '[plugin] update %s\n' "$plugin_id"
+      claude_plugin update "$plugin_id" --scope user
+      claude_plugin enable "$plugin_id"
+    else
+      printf '[plugin] install %s\n' "$plugin_id"
+      claude_plugin install "$plugin_id" --scope user
+    fi
+  done < <(jq -r '.plugins[]' "$PLUGIN_MANIFEST")
+}
+
+list_plugins() {
+  local installed
+  installed="$(read_installed_plugins)" || die "could not list installed Claude plugins"
+  printf 'Claudex plugin config: %s\n\n' "$CLAUDEX_CLAUDE_CONFIG"
+  python3 - "$PLUGIN_MANIFEST" "$installed" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+installed = {entry.get("id") for entry in json.loads(sys.argv[2])}
+sources = {entry["name"]: entry["source"] for entry in manifest["marketplaces"]}
+rows = []
+for plugin_id in manifest["plugins"]:
+    marketplace = plugin_id.rsplit("@", 1)[1]
+    rows.append((plugin_id, "installed" if plugin_id in installed else "missing", sources[marketplace]))
+if not rows:
+    print("PLUGIN  STATUS  MARKETPLACE SOURCE")
+    print("(none)")
+    raise SystemExit
+headers = ("PLUGIN", "STATUS", "MARKETPLACE SOURCE")
+widths = [max(len(headers[index]), *(len(row[index]) for row in rows)) for index in range(3)]
+print(f"{headers[0]:<{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]}")
+for row in rows:
+    print(f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]}")
+PY
+}
+
+add_plugin() {
+  local plugin_id="${1:-}" source="" marketplace existing_source
+  shift || true
+  validate_plugin_id "$plugin_id"
+  if [[ $# -gt 0 ]]; then
+    [[ $# -eq 2 && "$1" == --source ]] || { usage >&2; exit 2; }
+    source="$2"
+    validate_source "$source"
+  fi
+  marketplace="${plugin_id##*@}"
+  existing_source="$(jq -r --arg name "$marketplace" \
+    '.marketplaces[] | select(.name == $name) | .source' "$PLUGIN_MANIFEST")"
+  if [[ -z "$existing_source" && -z "$source" ]]; then
+    die "marketplace $marketplace is not declared; pass --source MARKETPLACE_SOURCE"
+  fi
+  if [[ -n "$existing_source" && -n "$source" && "$existing_source" != "$source" ]]; then
+    die "marketplace $marketplace is already declared from $existing_source"
+  fi
+  # The jq program is intentionally single-quoted; jq, not Bash, expands its variables.
+  # shellcheck disable=SC2016
+  write_manifest '
+    if any(.marketplaces[]; .name == $marketplace) then .
+    else .marketplaces += [{name: $marketplace, source: $source}] end |
+    .marketplaces |= sort_by(.name) |
+    .plugins = ((.plugins + [$plugin]) | unique | sort)
+  ' --arg marketplace "$marketplace" --arg source "${existing_source:-$source}" \
+    --arg plugin "$plugin_id"
+  sync_plugins
+}
+
+remove_plugin() {
+  local plugin_id="${1:-}" installed
+  [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+  validate_plugin_id "$plugin_id"
+  jq -e --arg id "$plugin_id" 'any(.plugins[]; . == $id)' \
+    "$PLUGIN_MANIFEST" >/dev/null || die "plugin is not declared: $plugin_id"
+  installed="$(read_installed_plugins)" || die "could not list installed Claude plugins"
+  if jq -e --arg id "$plugin_id" 'any(.[]; .id == $id)' <<<"$installed" >/dev/null; then
+    printf '[plugin] uninstall %s\n' "$plugin_id"
+    claude_plugin uninstall "$plugin_id" --scope user
+  fi
+  # shellcheck disable=SC2016
+  write_manifest '.plugins |= map(select(. != $plugin))' --arg plugin "$plugin_id"
+}
+
+require_runtime
+command_name="${1:-}"
+shift || true
+case "$command_name" in
+  add) add_plugin "$@" ;;
+  list) [[ $# -eq 0 ]] || { usage >&2; exit 2; }; list_plugins ;;
+  sync|update) [[ $# -eq 0 ]] || { usage >&2; exit 2; }; sync_plugins ;;
+  remove) remove_plugin "$@" ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

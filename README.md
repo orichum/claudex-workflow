@@ -90,7 +90,7 @@ claudex-login claude
 claudex-doctor
 ```
 
-The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. The installer does not patch any upstream package source or installed package file.
+The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, synchronizes declared Claude Code plugins, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. The installer does not patch any upstream package source or installed package file.
 
 To update an existing checkout:
 
@@ -142,6 +142,42 @@ claudex-doctor       # configuration, dependency, model, and service checks
 
 Inside `claudex-gpt`, `/model opus` selects `claude-opus-4-8`; `/model gpt-5.6-sol` returns to Sol. Do not set `CLAUDE_CODE_SUBAGENT_MODEL` globally—the controller owns specialist selection.
 
+## Manage Claudex plugins
+
+Claudex plugins are declared once in `controller/plugins.json` and installed in
+the workflow's isolated Claude configuration. The declaration is portable;
+marketplace checkouts, plugin packages, configuration, and credentials remain
+private under `CLAUDEX_DATA_DIR/claude-config`.
+
+```bash
+# The first plugin from a marketplace declares its portable source.
+claudex-plugin add github@claude-plugins-official \
+  --source anthropics/claude-plugins-official
+
+# Later plugins from the same marketplace do not need --source.
+claudex-plugin add another-plugin@claude-plugins-official
+
+claudex-plugin list
+claudex-plugin sync       # install missing plugins and upgrade existing ones
+claudex-plugin update     # explicit alias for sync
+claudex-plugin remove github@claude-plugins-official
+```
+
+`add` validates and atomically updates the repository declaration before
+synchronizing the isolated installation. `remove` targets only the exact
+declared plugin. `sync` registers or updates marketplaces, installs missing
+plugins, updates installed plugins to the marketplace's current release, and
+enables them. It does not silently uninstall undeclared machine-local plugins.
+An empty declaration performs no network work.
+
+Every `./install.sh` run performs the same sync, so a fresh clone converges and
+later installer runs upgrade declared plugins without repository version pins.
+Plugin code itself is never modified. Review a plugin before declaring it:
+always-loaded skills, hooks, agents, and schemas can increase token usage or
+change session behavior. All installed plugin agents remain subject to the
+orchestration allowlist, and plugin-provided MCP servers remain subject to
+strict per-session MCP configuration.
+
 ## Manage workspace contexts
 
 Map a top-level parent such as `~/xebia` or `~/complion` once; every repository below it inherits that mapping. The parent itself does not need to be a Git repository.
@@ -158,7 +194,7 @@ claudex-context validate
 
 `add` requires an existing root. Unless overridden, it creates `~/.mempalace/palaces/<root-name>` with `<root-name>` as the wing. It validates first, mines each outermost canonical repository into the configured MemPalace wing, initializes or updates code-only Graphify in every current repository and submodule, installs Graphify Git hooks, and commits the mapping only after success. If no Git repository exists, MemPalace mines the configured root. Context mutations are locked and written atomically; duplicate, overlapping, symlinked, or unsafe paths are rejected before filesystem changes.
 
-`populate` is the explicit, idempotent refresh for repositories cloned later. It uses Graphify `--code-only`; Graphify Git hooks then maintain current code after Git events. MemPalace is not mined on every commit, and population does not run as a service. Existing contexts should run `claudex-context populate ~/work/acme` once after upgrading to this feature.
+`populate` is the explicit, idempotent refresh for repositories cloned later. It uses Graphify `--code-only`; Graphify Git hooks then maintain current code after Git events. MemPalace is not mined on every commit, and population does not run as a service. During MemPalace mining, the workflow excludes `graphify-out/` in memory so generated graphs are not embedded back into project memory. It does not create or edit project ignore files or patch MemPalace. Existing contexts should run `claudex-context populate ~/work/acme` once after upgrading to this feature.
 
 Repository identity comes from Git's common directory, not just its filesystem path. Discovery skips linked worktrees when their primary checkout is already in the context root, preventing the same repository from being mined and graphified twice. A linked worktree remains eligible when it is the only checkout inside the configured root; if several linked checkouts are present without the primary, one deterministic checkout represents the repository. Real submodules remain separate repositories.
 
@@ -234,7 +270,7 @@ OAuth credentials, downloaded binaries, generated configuration, model generatio
 ${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow
 ```
 
-`claudex-gpt` uses an isolated `CLAUDE_CONFIG_DIR`, so normal Claude settings and claude.ai login configuration are not replaced. Headroom's executable and Python environment live below `CLAUDEX_DATA_DIR/headroom`; existing global Headroom installations are left untouched. LaunchAgent and systemd service definitions live in their OS configuration directories.
+`claudex-gpt` uses an isolated `CLAUDE_CONFIG_DIR`, so normal Claude settings, plugins, and claude.ai login configuration are not replaced. Declared plugin packages remain in the isolated configuration rather than the checkout. Headroom's executable and Python environment live below `CLAUDEX_DATA_DIR/headroom`; existing global Headroom installations are left untouched. LaunchAgent and systemd service definitions live in their OS configuration directories.
 
 The repository stores no credentials, generated archives, project memories, or Graphify graphs. There are no persistent backups. Destructive, production, authentication, and other high-impact external writes still require explicit authority.
 

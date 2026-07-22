@@ -214,6 +214,30 @@ class ContextPopulationDiscoveryTests(unittest.TestCase):
 
 
 class ContextPopulationRunnerTests(unittest.TestCase):
+    def test_run_observes_lines_while_retaining_captured_output(self):
+        observed = []
+        completed = _run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "print('one', flush=True); "
+                    "print('warning', file=sys.stderr, flush=True); "
+                    "print('two', flush=True)"
+                ),
+            ],
+            line_observer=lambda stream, line: observed.append((stream, line)),
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "one\ntwo\n")
+        self.assertEqual(completed.stderr, "warning\n")
+        self.assertCountEqual(
+            observed,
+            [("stdout", "one"), ("stdout", "two"), ("stderr", "warning")],
+        )
+
     def test_run_uses_array_execution_and_translates_os_errors(self):
         process = mock.Mock()
         process.communicate.return_value = ("ok", "")
@@ -229,6 +253,7 @@ class ContextPopulationRunnerTests(unittest.TestCase):
         popen.assert_called_once_with(
             ["git", "status"],
             cwd=working_directory,
+            env=None,
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -328,6 +353,7 @@ class ContextPopulationExecutionTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.tool_directory = tempfile.TemporaryDirectory()
+        self.fake_package_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name).resolve()
         self.palace = self.root / "palace"
         self.calls_path = self.root / "calls.jsonl"
@@ -335,11 +361,19 @@ class ContextPopulationExecutionTests(unittest.TestCase):
         self.environ = {
             "PATH": f"{self.tool_directory.name}{os.pathsep}{self.original_path}",
             "CONTEXT_POPULATION_CALL_LOG": str(self.calls_path),
+            "PYTHONPATH": self.fake_package_directory.name,
         }
+        fake_mempalace = Path(self.fake_package_directory.name) / "mempalace"
+        fake_mempalace.mkdir()
+        (fake_mempalace / "__init__.py").write_text("", encoding="utf-8")
+        (fake_mempalace / "palace.py").write_text(
+            'SKIP_DIRS = {"existing-generated"}\n', encoding="utf-8"
+        )
         self.write_tool("mempalace")
         self.write_tool("graphify")
 
     def tearDown(self):
+        self.fake_package_directory.cleanup()
         self.tool_directory.cleanup()
         self.temporary_directory.cleanup()
 
@@ -353,8 +387,18 @@ import sys
 from pathlib import Path
 
 tool = Path(sys.argv[0]).name
+call = {"tool": tool, "args": sys.argv[1:], "cwd": os.getcwd()}
+if tool == "mempalace" and os.environ.get("CONTEXT_POPULATION_RECORD_MEMPALACE_ENV"):
+    from mempalace.palace import SKIP_DIRS
+    call["generated_exclusion"] = os.environ.get(
+        "CLAUDEX_MEMPALACE_EXCLUDE_GENERATED"
+    )
+    call["dont_write_bytecode"] = os.environ.get("PYTHONDONTWRITEBYTECODE")
+    call["python_unbuffered"] = os.environ.get("PYTHONUNBUFFERED")
+    call["pythonpath"] = os.environ.get("PYTHONPATH")
+    call["skip_dirs"] = sorted(SKIP_DIRS)
 with Path(os.environ["CONTEXT_POPULATION_CALL_LOG"]).open("a", encoding="utf-8") as log:
-    log.write(json.dumps({"tool": tool, "args": sys.argv[1:], "cwd": os.getcwd()}) + "\\n")
+    log.write(json.dumps(call) + "\\n")
 
 if tool == "mempalace":
     if os.environ.get("CONTEXT_POPULATION_MEMPALACE_FAIL"):
@@ -544,6 +588,69 @@ if operation == "hook":
         ]
         self.assertEqual(mine_sources, [repository])
         self.assertEqual(graphify_sources, [repository, submodule])
+
+    def test_mempalace_mine_excludes_graphify_output_without_editing_repository(self):
+        repository = self.root / "service"
+        self.init_git(repository)
+        generated = repository / "graphify-out"
+        generated.mkdir()
+        (generated / "graph.json").write_text(
+            json.dumps({"nodes": [{"id": "generated"}]}), encoding="utf-8"
+        )
+        source = repository / "service.py"
+        source.write_text("print('source')\n", encoding="utf-8")
+
+        with mock.patch.dict(
+            os.environ,
+            {**self.environ, "CONTEXT_POPULATION_RECORD_MEMPALACE_ENV": "1"},
+            clear=False,
+        ):
+            context_population.populate_context(
+                self.root, self.palace, "acme"
+            )
+
+        mine_call = next(
+            call for call in self.read_calls()
+            if call["tool"] == "mempalace" and "mine" in call["args"]
+        )
+        self.assertEqual(mine_call["generated_exclusion"], "1")
+        self.assertEqual(mine_call["dont_write_bytecode"], "1")
+        self.assertEqual(mine_call["python_unbuffered"], "1")
+        self.assertEqual(
+            mine_call["skip_dirs"], ["existing-generated", "graphify-out"]
+        )
+        self.assertTrue(
+            mine_call["pythonpath"].split(os.pathsep)[0].endswith(
+                "integrations/mempalace_sitecustomize"
+            )
+        )
+        self.assertFalse((repository / ".gitignore").exists())
+        self.assertEqual(source.read_text(encoding="utf-8"), "print('source')\n")
+
+    def test_mempalace_progress_reports_first_five_percent_and_final(self):
+        messages = []
+        reporter = context_population._MempalaceProgress(
+            "[mempalace 1/4]", messages.append, started=10.0
+        )
+        with mock.patch.object(
+            context_population.time, "monotonic", return_value=20.0
+        ):
+            for current in (1, 4, 5, 6, 10, 100):
+                reporter(
+                    "stdout",
+                    f"  + [{current:4}/100] file-{current}.py +3",
+                )
+            reporter("stderr", "unrelated warning")
+            reporter("stdout", "unrelated output")
+
+        self.assertEqual(len(messages), 4)
+        self.assertIn("1/100 (1%)", messages[0])
+        self.assertIn("5/100 (5%)", messages[1])
+        self.assertIn("10/100 (10%)", messages[2])
+        self.assertIn("100/100 (100%)", messages[3])
+        self.assertTrue(
+            all("00:10 elapsed" in message for message in messages)
+        )
 
     def test_rejects_nested_linked_worktree_before_mempalace_scan(self):
         primary = self.root
