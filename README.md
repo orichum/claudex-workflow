@@ -185,6 +185,7 @@ Map a top-level parent such as `~/xebia` or `~/complion` once; every repository 
 ```bash
 claudex-context list
 claudex-context add ~/work/acme --docker acme
+claudex-context add ~/work/no-docker
 claudex-context populate ~/work/acme
 claudex-context update ~/work/acme --docker acme-prod --wing production
 claudex-context remove ~/work/acme       # prompts for REMOVE
@@ -192,7 +193,7 @@ claudex-context remove ~/work/acme --yes
 claudex-context validate
 ```
 
-`add` requires an existing root. Unless overridden, it creates `~/.mempalace/palaces/<root-name>` with `<root-name>` as the wing. It validates first, mines each outermost canonical repository into the configured MemPalace wing, initializes or updates code-only Graphify in every current repository and submodule, installs Graphify Git hooks, and commits the mapping only after success. If no Git repository exists, MemPalace mines the configured root. Context mutations are locked and written atomically; duplicate, overlapping, symlinked, or unsafe paths are rejected before filesystem changes.
+`add` requires an existing root. `--docker` is optional; when omitted, Docker MCP is not added to that project's strict session configuration. Unless overridden, `add` creates `~/.mempalace/palaces/<root-name>` with `<root-name>` as the wing. It validates first, mines each outermost canonical repository into the configured MemPalace wing, initializes or updates code-only Graphify in every current repository and submodule, installs Graphify Git hooks, and commits the mapping only after success. If no Git repository exists, MemPalace mines the configured root. Context mutations are locked and written atomically; duplicate, overlapping, symlinked, or unsafe paths are rejected before filesystem changes.
 
 `populate` is the explicit, idempotent refresh for repositories cloned later. It uses Graphify `--code-only`; Graphify Git hooks then maintain current code after Git events. MemPalace is not mined on every commit, and population does not run as a service. During MemPalace mining, the workflow excludes `graphify-out/` in memory so generated graphs are not embedded back into project memory. It does not create or edit project ignore files or patch MemPalace. Existing contexts should run `claudex-context populate ~/work/acme` once after upgrading to this feature.
 
@@ -249,14 +250,14 @@ Start `claudex-gpt` anywhere below a registered workspace root. The longest matc
 flowchart LR
     Cwd["Current directory"] --> Match["Longest workspace-root match"]
     Match --> Session["Strict per-session MCP config"]
-    Session --> Docker["Mapped Docker profile"]
+    Session --> Docker["Mapped Docker profile (when configured)"]
     Session --> Memory["Bound MemPalace wing"]
     Session --> Graph{"graphify-out/graph.json exists?"}
     Graph -->|"Yes"| Graphify["Graphify MCP"]
     Graph -->|"No"| Skip["No Graphify schema"]
 ```
 
-- **Docker MCP** runs the mapped `docker mcp gateway` profile. Normal create, update, comment, delete, and transition tools remain available; Claude Code permissions still govern writes.
+- **Docker MCP** runs the mapped `docker mcp gateway` profile when one is configured. Normal create, update, comment, delete, and transition tools remain available; Claude Code permissions still govern writes.
 - **MemPalace** is bound to the verified palace and wing for that workspace. The controller consults it when durable decisions or project conventions matter rather than loading memory for every request.
 - **Graphify** is exposed only when the current Git repository has `graphify-out/graph.json` and `graphify-mcp` is installed. Its official Git hook is checked automatically before the session.
 

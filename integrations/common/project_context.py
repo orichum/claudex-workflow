@@ -97,6 +97,14 @@ def _require_non_blank(value: object, label: str) -> str:
     return value
 
 
+def _require_optional_non_blank(
+    value: object, label: str
+) -> Optional[str]:
+    if value is None:
+        return None
+    return _require_non_blank(value, label)
+
+
 def _structural_path(value: object, home: Path, label: str) -> Path:
     value = _require_non_blank(value, label)
     if value == "~" or value.startswith("~/"):
@@ -154,7 +162,7 @@ def _validate_config_value(raw: object, home: Path) -> None:
         )
         root = _structural_path(context["root"], home, "root")
         palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
-        _require_non_blank(context["dockerProfile"], "dockerProfile")
+        _require_optional_non_blank(context["dockerProfile"], "dockerProfile")
         memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
         if any(_contains(existing_root, root) or _contains(root, existing_root)
                for existing_root in lexical_roots):
@@ -233,7 +241,7 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
         except (OSError, RuntimeError):
             palace_real = None
 
-        docker_profile = _require_non_blank(
+        docker_profile = _require_optional_non_blank(
             context["dockerProfile"], "dockerProfile"
         )
         memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
@@ -485,7 +493,10 @@ def _render_context_table(contexts: list[dict]) -> str:
         ("MEMPALACE PATH", "memoryPalace"),
         ("MEMPALACE WING", "memoryWing"),
     )
-    rows = [tuple(context[key] for _, key in columns) for context in contexts]
+    rows = [
+        tuple("—" if context[key] is None else context[key] for _, key in columns)
+        for context in contexts
+    ]
     widths = [
         max([len(header), *(len(row[index]) for row in rows)])
         for index, (header, _) in enumerate(columns)
@@ -513,7 +524,7 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     commands.add_parser("list")
     add = commands.add_parser("add")
     add.add_argument("root")
-    add.add_argument("--docker", required=True)
+    add.add_argument("--docker")
     add.add_argument("--palace")
     add.add_argument("--wing")
     populate = commands.add_parser("populate")

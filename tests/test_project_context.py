@@ -554,6 +554,16 @@ raise SystemExit(0)
         self.assertEqual(self.load_contexts()[0]["dockerProfile"], "docker-prod")
         self.assertEqual(self.load_contexts()[0]["memoryWing"], "prod")
 
+    def test_add_without_docker_omits_profile_and_renders_placeholder(self):
+        added = self.run_context("add", str(self.workspace))
+
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertIsNone(self.load_contexts()[0]["dockerProfile"])
+
+        listed = self.run_context("list")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("| —", listed.stdout)
+
     def test_add_populates_before_committing_mapping(self):
         added = self.run_context("add", str(self.workspace), "--docker", "dev")
 

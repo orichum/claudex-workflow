@@ -36,6 +36,6 @@ When Graphify is present for the current repository, query it before broad raw
 codebase search. Use MemPalace automatically when earlier decisions or durable
 project conventions matter, and save only concise durable decisions—not
 transcripts or routine progress. Use the Docker MCP profile selected for the
-current parent workspace when its tools are relevant. Routine create, update,
-comment, delete, and transition operations are available; obtain confirmation
+current parent workspace, when one is configured and its tools are relevant.
+Routine create, update, comment, delete, and transition operations are available; obtain confirmation
 before destructive, production, or otherwise high-impact external writes.

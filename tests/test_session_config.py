@@ -132,6 +132,18 @@ class SessionConfigTests(unittest.TestCase):
         )
         self.assertEqual(verified, session)
 
+    def test_context_without_docker_profile_omits_docker_mcp(self) -> None:
+        document = json.loads(self.config_path.read_text(encoding="utf-8"))
+        document["contexts"][0]["dockerProfile"] = None
+        self.config_path.write_text(json.dumps(document), encoding="utf-8")
+
+        session = self.create()
+        context = json.loads(session.context_file.read_text(encoding="utf-8"))
+        servers = json.loads(session.mcp_file.read_text(encoding="utf-8"))["mcpServers"]
+        self.assertIsNone(context["route"]["dockerProfile"])
+        self.assertNotIn("docker", servers)
+        self.assertIn("mempalace", servers)
+
     def test_explicit_private_data_root_keeps_state_outside_checkout(self) -> None:
         data_root = self.fixture / "data-root"
         data_root.mkdir(mode=0o700)
