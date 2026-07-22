@@ -27,10 +27,11 @@ def main() -> int:
         if not isinstance(repo_value, str) or not repo_value:
             return 0
         repo = Path(repo_value).resolve(strict=True)
-        graph = (repo / "graphify-out" / "graph.json").resolve(strict=True)
-        graph.relative_to(repo)
-        if not graph.is_file():
+        graph_path = repo / "graphify-out" / "graph.json"
+        if not graph_path.is_file():
             return 0
+        graph = graph_path.resolve(strict=True)
+        graph.relative_to(repo)
         graphify = shutil.which("graphify")
         if graphify is None:
             return 0

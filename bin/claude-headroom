@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+if ! IFS=$'\t' read -r _ HEADROOM_PORT \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
+  printf 'ERROR: invalid Claudex service port configuration\n' >&2
+  exit 1
+fi
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$HEADROOM_PORT"
 CLAUDE_BIN="$(command -v claude)" || {
   printf 'ERROR: claude is not installed or not on PATH\n' >&2
   exit 1

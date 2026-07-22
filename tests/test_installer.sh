@@ -30,6 +30,139 @@ trap 'rm -rf -- "$fixture"' EXIT
 source "$ROOT/lib/workflow.sh"
 data_root="$fixture/data with % and \$"
 
+for valid_port in 1024 8317 8787 65535; do
+  valid_service_port "$valid_port"
+done
+for invalid_port in '' 0 1023 65536 abc '8317 '; do
+  if valid_service_port "$invalid_port"; then
+    printf 'invalid service port was accepted: %q\n' "$invalid_port" >&2
+    exit 1
+  fi
+done
+
+ports_root="$fixture/ports"
+write_service_ports "$ports_root" 18317 18787
+[[ "$(read_service_ports "$ports_root")" == $'18317\t18787' ]]
+[[ "$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' \
+  "$(service_ports_file "$ports_root")")" == 600 ]]
+[[ "$(read_service_ports "$fixture/no-ports-yet")" == $'8317\t8787' ]]
+printf '{"cliproxyPort": 8787, "headroomPort": 8787}\n' \
+  >"$(service_ports_file "$ports_root")"
+if read_service_ports "$ports_root" >/dev/null 2>&1; then
+  printf 'duplicate service ports were accepted\n' >&2
+  exit 1
+fi
+write_service_ports "$ports_root" 18317 18787
+
+listener_port_file="$fixture/listener.port"
+python3 - "$listener_port_file" <<'PY' &
+import socket
+import sys
+import time
+
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen()
+open(sys.argv[1], "w", encoding="utf-8").write(str(listener.getsockname()[1]))
+time.sleep(30)
+PY
+listener_pid=$!
+for _ in {1..50}; do
+  [[ -s "$listener_port_file" ]] && break
+  sleep 0.05
+done
+occupied_port="$(cat "$listener_port_file")"
+if port_is_available "$occupied_port"; then
+  printf 'occupied loopback port was reported available\n' >&2
+  exit 1
+fi
+available_port="$(next_available_port "$occupied_port")"
+valid_service_port "$available_port"
+[[ "$available_port" -gt "$occupied_port" ]]
+port_is_available "$available_port"
+[[ "$(select_service_port \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" 0 true false)" == \
+  "$occupied_port" ]]
+if select_service_port \
+    CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" 0 false false \
+    >"$fixture/noninteractive-port.stdout" 2>"$fixture/noninteractive-port.stderr"; then
+  printf 'non-interactive foreign port collision was accepted\n' >&2
+  exit 1
+fi
+rg -Fq "port $occupied_port is occupied" "$fixture/noninteractive-port.stderr"
+rg -Fq 'CLAUDEX_CLIPROXY_PORT' "$fixture/noninteractive-port.stderr"
+[[ "$(select_service_port \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" 0 false true \
+  2>"$fixture/interactive-port.stderr" <<<"$available_port")" == "$available_port" ]]
+rg -Fq "port $occupied_port is occupied" "$fixture/interactive-port.stderr"
+kill "$listener_pid"
+wait "$listener_pid" 2>/dev/null || true
+
+owned_cliproxy="$fixture/owned-cliproxy.service"
+printf '%s\n' \
+  "ExecStart=$(systemd_quote "$data_root/bin/cli-proxy-api") --config $(systemd_quote "$data_root/cliproxy.yaml")" \
+  >"$owned_cliproxy"
+cliproxy_service_is_owned "$owned_cliproxy" "$data_root"
+printf 'ExecStart=/foreign/cli-proxy-api --config /foreign/config\n' \
+  >"$fixture/foreign-cliproxy.service"
+if cliproxy_service_is_owned "$fixture/foreign-cliproxy.service" "$data_root"; then
+  printf 'foreign CLIProxyAPI service was accepted as workflow-owned\n' >&2
+  exit 1
+fi
+printf '%s\n' \
+  '# expected strings hidden in comments are not ownership' \
+  "# $data_root/bin/cli-proxy-api --config $data_root/cliproxy.yaml" \
+  'ExecStart=/foreign/cli-proxy-api --config /foreign/config' \
+  >"$fixture/deceptive-cliproxy.service"
+if cliproxy_service_is_owned "$fixture/deceptive-cliproxy.service" "$data_root"; then
+  printf 'comment strings spoofed CLIProxyAPI ownership\n' >&2
+  exit 1
+fi
+
+owned_headroom="$fixture/owned-headroom.service"
+printf '%s\n' \
+  'Description=Headroom proxy for Claudex' \
+  'ExecStart=/global/headroom proxy --host 127.0.0.1 --port 8787 --mode token --no-cache --intercept-tool-results --lossless --code-aware' \
+  "Environment=\"HEADROOM_CONFIG_DIR=$data_root/headroom/config\"" \
+  "Environment=\"HEADROOM_WORKSPACE_DIR=$data_root/headroom/state\"" \
+  >"$owned_headroom"
+headroom_service_is_owned "$owned_headroom" "$data_root" legacy
+printf 'ExecStart=/foreign/headroom proxy --host 127.0.0.1 --port 8787\n' \
+  >"$fixture/foreign-headroom.service"
+if headroom_service_is_owned \
+    "$fixture/foreign-headroom.service" "$data_root" legacy; then
+  printf 'foreign Headroom service was accepted as workflow-owned\n' >&2
+  exit 1
+fi
+printf '%s\n' \
+  'Description=Unrelated service' \
+  '# proxy 127.0.0.1' \
+  "# HEADROOM_CONFIG_DIR=$data_root/headroom/config" \
+  "# HEADROOM_WORKSPACE_DIR=$data_root/headroom/state" \
+  'ExecStart=/foreign/headroom' >"$fixture/deceptive-headroom.service"
+if headroom_service_is_owned \
+    "$fixture/deceptive-headroom.service" "$data_root" legacy; then
+  printf 'comment strings spoofed Headroom ownership\n' >&2
+  exit 1
+fi
+
+summary="$(print_install_summary \
+  /portable/checkout /portable/data /portable/user-bin \
+  /portable/data/bin/claudex /portable/data/bin/cli-proxy-api \
+  /portable/data/headroom/bin/headroom /portable/user-bin/mempalace-mcp \
+  /portable/user-bin/graphify-mcp /portable/cliproxy.service \
+  /portable/headroom.service 18317 18787 reused reconciled)"
+for summary_value in \
+  '/portable/checkout' '/portable/data' '/portable/user-bin' \
+  '/portable/data/bin/claudex' '/portable/data/bin/cli-proxy-api' \
+  '/portable/data/headroom/bin/headroom' '/portable/user-bin/mempalace-mcp' \
+  '/portable/user-bin/graphify-mcp' '/portable/cliproxy.service' \
+  '/portable/headroom.service' '127.0.0.1:18317' '127.0.0.1:18787' \
+  'reused' 'reconciled'
+do
+  grep -Fq "$summary_value" <<<"$summary"
+done
+
 ignore_fixture="$fixture/ignore-surface"
 install -d "$ignore_fixture/bin" "$ignore_fixture/runtime/auth" \
   "$ignore_fixture/logs" "$ignore_fixture/backups"
@@ -593,9 +726,13 @@ if cliproxy_models_response_is_ready "$fixture/models-invalid.json"; then
   exit 1
 fi
 
-install -d "$fixture/release/archive" "$fixture/staging" "$fixture/mock-bin"
-printf '#!/usr/bin/env bash\nprintf "cli-proxy-api 1.2.3\\n"\n' \
-  >"$fixture/release/archive/cli-proxy-api"
+cliproxy_destination="$fixture/install/cli-proxy-api"
+install -d "$fixture/release/archive" "$fixture/staging" \
+  "$fixture/mock-bin" "$(dirname "$cliproxy_destination")"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "CLIProxyAPI Version: 1.2.3, Commit: test, BuiltAt: test\n"' \
+  '[[ "${1:-}" == --help ]]' >"$fixture/release/archive/cli-proxy-api"
 chmod 0755 "$fixture/release/archive/cli-proxy-api"
 tar -czf "$fixture/release/asset.tar.gz" -C "$fixture/release/archive" cli-proxy-api
 release_sha="$(sha256_file "$fixture/release/asset.tar.gz")"
@@ -623,17 +760,17 @@ stage_state="$(PATH="$fixture/mock-bin:$PATH" \
   MOCK_RELEASE_JSON="$fixture/release/release.json" \
   MOCK_RELEASE_ARCHIVE="$fixture/release/asset.tar.gz" \
   stage_latest_github_binary router-for-me/CLIProxyAPI CLIProxyAPI_ \
-    _linux_amd64.tar.gz cli-proxy-api "$fixture/destination" "$fixture/staging")"
+    _linux_amd64.tar.gz cli-proxy-api "$cliproxy_destination" "$fixture/staging")"
 [[ "$(jq -r .version <<<"$stage_state")" == 1.2.3 ]]
 [[ "$(jq -r .changed <<<"$stage_state")" == true ]]
 staged_binary="$(jq -r .staged_path <<<"$stage_state")"
-[[ ! -e "$fixture/destination" && -x "$staged_binary" ]]
-activate_staged_file "$staged_binary" "$fixture/destination" 0755
+[[ ! -e "$cliproxy_destination" && -x "$staged_binary" ]]
+activate_staged_file "$staged_binary" "$cliproxy_destination" 0755
 unchanged_state="$(PATH="$fixture/mock-bin:$PATH" \
   MOCK_RELEASE_JSON="$fixture/release/release.json" \
   MOCK_RELEASE_ARCHIVE="$fixture/release/asset.tar.gz" \
   stage_latest_github_binary router-for-me/CLIProxyAPI CLIProxyAPI_ \
-    _linux_amd64.tar.gz cli-proxy-api "$fixture/destination" "$fixture/staging-2")"
+    _linux_amd64.tar.gz cli-proxy-api "$cliproxy_destination" "$fixture/staging-2")"
 [[ "$(jq -r .changed <<<"$unchanged_state")" == false ]]
 [[ "$(jq -r .staged_path <<<"$unchanged_state")" == null ]]
 
@@ -772,8 +909,10 @@ if mutable_refs="$(rg -n '\$WORKFLOW_ROOT/(runtime|logs|backups)|\$WORKFLOW_ROOT
 fi
 
 render_headroom_launch_agent \
-  "$fixture/headroom.plist" "$data_root" /portable/bin/headroom /portable/ca.pem
+  "$fixture/headroom.plist" "$data_root" /portable/bin/headroom /portable/ca.pem 18787
 rg -Fq '/portable/bin/headroom' "$fixture/headroom.plist"
+rg -q '<string>com.user.claudex-headroom</string>' "$fixture/headroom.plist"
+rg -q '<string>18787</string>' "$fixture/headroom.plist"
 rg -q '<string>token</string>' "$fixture/headroom.plist"
 rg -q '<string>--lossless</string>' "$fixture/headroom.plist"
 rg -q '<string>--code-aware</string>' "$fixture/headroom.plist"
@@ -787,7 +926,7 @@ special_ca="$special_root/ca & < \"bundle\" \\ % \$.pem"
 HOME="$special_root/home & < \"user\" \\ % \$" \
   render_headroom_launch_agent \
     "$fixture/headroom-special.plist" "$special_root" \
-    "$special_binary" "$special_ca"
+    "$special_binary" "$special_ca" 18787
 python3 - "$fixture/headroom-special.plist" <<'PY'
 import sys
 from xml.etree import ElementTree
@@ -809,13 +948,15 @@ rg -q '&lt;' "$fixture/cliproxy-special.plist"
 rg -q '&quot;' "$fixture/cliproxy-special.plist"
 
 render_headroom_systemd_user_unit \
-  "$fixture/headroom.service" "$data_root" /portable/bin/headroom /portable/ca.pem
+  "$fixture/headroom.service" "$data_root" /portable/bin/headroom /portable/ca.pem 18787
+rg -q '^Description=Claudex Headroom proxy$' "$fixture/headroom.service"
+rg -q -- '--port 18787' "$fixture/headroom.service"
 rg -q -- '--mode token' "$fixture/headroom.service"
 rg -q -- '--lossless' "$fixture/headroom.service"
 rg -q '^Environment="HEADROOM_OUTPUT_SHAPER=0"$' "$fixture/headroom.service"
 render_headroom_systemd_user_unit \
   "$fixture/headroom-special.service" "$special_root" \
-  "$special_binary" "$special_ca"
+  "$special_binary" "$special_ca" 18787
 rg -Fq "ExecStart=$(systemd_quote "$special_binary") proxy" \
   "$fixture/headroom-special.service"
 for dynamic_environment in \
@@ -864,12 +1005,34 @@ fi
 rg -q 'snapshot_path .*headroom-service' "$ROOT/install.sh"
 rg -Fq 'snapshot_path_matches "$headroom_service_file"' "$ROOT/install.sh"
 rg -Fq 'uv tool install --upgrade mempalace' "$ROOT/install.sh"
-rg -Fq 'mempalace-mcp --version' "$ROOT/install.sh"
-rg -Fq 'uv tool install --upgrade graphifyy' "$ROOT/install.sh"
-rg -Fq 'graphify-mcp --version' "$ROOT/install.sh"
-rg -Fq "uv tool install --upgrade 'headroom-ai[all]'" "$ROOT/lib/workflow.sh"
+rg -Fq -- '--require-tool mempalace_get_taxonomy' "$ROOT/install.sh"
+rg -Fq -- '--require-tool mempalace_checkpoint' "$ROOT/install.sh"
+rg -Fq "uv tool install --upgrade 'graphifyy[mcp]'" "$ROOT/install.sh"
+rg -Fq 'integrations/common/mcp_probe.py' "$ROOT/install.sh"
+rg -Fq 'integrations/common/mcp_probe.py' "$ROOT/doctor.sh"
+rg -Fq -- '--require-tool query_graph' "$ROOT/install.sh"
+rg -Fq -- '--require-tool graph_stats' "$ROOT/doctor.sh"
+rg -Fq -- '--require-tool mempalace_get_taxonomy' "$ROOT/doctor.sh"
+rg -Fq -- '--require-tool mempalace_checkpoint' "$ROOT/doctor.sh"
+rg -Fq 'claudex-audit-model-does-not-exist' "$ROOT/doctor.sh"
+rg -Fq 'X-Headroom-Base-Url: http://127.0.0.1:$CLIPROXY_PORT' "$ROOT/doctor.sh"
+rg -Fq 'UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/headroom/tools"' "$ROOT/install.sh"
+rg -Fq 'UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/headroom/bin"' "$ROOT/install.sh"
+rg -Fq 'com.user.claudex-headroom' "$ROOT/install.sh"
+rg -Fq 'claudex-headroom.service' "$ROOT/install.sh"
+rg -Fq 'select_service_port' "$ROOT/install.sh"
+rg -Fq 'legacy_headroom_service_owned' "$ROOT/install.sh"
+rg -Fq 'refusing to overwrite unknown service file' "$ROOT/install.sh"
+rg -Fq 'print_install_summary' "$ROOT/install.sh"
+rg -Fq 'wait_for_cliproxy "$PRIOR_CLIPROXY_PORT"' "$ROOT/install.sh"
+rg -Fq '"$legacy_headroom_running_version" "$PRIOR_HEADROOM_PORT"' \
+  "$ROOT/install.sh"
+rg -Fq '"$headroom_service_file" "$WORKFLOW_DATA_ROOT" new' "$ROOT/install.sh"
+rg -Fq '"$legacy_headroom_service_file" "$WORKFLOW_DATA_ROOT" legacy' \
+  "$ROOT/install.sh"
 rg -Fq 'upgrade_headroom_distribution' "$ROOT/install.sh"
 rg -Fq 'reconcile_headroom_transaction' "$ROOT/install.sh"
+rg -Fq 'preflight_headroom_binary' "$ROOT/install.sh"
 python3 - "$ROOT/install.sh" <<'PY'
 import sys
 
@@ -881,10 +1044,98 @@ cliproxy_activation = source.index(
     'if [[ "$cliproxy_binary_changed" == true ]]', version_read
 )
 discovery = source.index('source "$WORKFLOW_ROOT/discover-models.sh"', version_read)
-if not version_read < reconcile < disarm < cliproxy_activation < discovery:
+if not version_read < reconcile < cliproxy_activation < discovery < disarm:
     raise SystemExit(
-        "Headroom is not reconciled and disarmed before CLIProxy activation"
+        "Headroom rollback is not kept armed through CLIProxy activation"
     )
+preflight = source.index('preflight_headroom_binary ||', reconcile)
+legacy_stop = source.index('legacy_headroom_service_owned', preflight)
+if not reconcile < preflight < legacy_stop:
+    raise SystemExit("Headroom preflight does not precede legacy service cutover")
+PY
+python3 - "$ROOT/install.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+
+headroom = source.split(
+    'if [[ "$headroom_restart_required" == true ]]; then', 1
+)[1].split(
+    'if [[ "$cliproxy_binary_changed" == true ]]', 1
+)[0]
+for stop, start in (
+    (
+        'launchctl bootout "gui/$(id -u)" "$headroom_service_file"',
+        'launchctl bootstrap "gui/$(id -u)" "$headroom_service_file"',
+    ),
+    (
+        'systemctl --user stop claudex-headroom.service',
+        'systemctl --user start claudex-headroom.service',
+    ),
+):
+    if not (
+        headroom.index(stop)
+        < headroom.index('require_activation_port_available Headroom "$HEADROOM_PORT"')
+        < headroom.index(start)
+    ):
+        raise SystemExit("Headroom port is not rechecked after stop and before start")
+
+cliproxy = source.split(
+    'if [[ "$cliproxy_restart_required" == true ]]; then', 1
+)[1].split(
+    'for launcher in claudex-gpt', 1
+)[0]
+for stop, start in (
+    (
+        'launchctl bootout "gui/$(id -u)" "$service_file"',
+        'launchctl bootstrap "gui/$(id -u)" "$service_file"',
+    ),
+    (
+        'systemctl --user stop claudex-cliproxy.service',
+        'systemctl --user start claudex-cliproxy.service',
+    ),
+):
+    if not (
+        cliproxy.index(stop)
+        < cliproxy.index(
+            'require_activation_port_available CLIProxyAPI "$CLIPROXY_PORT"'
+        )
+        < cliproxy.index(start)
+    ):
+        raise SystemExit("CLIProxyAPI port is not rechecked after stop and before start")
+PY
+python3 - "$ROOT/install.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+snapshot = source.index('snapshot_path "$service_ports_path"')
+write = source.index('write_service_ports "$WORKFLOW_DATA_ROOT"')
+discovery = source.index(
+    'if ! CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint"; then', write
+)
+restore = source.index('restore_snapshot "$service_ports_path"')
+disarm = source.index('endpoint_transaction_active=false', discovery)
+if not snapshot < restore < write < discovery < disarm:
+    raise SystemExit("endpoint publication is not rollback-safe")
+if '[[ "$ports_changed" == true && -n "$prior_model_generation" ]]' not in source[discovery:disarm]:
+    raise SystemExit("changed ports do not make model discovery failure fatal")
+if 'CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint"' not in source[write:disarm]:
+    raise SystemExit("installer discovery can prune endpoint rollback state")
+if 'restore_model_config_generation' not in source[snapshot:write]:
+    raise SystemExit("endpoint rollback does not restore model publication")
+if 'prior_model_generation_snapshot' not in source[snapshot:write]:
+    raise SystemExit("prior model generation is not privately snapshotted")
+acquire_endpoint = source.index('acquire_endpoint_config_lock', snapshot)
+capture_prior = source.index('prior_model_generation="$(readlink', acquire_endpoint)
+release_endpoint = source.index('release_endpoint_config_lock', discovery)
+if not acquire_endpoint < capture_prior < write < discovery < disarm < release_endpoint:
+    raise SystemExit("endpoint model publication is not serialized through commit")
+overall_commit = source.index('WORKFLOW_TRANSACTION_ACTIVE=false', release_endpoint)
+if not release_endpoint < overall_commit:
+    raise SystemExit("cleanup is disarmed before the endpoint lock is released")
+prune = source.index('prune_model_config_generations', disarm)
+if not disarm < prune:
+    raise SystemExit("prior model generation is pruned before endpoint commit")
 PY
 rg -Fq 'headroom --version' "$ROOT/install.sh"
 rg -q 'interrupt active Claudex sessions' "$ROOT/install.sh"
@@ -959,6 +1210,15 @@ required_copy = [
     "LaunchAgent",
     "systemd",
     "model generation",
+    "claudex-context populate",
+    "mines each outermost canonical repository",
+    "skips linked worktrees when their primary checkout is already in the context root",
+    "a skipped worktree nested inside a canonical memory source aborts before MemPalace starts",
+    "repositories cloned later",
+    "--code-only",
+    "does not run as a service",
+    "Repository discovery and elapsed heartbeats are visible by default",
+    "there is no `--verbose` mode to enable",
 ]
 for phrase in required_copy:
     if phrase not in normalized_readme:
@@ -979,5 +1239,12 @@ if expected_flow not in flow_block:
         "Headroom and CLIProxyAPI before provider routing"
     )
 PY
+for documented_runtime_detail in \
+  CLAUDEX_CLIPROXY_PORT CLAUDEX_HEADROOM_PORT service-ports.json \
+  com.user.claudex-headroom claudex-headroom.service \
+  'Installation locations'
+do
+  rg -Fq "$documented_runtime_detail" "$ROOT/README.md"
+done
 
 printf 'PASS: portable installer surface\n'

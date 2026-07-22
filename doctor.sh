@@ -25,6 +25,19 @@ trap cleanup_doctor_models EXIT
 check_ok() { printf 'OK   %s\n' "$1"; }
 check_fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
 
+service_ports_ok=true
+if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
+  service_ports_ok=false
+  CLIPROXY_PORT=8317
+  HEADROOM_PORT=8787
+fi
+if [[ "$service_ports_ok" == true ]]; then
+  check_ok "service ports are valid (CLIProxyAPI=$CLIPROXY_PORT, Headroom=$HEADROOM_PORT)"
+else
+  check_fail 'service port configuration is invalid'
+fi
+
 file_mode() {
   if stat -f '%Lp' "$1" >/dev/null 2>&1; then
     stat -f '%Lp' "$1"
@@ -107,6 +120,12 @@ fixture_palace="$fixture_home/palace"
 install -d -m 0755 "$fixture_workflow"
 install -d -m 0700 "$fixture_data"
 install -d -m 0700 "$fixture_home" "$fixture_project" "$fixture_palace"
+git init -q "$fixture_project"
+install -d -m 0755 "$fixture_project/graphify-out"
+jq -n '{
+  directed: false, multigraph: false, graph: {},
+  nodes: [{id: "claudex-audit", label: "claudex-audit"}], links: []
+}' >"$fixture_project/graphify-out/graph.json"
 install -d -m 0755 "$fixture_workflow/integrations/common"
 install -m 0644 \
   "$WORKFLOW_ROOT/integrations/__init__.py" \
@@ -121,6 +140,7 @@ jq -n \
   --arg root "$fixture_project" \
   '{contexts:[{root:$root,dockerProfile:"fixture",memoryPalace:$palace,memoryWing:"fixture"}]}' \
   >"$doctor_fixture/project-context.json"
+fixture_mcp=""
 if fixture_session_json="$({
   cd "$fixture_workflow"
   HOME="$fixture_home" PYTHONDONTWRITEBYTECODE=1 \
@@ -134,11 +154,40 @@ if fixture_session_json="$({
    [[ "$fixture_mcp" == "$fixture_data/state/sessions/"run.*/mcp.json ]] && \
    jq -e '
      (.mcpServers | type == "object") and
-     ([.mcpServers | keys[]] - ["docker", "mempalace", "graphify"] | length == 0)
+     ([.mcpServers | keys[]] - ["docker", "mempalace", "graphify"] | length == 0) and
+     (.mcpServers.mempalace | type == "object") and
+     (.mcpServers.graphify | type == "object")
    ' "$fixture_mcp" >/dev/null; then
   check_ok 'disposable strict MCP generation exposes only supported integrations'
 else
   check_fail 'disposable strict MCP generation failed or exposed an unsupported server'
+fi
+
+if [[ -n "$fixture_mcp" ]] && \
+   mempalace_command="$(jq -er '.mcpServers.mempalace.command' "$fixture_mcp" 2>/dev/null)" && \
+   mempalace_palace="$(jq -er '.mcpServers.mempalace.args[1]' "$fixture_mcp" 2>/dev/null)" && \
+   PYTHONDONTWRITEBYTECODE=1 python3 -B \
+     "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+     --require-tool mempalace_get_taxonomy \
+     --require-tool mempalace_search \
+     --require-tool mempalace_checkpoint \
+     -- "$mempalace_command" --palace "$mempalace_palace" >/dev/null 2>&1; then
+  check_ok 'MemPalace completes MCP initialization and exposes required tools'
+else
+  check_fail 'MemPalace MCP protocol readiness failed'
+fi
+
+if [[ -n "$fixture_mcp" ]] && \
+   graphify_command="$(jq -er '.mcpServers.graphify.command' "$fixture_mcp" 2>/dev/null)" && \
+   graphify_graph="$(jq -er '.mcpServers.graphify.args[1]' "$fixture_mcp" 2>/dev/null)" && \
+   PYTHONDONTWRITEBYTECODE=1 python3 -B \
+     "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+     --require-tool query_graph \
+     --require-tool graph_stats \
+     -- "$graphify_command" --graph "$graphify_graph" >/dev/null 2>&1; then
+  check_ok 'Graphify completes MCP initialization and exposes required tools'
+else
+  check_fail 'Graphify MCP protocol readiness failed'
 fi
 fixture_to_remove="$doctor_fixture"
 rm -rf -- "$fixture_to_remove"
@@ -260,7 +309,7 @@ else
   check_fail 'prompt-cache optimization is missing or leaks into Claudex GPT routing'
 fi
 
-for port in 8787 8317; do
+for port in "$HEADROOM_PORT" "$CLIPROXY_PORT"; do
   if command -v lsof >/dev/null 2>&1 && \
      lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
     listener="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -Fn | rg '^n' | head -1 | cut -c2-)"
@@ -278,15 +327,17 @@ for port in 8787 8317; do
 done
 
 installed_headroom_version="$(headroom_distribution_version \
-  "$(command -v headroom 2>/dev/null)" 2>/dev/null || true)"
-running_headroom_version="$(curl -fsS http://127.0.0.1:8787/health 2>/dev/null | jq -r '.version // empty' || true)"
+  "$WORKFLOW_DATA_ROOT/headroom/bin/headroom" 2>/dev/null || true)"
+running_headroom_version="$(curl -fsS \
+  "http://127.0.0.1:$HEADROOM_PORT/health" 2>/dev/null | \
+  jq -r '.version // empty' || true)"
 if [[ -n "$installed_headroom_version" && "$installed_headroom_version" == "$running_headroom_version" ]]; then
   check_ok "Headroom runtime matches installed version $installed_headroom_version"
 else
   check_fail "Headroom version drift (installed=${installed_headroom_version:-unknown}, running=${running_headroom_version:-unknown})"
 fi
 
-if curl -fsS http://127.0.0.1:8787/health 2>/dev/null | jq -e '
+if curl -fsS "http://127.0.0.1:$HEADROOM_PORT/health" 2>/dev/null | jq -e '
   .ready == true and .config.optimize == true and
   .config.cache == false and .config.memory == false and
   .config.code_graph == false and
@@ -299,7 +350,32 @@ else
   check_fail 'Headroom effective optimization policy has drifted'
 fi
 
-if curl --fail --silent --show-error http://127.0.0.1:8317/v1/models >"$models_response"; then
+headroom_audit_payload='{"model":"claudex-audit-model-does-not-exist","max_tokens":0,"messages":[]}'
+direct_audit_response="$(curl -sS --connect-timeout 1 --max-time 8 \
+  -H 'content-type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'x-api-key: claudex-passthrough' \
+  --data "$headroom_audit_payload" \
+  "http://127.0.0.1:$CLIPROXY_PORT/v1/messages" 2>/dev/null || true)"
+headroom_audit_response="$(curl -sS --connect-timeout 1 --max-time 8 \
+  -H 'content-type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'x-api-key: claudex-passthrough' \
+  -H "X-Headroom-Base-Url: http://127.0.0.1:$CLIPROXY_PORT" \
+  --data "$headroom_audit_payload" \
+  "http://127.0.0.1:$HEADROOM_PORT/v1/messages" 2>/dev/null || true)"
+if [[ -n "$direct_audit_response" && -n "$headroom_audit_response" ]] && \
+   [[ "$(jq -c '.error // empty' <<<"$direct_audit_response" 2>/dev/null)" == \
+      "$(jq -c '.error // empty' <<<"$headroom_audit_response" 2>/dev/null)" ]] && \
+   jq -e '.error.message == "unknown provider for model claudex-audit-model-does-not-exist"' \
+     <<<"$headroom_audit_response" >/dev/null 2>&1; then
+  check_ok 'Headroom forwards the Anthropic message route to CLIProxyAPI'
+else
+  check_fail 'Headroom-to-CLIProxyAPI message routing failed'
+fi
+
+if curl --fail --silent --show-error \
+    "http://127.0.0.1:$CLIPROXY_PORT/v1/models" >"$models_response"; then
   model_count="$(jq '[.data[]? | select(.id | startswith("gpt-"))] | length' "$models_response")"
   claude_model_count="$(jq '[.data[]? | select(.id | startswith("claude-"))] | length' "$models_response")"
   if [[ "$model_count" -gt 0 ]]; then

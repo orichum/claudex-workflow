@@ -97,8 +97,13 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/state" \
   "$WORKFLOW_DATA_ROOT/state/sessions" \
   "$WORKFLOW_DATA_ROOT/logs" \
+  "$WORKFLOW_DATA_ROOT/headroom/bin" \
   "$WORKFLOW_DATA_ROOT/headroom/config" \
-  "$WORKFLOW_DATA_ROOT/headroom/state"
+  "$WORKFLOW_DATA_ROOT/headroom/state" \
+  "$WORKFLOW_DATA_ROOT/headroom/tools"
+
+UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/headroom/tools"
+UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/headroom/bin"
 
 legacy_marker="$WORKFLOW_DATA_ROOT/.legacy-repo-state-migrated"
 if [[ ! -e "$legacy_marker" ]]; then
@@ -129,7 +134,8 @@ chmod 0755 "$WORKFLOW_ROOT/controller/plugin/scripts/"*.sh
 
 export PATH="$HOME/.local/bin:$PATH"
 headroom_prior_version=
-if headroom_prior_binary="$(command -v headroom 2>/dev/null)"; then
+headroom_prior_binary="$UV_TOOL_BIN_DIR/headroom"
+if [[ -x "$headroom_prior_binary" ]]; then
   headroom_prior_version="$(headroom_distribution_version "$headroom_prior_binary")" || \
     workflow_die "installed Headroom distribution version could not be read"
 fi
@@ -148,42 +154,142 @@ cliproxy_binary_changed="$(jq -r '.changed' <<<"$cliproxy_state")"
 claudex_binary_changed="$(jq -r '.changed' <<<"$claudex_state")"
 
 desired_cliproxy_config="$installer_temp/cliproxy.yaml"
-render_cliproxy_config "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/auth"
-chmod 0600 "$desired_cliproxy_config"
 
 if [[ "$platform" == darwin ]]; then
   service_file="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
   desired_service_file="$installer_temp/$SERVICE_LABEL.plist"
-  headroom_service_file="$HOME/Library/LaunchAgents/com.user.headroom-proxy.plist"
-  headroom_desired_service_file="$installer_temp/com.user.headroom-proxy.plist"
+  headroom_service_file="$HOME/Library/LaunchAgents/com.user.claudex-headroom.plist"
+  headroom_desired_service_file="$installer_temp/com.user.claudex-headroom.plist"
+  legacy_headroom_service_file="$HOME/Library/LaunchAgents/com.user.headroom-proxy.plist"
   service_mode=0644
   headroom_service_mode=0600
-  render_launch_agent "$desired_service_file" "$WORKFLOW_DATA_ROOT"
-  plutil -lint "$desired_service_file" >/dev/null
 else
   service_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-cliproxy.service"
   desired_service_file="$installer_temp/claudex-cliproxy.service"
-  headroom_service_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
-  headroom_desired_service_file="$installer_temp/headroom-proxy.service"
+  headroom_service_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-headroom.service"
+  headroom_desired_service_file="$installer_temp/claudex-headroom.service"
+  legacy_headroom_service_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
   service_mode=0600
   headroom_service_mode=0600
-  render_systemd_user_unit "$desired_service_file" "$WORKFLOW_DATA_ROOT"
 fi
 install -d -m 0755 "$(dirname "$service_file")" "$(dirname "$headroom_service_file")"
+
+cliproxy_service_was_present=false
+cliproxy_service_owned=false
+if [[ -e "$service_file" || -L "$service_file" ]]; then
+  cliproxy_service_was_present=true
+  cliproxy_service_is_owned "$service_file" "$WORKFLOW_DATA_ROOT" || \
+    workflow_die "refusing to overwrite unknown service file: $service_file"
+  cliproxy_service_owned=true
+fi
+headroom_service_was_present=false
+headroom_service_owned=false
+if [[ -e "$headroom_service_file" || -L "$headroom_service_file" ]]; then
+  headroom_service_was_present=true
+  headroom_service_is_owned \
+    "$headroom_service_file" "$WORKFLOW_DATA_ROOT" new || \
+    workflow_die "refusing to overwrite unknown service file: $headroom_service_file"
+  headroom_service_owned=true
+fi
+legacy_headroom_service_owned=false
+if [[ -e "$legacy_headroom_service_file" || -L "$legacy_headroom_service_file" ]]; then
+  if headroom_service_is_owned \
+      "$legacy_headroom_service_file" "$WORKFLOW_DATA_ROOT" legacy; then
+    legacy_headroom_service_owned=true
+  else
+    printf 'NOTICE: leaving unrelated Headroom service untouched: %s\n' \
+      "$legacy_headroom_service_file" >&2
+  fi
+fi
+
+if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
+  workflow_die "service port configuration is invalid"
+fi
+PRIOR_CLIPROXY_PORT="$CLIPROXY_PORT"
+PRIOR_HEADROOM_PORT="$HEADROOM_PORT"
+CLIPROXY_PORT="${CLAUDEX_CLIPROXY_PORT:-$CLIPROXY_PORT}"
+HEADROOM_PORT="${CLAUDEX_HEADROOM_PORT:-$HEADROOM_PORT}"
+valid_service_port "$CLIPROXY_PORT" || workflow_die "invalid CLIProxyAPI port"
+valid_service_port "$HEADROOM_PORT" || workflow_die "invalid Headroom port"
+[[ "$CLIPROXY_PORT" != "$HEADROOM_PORT" ]] || \
+  workflow_die "CLIProxyAPI and Headroom ports must differ"
+
+cliproxy_endpoint_ready_at() {
+  curl -fsS --connect-timeout 1 --max-time 2 \
+    "http://127.0.0.1:$1/v1/models" 2>/dev/null | \
+    cliproxy_models_response_is_ready /dev/stdin
+}
+
+headroom_endpoint_ready_at() {
+  curl -fsS --connect-timeout 1 --max-time 2 \
+    "http://127.0.0.1:$1/health" 2>/dev/null | jq -e '
+      .service == "headroom-proxy" and .status == "healthy" and .ready == true
+    ' >/dev/null 2>&1
+}
+
+cliproxy_listener_owned=false
+if [[ "$CLIPROXY_PORT" == "$PRIOR_CLIPROXY_PORT" ]] && \
+   [[ "$cliproxy_service_owned" == true ]] && \
+   cliproxy_endpoint_ready_at "$CLIPROXY_PORT"; then
+  cliproxy_listener_owned=true
+fi
+headroom_listener_owned=false
+if [[ "$HEADROOM_PORT" == "$PRIOR_HEADROOM_PORT" ]] && \
+   { [[ "$headroom_service_owned" == true ]] || \
+     [[ "$legacy_headroom_service_owned" == true ]]; } && \
+   headroom_endpoint_ready_at "$HEADROOM_PORT"; then
+  headroom_listener_owned=true
+fi
+legacy_headroom_running_version=
+if [[ "$legacy_headroom_service_owned" == true ]] && \
+   headroom_endpoint_ready_at "$PRIOR_HEADROOM_PORT"; then
+  legacy_headroom_running_version="$(curl -fsS \
+    "http://127.0.0.1:$PRIOR_HEADROOM_PORT/health" 2>/dev/null | \
+    jq -r '.version // empty' || true)"
+fi
+interactive_install=false
+if [[ -t 0 && -t 1 ]]; then
+  interactive_install=true
+fi
+CLIPROXY_PORT="$(select_service_port \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$CLIPROXY_PORT" 0 \
+  "$cliproxy_listener_owned" "$interactive_install")" || exit 1
+HEADROOM_PORT="$(select_service_port \
+  Headroom CLAUDEX_HEADROOM_PORT "$HEADROOM_PORT" "$CLIPROXY_PORT" \
+  "$headroom_listener_owned" "$interactive_install")" || exit 1
+ports_changed=false
+if [[ "$CLIPROXY_PORT" != "$PRIOR_CLIPROXY_PORT" ]] || \
+   [[ "$HEADROOM_PORT" != "$PRIOR_HEADROOM_PORT" ]]; then
+  ports_changed=true
+fi
+service_ports_path="$(service_ports_file "$WORKFLOW_DATA_ROOT")"
+
+render_cliproxy_config \
+  "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/auth" "$CLIPROXY_PORT"
+chmod 0600 "$desired_cliproxy_config"
+if [[ "$platform" == darwin ]]; then
+  render_launch_agent "$desired_service_file" "$WORKFLOW_DATA_ROOT"
+  plutil -lint "$desired_service_file" >/dev/null
+else
+  render_systemd_user_unit "$desired_service_file" "$WORKFLOW_DATA_ROOT"
+fi
 
 cliproxy_config_changed="$(file_change_state \
   "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/cliproxy.yaml")"
 cliproxy_service_changed="$(file_change_state "$desired_service_file" "$service_file")"
 
 cliproxy_is_ready() {
+  local port="${1:-$CLIPROXY_PORT}"
   curl -fsS --connect-timeout 1 --max-time 2 \
-    http://127.0.0.1:8317/v1/models | \
+    "http://127.0.0.1:$port/v1/models" 2>/dev/null | \
     cliproxy_models_response_is_ready /dev/stdin
 }
 
 wait_for_cliproxy() {
+  local port="${1:-$CLIPROXY_PORT}"
   for _ in {1..30}; do
-    if cliproxy_is_ready; then
+    if cliproxy_is_ready "$port"; then
       return 0
     fi
     sleep 1
@@ -202,18 +308,33 @@ if [[ "$cliproxy_binary_changed" == true ]] || \
 fi
 
 snapshot_dir="$installer_temp/snapshots"
+install -d -m 0700 "$snapshot_dir"
+model_config_root_path="$(model_config_root "$WORKFLOW_DATA_ROOT")"
+prior_model_generation=
+prior_model_generation_snapshot=
+endpoint_lock_owned=false
+endpoint_lock_token=
 snapshot_path "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$snapshot_dir" cliproxy-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/bin/claudex" "$snapshot_dir" claudex-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/cliproxy.yaml" "$snapshot_dir" cliproxy-config
 snapshot_path "$service_file" "$snapshot_dir" cliproxy-service
 snapshot_path "$headroom_service_file" "$snapshot_dir" headroom-service
+snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
+if [[ "$legacy_headroom_service_owned" == true ]]; then
+  snapshot_path "$legacy_headroom_service_file" \
+    "$snapshot_dir" legacy-headroom-service
+fi
 
 cliproxy_transaction_active=false
 headroom_transaction_active=false
+endpoint_transaction_active="$ports_changed"
+legacy_headroom_stopped=false
 headroom_health_is_ready() {
   local expected_version="$1"
+  local port="${2:-$HEADROOM_PORT}"
   curl -fsS --connect-timeout 1 --max-time 2 \
-    http://127.0.0.1:8787/health | jq -e --arg version "$expected_version" \
+    "http://127.0.0.1:$port/health" 2>/dev/null | \
+    jq -e --arg version "$expected_version" \
     '.service == "headroom-proxy" and .status == "healthy" and
      .ready == true and ($version == "" or .version == $version)' \
     >/dev/null 2>&1
@@ -221,8 +342,9 @@ headroom_health_is_ready() {
 
 wait_for_headroom_health() {
   local expected_version="$1"
+  local port="${2:-$HEADROOM_PORT}"
   for _ in {1..30}; do
-    if headroom_health_is_ready "$expected_version"; then
+    if headroom_health_is_ready "$expected_version" "$port"; then
       return 0
     fi
     sleep 1
@@ -238,20 +360,30 @@ restore_headroom_service() {
     launchctl bootout "gui/$(id -u)" "$headroom_service_file" \
       >/dev/null 2>&1 || true
   else
-    systemctl --user stop headroom-proxy.service >/dev/null 2>&1 || true
+    systemctl --user stop claudex-headroom.service >/dev/null 2>&1 || true
   fi
 
   restore_snapshot "$headroom_service_file" \
     "$snapshot_dir" headroom-service || recovery_ready=false
   snapshot_path_matches "$headroom_service_file" \
     "$snapshot_dir" headroom-service || recovery_ready=false
+  if [[ "$legacy_headroom_service_owned" == true ]]; then
+    restore_snapshot "$legacy_headroom_service_file" \
+      "$snapshot_dir" legacy-headroom-service || recovery_ready=false
+    snapshot_path_matches "$legacy_headroom_service_file" \
+      "$snapshot_dir" legacy-headroom-service || recovery_ready=false
+  fi
 
   if [[ -n "$headroom_prior_version" ]]; then
     printf 'WARNING: Headroom rollback restores only top-level version %s; dependency versions may differ.\n' \
       "$headroom_prior_version" >&2
-    if ! restore_headroom_distribution "$headroom_prior_version"; then
+    if ! restore_headroom_distribution \
+        "$headroom_prior_version" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"; then
       recovery_ready=false
     fi
+  elif ! UV_TOOL_DIR="$UV_TOOL_DIR" UV_TOOL_BIN_DIR="$UV_TOOL_BIN_DIR" \
+      uv tool uninstall headroom-ai >/dev/null 2>&1; then
+    recovery_ready=false
   fi
 
   if [[ -f "$snapshot_dir/headroom-service.present" ]]; then
@@ -260,14 +392,30 @@ restore_headroom_service() {
         >/dev/null 2>&1 || recovery_ready=false
     else
       systemctl --user daemon-reload >/dev/null 2>&1 || recovery_ready=false
+      systemctl --user enable claudex-headroom.service >/dev/null 2>&1 || \
+        recovery_ready=false
+      systemctl --user restart claudex-headroom.service >/dev/null 2>&1 || \
+        recovery_ready=false
+    fi
+    wait_for_headroom_health \
+      "$headroom_prior_version" "$PRIOR_HEADROOM_PORT" || recovery_ready=false
+  elif [[ "$legacy_headroom_stopped" == true ]] && \
+       [[ -f "$snapshot_dir/legacy-headroom-service.present" ]]; then
+    if [[ "$platform" == darwin ]]; then
+      launchctl bootstrap "gui/$(id -u)" "$legacy_headroom_service_file" \
+        >/dev/null 2>&1 || recovery_ready=false
+    else
+      systemctl --user daemon-reload >/dev/null 2>&1 || recovery_ready=false
       systemctl --user enable headroom-proxy.service >/dev/null 2>&1 || \
         recovery_ready=false
       systemctl --user restart headroom-proxy.service >/dev/null 2>&1 || \
         recovery_ready=false
     fi
-    wait_for_headroom_health "$headroom_prior_version" || recovery_ready=false
+    wait_for_headroom_health \
+      "$legacy_headroom_running_version" "$PRIOR_HEADROOM_PORT" || \
+      recovery_ready=false
   elif [[ "$platform" == systemd ]]; then
-    systemctl --user disable headroom-proxy.service >/dev/null 2>&1 || true
+    systemctl --user disable claudex-headroom.service >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || recovery_ready=false
   fi
 
@@ -307,11 +455,28 @@ rollback_install_transaction() {
         systemctl --user restart claudex-cliproxy.service >/dev/null 2>&1 || \
           rollback_ready=false
       fi
-      wait_for_cliproxy || rollback_ready=false
+      wait_for_cliproxy "$PRIOR_CLIPROXY_PORT" || rollback_ready=false
     elif [[ "$platform" == systemd ]]; then
       systemctl --user disable claudex-cliproxy.service >/dev/null 2>&1 || true
       systemctl --user daemon-reload >/dev/null 2>&1 || rollback_ready=false
     fi
+  fi
+
+  if [[ "${endpoint_transaction_active:-false}" == true ]]; then
+    if [[ "${endpoint_lock_owned:-false}" == true ]]; then
+      restore_model_config_generation \
+        "$WORKFLOW_DATA_ROOT" "$prior_model_generation" \
+        "$prior_model_generation_snapshot" || rollback_ready=false
+    fi
+    restore_snapshot "$service_ports_path" \
+      "$snapshot_dir" service-ports || rollback_ready=false
+    snapshot_path_matches "$service_ports_path" \
+      "$snapshot_dir" service-ports || rollback_ready=false
+  fi
+  if [[ "${endpoint_lock_owned:-false}" == true ]]; then
+    release_endpoint_config_lock \
+      "$WORKFLOW_DATA_ROOT" "$endpoint_lock_token" || rollback_ready=false
+    endpoint_lock_owned=false
   fi
 
   [[ "$rollback_ready" == true ]]
@@ -320,20 +485,58 @@ rollback_install_transaction() {
 WORKFLOW_ROLLBACK_HANDLER=rollback_install_transaction
 WORKFLOW_TRANSACTION_ACTIVE=true
 
+if [[ "$ports_changed" == true ]]; then
+  endpoint_lock_token="$$:$RANDOM:$RANDOM"
+  acquire_endpoint_config_lock \
+    "$WORKFLOW_DATA_ROOT" "$endpoint_lock_token" || \
+    workflow_die "could not serialize endpoint model publication"
+  endpoint_lock_owned=true
+  prior_model_generation="$(readlink \
+    "$model_config_root_path/current" 2>/dev/null || true)"
+  if [[ -n "$prior_model_generation" ]]; then
+    prior_model_generation_snapshot="$snapshot_dir/prior-model-generation"
+    cp -pPR "$model_config_root_path/$prior_model_generation" \
+      "$prior_model_generation_snapshot" || \
+      workflow_die "prior model configuration could not be snapshotted"
+  fi
+fi
+
 uv tool install --upgrade mempalace
-if ! command -v mempalace-mcp >/dev/null || \
-   ! mempalace-mcp --version >/dev/null; then
-  workflow_die "Mempalace installation did not provide a working mempalace-mcp --version"
+if ! mempalace_mcp="$(command -v mempalace-mcp)"; then
+  workflow_die "Mempalace installation did not provide mempalace-mcp"
 fi
-uv tool install --upgrade graphifyy
-if ! command -v graphify-mcp >/dev/null || ! graphify-mcp --version >/dev/null; then
-  workflow_die "Graphify installation did not provide a working graphify-mcp --version"
+install -d -m 0700 "$installer_temp/mempalace-probe"
+if ! PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+  --require-tool mempalace_get_taxonomy \
+  --require-tool mempalace_search \
+  --require-tool mempalace_checkpoint \
+  -- "$mempalace_mcp" --palace "$installer_temp/mempalace-probe"; then
+  workflow_die "Mempalace MCP failed protocol readiness checks"
 fi
-upgrade_headroom_distribution
-if ! command -v headroom >/dev/null || ! headroom --version >/dev/null; then
+
+uv tool install --upgrade 'graphifyy[mcp]'
+if ! graphify_mcp="$(command -v graphify-mcp)"; then
+  workflow_die "Graphify installation did not provide graphify-mcp"
+fi
+graphify_probe_graph="$installer_temp/graphify-probe.json"
+jq -n '{
+  directed: false, multigraph: false, graph: {},
+  nodes: [{id: "claudex-audit", label: "claudex-audit"}], links: []
+}' >"$graphify_probe_graph"
+if ! PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+  --require-tool query_graph \
+  --require-tool graph_stats \
+  -- "$graphify_mcp" --graph "$graphify_probe_graph"; then
+  workflow_die "Graphify MCP failed protocol readiness checks"
+fi
+upgrade_headroom_distribution "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"
+headroom_binary="$UV_TOOL_BIN_DIR/headroom"
+if [[ ! -x "$headroom_binary" ]] || ! "$headroom_binary" --version >/dev/null; then
   workflow_die "Headroom installation did not provide a working headroom --version"
 fi
-headroom_current_version="$(headroom_distribution_version "$(command -v headroom)")" || \
+headroom_current_version="$(headroom_distribution_version "$headroom_binary")" || \
   workflow_die "Headroom distribution version could not be read"
 headroom_version_changed=false
 if distribution_version_changed "$headroom_prior_version" \
@@ -341,7 +544,6 @@ if distribution_version_changed "$headroom_prior_version" \
   headroom_version_changed=true
 fi
 
-headroom_binary="$(command -v headroom)"
 headroom_python="$(sed -n '1s/^#!//p' "$headroom_binary")"
 [[ -x "$headroom_python" ]] || workflow_die "Headroom Python runtime could not be resolved"
 headroom_ca_bundle="$($headroom_python -c 'import certifi; print(certifi.where())')"
@@ -349,7 +551,7 @@ headroom_ca_bundle="$($headroom_python -c 'import certifi; print(certifi.where()
 
 headroom_is_ready() {
   curl -fsS --connect-timeout 1 --max-time 2 \
-    http://127.0.0.1:8787/health | jq -e \
+    "http://127.0.0.1:$HEADROOM_PORT/health" 2>/dev/null | jq -e \
     --arg version "$headroom_current_version" \
     '.service == "headroom-proxy" and .status == "healthy" and
      .ready == true and .version == $version and .config.optimize == true and
@@ -360,38 +562,111 @@ headroom_is_ready() {
      .config.runtime_env.HEADROOM_EFFORT_ROUTER == "0"' >/dev/null 2>&1
 }
 
+preflight_headroom_binary() (
+  local preflight_port preflight_pid= preflight_ready=false
+  preflight_port="$(next_available_port \
+    "$HEADROOM_PORT" "$CLIPROXY_PORT")" || return 1
+  cleanup_preflight() {
+    if [[ -n "$preflight_pid" ]] && kill -0 "$preflight_pid" 2>/dev/null; then
+      kill "$preflight_pid" 2>/dev/null || true
+      wait "$preflight_pid" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_preflight EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  HEADROOM_CONFIG_DIR="$WORKFLOW_DATA_ROOT/headroom/config" \
+  HEADROOM_WORKSPACE_DIR="$WORKFLOW_DATA_ROOT/headroom/state" \
+  SSL_CERT_FILE="$headroom_ca_bundle" \
+  HEADROOM_CACHE_ENABLED=0 \
+  HEADROOM_MEMORY_ENABLED=0 \
+  HEADROOM_OUTPUT_SHAPER=0 \
+  HEADROOM_VERBOSITY_AUTOTUNE=0 \
+  HEADROOM_EFFORT_ROUTER=0 \
+  HEADROOM_LOG_MESSAGES=0 \
+    "$headroom_binary" proxy \
+      --host 127.0.0.1 --port "$preflight_port" --mode token \
+      --no-cache --intercept-tool-results --lossless --code-aware \
+      >"$installer_temp/headroom-preflight.log" 2>&1 &
+  preflight_pid=$!
+  for _ in {1..90}; do
+    kill -0 "$preflight_pid" 2>/dev/null || break
+    if curl -fsS --connect-timeout 1 --max-time 2 \
+        "http://127.0.0.1:$preflight_port/health" 2>/dev/null | \
+        jq -e --arg version "$headroom_current_version" '
+          .service == "headroom-proxy" and .status == "healthy" and
+          .ready == true and .version == $version
+        ' >/dev/null 2>&1; then
+      preflight_ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$preflight_ready" != true ]]; then
+    sed -n '1,160p' "$installer_temp/headroom-preflight.log" >&2 || true
+    return 1
+  fi
+)
+
+require_activation_port_available() {
+  local service_name="$1"
+  local port="$2"
+  port_is_available "$port" || workflow_die \
+    "$service_name activation port $port became occupied; prior state will be restored"
+}
+
 if [[ "$platform" == darwin ]]; then
   render_headroom_launch_agent \
     "$headroom_desired_service_file" "$WORKFLOW_DATA_ROOT" \
-    "$headroom_binary" "$headroom_ca_bundle"
+    "$headroom_binary" "$headroom_ca_bundle" "$HEADROOM_PORT"
   plutil -lint "$headroom_desired_service_file" >/dev/null
 else
   render_headroom_systemd_user_unit \
     "$headroom_desired_service_file" "$WORKFLOW_DATA_ROOT" \
-    "$headroom_binary" "$headroom_ca_bundle"
+    "$headroom_binary" "$headroom_ca_bundle" "$HEADROOM_PORT"
 fi
 
 headroom_service_changed="$(file_change_state \
   "$headroom_desired_service_file" "$headroom_service_file")"
 headroom_health_ok=true
 headroom_is_ready || headroom_health_ok=false
+if [[ "$legacy_headroom_service_owned" == true ]]; then
+  headroom_health_ok=false
+fi
 reconcile_headroom_transaction "$headroom_version_changed" \
   "$headroom_service_changed" "$headroom_health_ok"
 
 if [[ "$headroom_restart_required" == true ]]; then
+  preflight_headroom_binary || workflow_die \
+    "private Headroom failed isolated preflight; the existing service was left running"
   printf 'WARNING: restarting a changed or unhealthy service may interrupt active Claudex sessions.\n' >&2
   if [[ "$headroom_service_changed" == changed ]]; then
     activate_staged_file "$headroom_desired_service_file" \
       "$headroom_service_file" "$headroom_service_mode"
   fi
+  if [[ "$legacy_headroom_service_owned" == true ]]; then
+    if [[ "$platform" == darwin ]]; then
+      launchctl bootout "gui/$(id -u)" "$legacy_headroom_service_file" \
+        >/dev/null 2>&1 || true
+    else
+      systemctl --user stop headroom-proxy.service >/dev/null 2>&1 || true
+    fi
+    legacy_headroom_stopped=true
+  fi
   if [[ "$platform" == darwin ]]; then
     launchctl bootout "gui/$(id -u)" "$headroom_service_file" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$(id -u)" "$headroom_service_file"
-    launchctl enable "gui/$(id -u)/com.user.headroom-proxy"
   else
+    systemctl --user stop claudex-headroom.service >/dev/null 2>&1 || true
     systemctl --user daemon-reload
-    systemctl --user enable headroom-proxy.service
-    systemctl --user restart headroom-proxy.service
+    systemctl --user enable claudex-headroom.service
+  fi
+  require_activation_port_available Headroom "$HEADROOM_PORT"
+  if [[ "$platform" == darwin ]]; then
+    launchctl bootstrap "gui/$(id -u)" "$headroom_service_file"
+    launchctl enable "gui/$(id -u)/com.user.claudex-headroom"
+  else
+    systemctl --user start claudex-headroom.service
   fi
   headroom_ready=false
   for _ in {1..30}; do
@@ -400,8 +675,16 @@ if [[ "$headroom_restart_required" == true ]]; then
   done
   [[ "$headroom_ready" == true ]] || workflow_die \
     "Headroom failed health checks; prior service definition and top-level version recovery will be attempted"
+  if [[ "$legacy_headroom_service_owned" == true ]]; then
+    if [[ "$platform" == systemd ]]; then
+      systemctl --user disable headroom-proxy.service >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$legacy_headroom_service_file"
+    if [[ "$platform" == systemd ]]; then
+      systemctl --user daemon-reload
+    fi
+  fi
 fi
-headroom_transaction_active=false
 
 if [[ "$cliproxy_binary_changed" == true ]] || \
    [[ "$claudex_binary_changed" == true ]] || \
@@ -429,11 +712,16 @@ if [[ "$cliproxy_restart_required" == true ]]; then
   printf 'WARNING: restarting a changed or unhealthy service may interrupt active Claudex sessions.\n' >&2
   if [[ "$platform" == darwin ]]; then
     launchctl bootout "gui/$(id -u)" "$service_file" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$(id -u)" "$service_file"
   else
+    systemctl --user stop claudex-cliproxy.service >/dev/null 2>&1 || true
     systemctl --user daemon-reload
     systemctl --user enable claudex-cliproxy.service
-    systemctl --user restart claudex-cliproxy.service
+  fi
+  require_activation_port_available CLIProxyAPI "$CLIPROXY_PORT"
+  if [[ "$platform" == darwin ]]; then
+    launchctl bootstrap "gui/$(id -u)" "$service_file"
+  else
+    systemctl --user start claudex-cliproxy.service
   fi
   wait_for_cliproxy || workflow_die \
     "CLIProxyAPI failed readiness checks; previous service will be restored"
@@ -443,12 +731,69 @@ for launcher in claudex-gpt claude-headroom claudex-login claudex-doctor claudex
   ln -sfn "$WORKFLOW_ROOT/bin/$launcher" "$USER_BIN_DIR/$launcher"
 done
 
+write_service_ports "$WORKFLOW_DATA_ROOT" "$CLIPROXY_PORT" "$HEADROOM_PORT" || \
+  workflow_die "service port configuration could not be saved"
+
 source "$WORKFLOW_ROOT/discover-models.sh"
-discover_models_main || true
+model_discovery_succeeded=true
+if [[ "$endpoint_lock_owned" == true ]]; then
+  discovery_entrypoint=discover_models_main_core
+else
+  discovery_entrypoint=discover_models_main
+fi
+if ! CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint"; then
+  model_discovery_succeeded=false
+  if [[ "$ports_changed" == true && -n "$prior_model_generation" ]]; then
+    workflow_die \
+      "model configuration could not be published for the changed service ports"
+  fi
+  if [[ -n "$prior_model_generation" ]]; then
+    printf 'WARNING: model discovery failed; existing model configuration was retained.\n' >&2
+  else
+    printf 'NOTICE: model discovery is pending until provider login is complete.\n' >&2
+  fi
+fi
 
 cliproxy_transaction_active=false
+headroom_transaction_active=false
+endpoint_transaction_active=false
+if [[ "$endpoint_lock_owned" == true ]]; then
+  release_endpoint_config_lock \
+    "$WORKFLOW_DATA_ROOT" "$endpoint_lock_token" || \
+    workflow_die "endpoint model publication lock could not be released"
+  endpoint_lock_owned=false
+fi
 WORKFLOW_TRANSACTION_ACTIVE=false
+if [[ "$model_discovery_succeeded" == true ]]; then
+  prune_model_config_generations "$WORKFLOW_DATA_ROOT" || \
+    printf 'WARNING: stale model configuration could not be pruned.\n' >&2
+fi
+cliproxy_action=reused
+if [[ "$cliproxy_restart_required" == true ]]; then
+  if [[ "$cliproxy_service_was_present" == true ]]; then
+    cliproxy_action=reconciled
+  else
+    cliproxy_action=installed
+  fi
+fi
+headroom_action=reused
+if [[ "$headroom_restart_required" == true ]]; then
+  if [[ "$legacy_headroom_stopped" == true ]]; then
+    headroom_action=migrated
+  elif [[ "$headroom_service_was_present" == true ]]; then
+    headroom_action=reconciled
+  else
+    headroom_action=installed
+  fi
+fi
 printf 'Installed Claudex %s and CLIProxyAPI %s for %s.\n' \
   "$claudex_version" "$cliproxy_version" "$platform"
+print_install_summary \
+  "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$USER_BIN_DIR" \
+  "$WORKFLOW_DATA_ROOT/bin/claudex" \
+  "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$headroom_binary" \
+  "$mempalace_mcp" "$graphify_mcp" "$service_file" \
+  "$headroom_service_file" "$CLIPROXY_PORT" "$HEADROOM_PORT" \
+  "$cliproxy_action" "$headroom_action"
 printf 'Next: claudex-login codex; claudex-login claude; %s/discover-models.sh\n' \
   "$WORKFLOW_ROOT"

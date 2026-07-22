@@ -9,9 +9,15 @@ print_model_discovery_instruction() {
     "$WORKFLOW_ROOT" >&2
 }
 
-discover_models_main() {
+discover_models_main_core() {
   local data_root generation_root candidate_dir models_file config_file active_generation
+  local cliproxy_port headroom_port
   data_root="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || return 1
+  if ! IFS=$'\t' read -r cliproxy_port headroom_port \
+      < <(read_service_ports "$data_root"); then
+    print_model_discovery_instruction
+    return 1
+  fi
   if ! install -d -m 0700 "$data_root"; then
     print_model_discovery_instruction
     return 1
@@ -29,7 +35,7 @@ discover_models_main() {
   config_file="$candidate_dir/claudex.toml"
 
   if ! curl --fail --silent --show-error \
-    http://127.0.0.1:8317/v1/models >"$models_file"; then
+    "http://127.0.0.1:$cliproxy_port/v1/models" >"$models_file"; then
     rm -rf -- "$candidate_dir"
     print_model_discovery_instruction
     return 1
@@ -39,7 +45,8 @@ discover_models_main() {
     print_model_discovery_instruction
     return 1
   fi
-  if ! render_discovered_claudex_config "$models_file" "$config_file"; then
+  if ! render_discovered_claudex_config \
+      "$models_file" "$config_file" "$cliproxy_port" "$headroom_port"; then
     rm -rf -- "$candidate_dir"
     print_model_discovery_instruction
     return 1
@@ -66,6 +73,19 @@ discover_models_main() {
   rg '^(default_model|haiku|sonnet|opus) = ' \
     "$active_generation/claudex.toml" || true
 }
+
+discover_models_main() (
+  local data_root endpoint_lock_token
+  data_root="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || return 1
+  install -d -m 0700 "$(model_config_root "$data_root")" || return 1
+  endpoint_lock_token="$$:$RANDOM:$RANDOM"
+  acquire_endpoint_config_lock "$data_root" "$endpoint_lock_token" || return 1
+  trap 'release_endpoint_config_lock "$data_root" "$endpoint_lock_token"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  discover_models_main_core
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   set -euo pipefail

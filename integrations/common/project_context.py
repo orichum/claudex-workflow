@@ -13,6 +13,12 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from .context_population import (
+    PopulationError,
+    populate_context,
+    render_population_result,
+)
+
 
 class ContextError(RuntimeError):
     pass
@@ -447,6 +453,59 @@ def _find_exact_context_index(contexts: list[dict], root: str) -> int:
     raise ContextError("context root is not configured")
 
 
+def _find_canonical_context_index(
+    contexts: list[dict], root: Path, home: Path
+) -> int:
+    for index, context in enumerate(contexts):
+        if _context_root(context["root"], home, must_exist=True) == root:
+            return index
+    raise ContextError("context root is not configured")
+
+
+def _build_add_candidate(
+    document: dict, parsed: argparse.Namespace, home: Path
+) -> tuple[dict, dict, Path, Path]:
+    root = _context_root(parsed.root, home, must_exist=True)
+    palace_value = parsed.palace or f"~/.mempalace/palaces/{root.name}"
+    palace = _context_palace(palace_value, home)
+    context = {
+        "root": str(root),
+        "dockerProfile": parsed.docker,
+        "memoryPalace": palace_value if parsed.palace is None else str(palace),
+        "memoryWing": parsed.wing or root.name,
+    }
+    candidate = {"contexts": [*document["contexts"], context]}
+    return candidate, context, root, palace
+
+
+def _render_context_table(contexts: list[dict]) -> str:
+    columns = (
+        ("PROJECT ROOT", "root"),
+        ("MCP_DOCKER PROFILE", "dockerProfile"),
+        ("MEMPALACE PATH", "memoryPalace"),
+        ("MEMPALACE WING", "memoryWing"),
+    )
+    rows = [tuple(context[key] for _, key in columns) for context in contexts]
+    widths = [
+        max([len(header), *(len(row[index]) for row in rows)])
+        for index, (header, _) in enumerate(columns)
+    ]
+    border = "+" + "+".join("-" * (width + 2) for width in widths) + "+"
+
+    def render_row(values: tuple[str, ...]) -> str:
+        return "| " + " | ".join(
+            value.ljust(width) for value, width in zip(values, widths)
+        ) + " |"
+
+    header = tuple(label for label, _ in columns)
+    return "\n".join((border, render_row(header), border,
+                      *(render_row(row) for row in rows), border)) + "\n"
+
+
+def _print_population_progress(message: str) -> None:
+    print(message, flush=True)
+
+
 def context_main(arguments: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="claudex-context")
     parser.add_argument("--config", required=True, type=Path)
@@ -457,6 +516,8 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     add.add_argument("--docker", required=True)
     add.add_argument("--palace")
     add.add_argument("--wing")
+    populate = commands.add_parser("populate")
+    populate.add_argument("root")
     update = commands.add_parser("update")
     update.add_argument("root")
     update.add_argument("--docker")
@@ -470,6 +531,56 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     home = Path.home()
 
     try:
+        if parsed.command == "add":
+            with _context_lock(parsed.config):
+                document = _read_context_document(parsed.config, home)
+                candidate, context, root, palace = _build_add_candidate(
+                    document, parsed, home
+                )
+                _validate_context_candidate(candidate, home)
+
+            _prepare_palace(palace)
+            result = populate_context(
+                root,
+                palace,
+                context["memoryWing"],
+                progress=_print_population_progress,
+            )
+
+            with _context_lock(parsed.config):
+                current = _read_context_document(parsed.config, home)
+                final_candidate = {
+                    "contexts": [*current["contexts"], context]
+                }
+                _validate_context_candidate(final_candidate, home)
+                _write_context_document(parsed.config, final_candidate)
+
+            print(render_population_result(result), end="")
+            return 0
+
+        if parsed.command == "populate":
+            with _context_lock(parsed.config):
+                document = _read_context_document(parsed.config, home)
+                root = _context_root(parsed.root, home, must_exist=True)
+                index = _find_canonical_context_index(
+                    document["contexts"], root, home
+                )
+                context = dict(document["contexts"][index])
+                configured_root = _context_root(
+                    context["root"], home, must_exist=True
+                )
+
+            palace = _context_palace(context["memoryPalace"], home)
+            _prepare_palace(palace)
+            result = populate_context(
+                configured_root,
+                palace,
+                context["memoryWing"],
+                progress=_print_population_progress,
+            )
+            print(render_population_result(result), end="")
+            return 0
+
         lock = (
             _context_lock(parsed.config)
             if parsed.command not in ("list", "validate")
@@ -482,32 +593,8 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                 _validate_context_candidate(document, home)
                 return 0
             if parsed.command == "list":
-                print("ROOT\tDOCKER\tPALACE\tWING")
-                for context in contexts:
-                    print(
-                        "{root}\t{dockerProfile}\t{memoryPalace}\t{memoryWing}".format(
-                            **context
-                        )
-                    )
+                print(_render_context_table(contexts), end="")
                 return 0
-            if parsed.command == "add":
-                root = _context_root(parsed.root, home, must_exist=True)
-                palace_value = parsed.palace or f"~/.mempalace/palaces/{root.name}"
-                palace = _context_palace(palace_value, home)
-                context = {
-                    "root": str(root),
-                    "dockerProfile": parsed.docker,
-                    "memoryPalace": (
-                        palace_value if parsed.palace is None else str(palace)
-                    ),
-                    "memoryWing": parsed.wing or root.name,
-                }
-                candidate = {"contexts": [*contexts, context]}
-                _validate_context_candidate(candidate, home)
-                _prepare_palace(palace)
-                _write_context_document(parsed.config, candidate)
-                return 0
-
             try:
                 root = _context_root(parsed.root, home, must_exist=False)
                 index = _find_context_index(contexts, root, home)
@@ -550,8 +637,10 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             _validate_config_value(candidate, home)
             _write_context_document(parsed.config, candidate)
             return 0
-    except ContextError:
+    except (ContextError, PopulationError) as error:
         print("ERROR: project context operation rejected", file=sys.stderr)
+        if isinstance(error, PopulationError):
+            print(str(error), file=sys.stderr)
         return 1
 
 

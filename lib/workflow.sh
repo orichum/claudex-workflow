@@ -17,6 +17,332 @@ workflow_data_dir() {
   esac
 }
 
+service_ports_file() {
+  printf '%s/service-ports.json' "$1"
+}
+
+valid_service_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  ((10#$port >= 1024 && 10#$port <= 65535))
+}
+
+read_service_ports() {
+  local data_root="$1"
+  local ports_file
+  ports_file="$(service_ports_file "$data_root")"
+  if [[ ! -e "$ports_file" ]]; then
+    printf '8317\t8787\n'
+    return 0
+  fi
+  [[ -f "$ports_file" && ! -L "$ports_file" ]] || return 1
+  jq -er '
+    select(type == "object" and keys == ["cliproxyPort", "headroomPort"]) |
+    select(.cliproxyPort | type == "number" and floor == . and
+      . >= 1024 and . <= 65535) |
+    select(.headroomPort | type == "number" and floor == . and
+      . >= 1024 and . <= 65535) |
+    select(.cliproxyPort != .headroomPort) |
+    [.cliproxyPort, .headroomPort] | @tsv
+  ' "$ports_file"
+}
+
+write_service_ports() {
+  local data_root="$1"
+  local cliproxy_port="$2"
+  local headroom_port="$3"
+  local ports_file temporary
+  valid_service_port "$cliproxy_port" || return 1
+  valid_service_port "$headroom_port" || return 1
+  [[ "$cliproxy_port" != "$headroom_port" ]] || return 1
+  install -d -m 0700 "$data_root" || return 1
+  ports_file="$(service_ports_file "$data_root")"
+  [[ ! -L "$ports_file" ]] || return 1
+  temporary="$(mktemp "$data_root/.service-ports.XXXXXX")" || return 1
+  if ! jq -n --argjson cliproxy "$cliproxy_port" \
+      --argjson headroom "$headroom_port" \
+      '{cliproxyPort: $cliproxy, headroomPort: $headroom}' >"$temporary" || \
+     ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$ports_file"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+port_is_available() {
+  local port="$1"
+  valid_service_port "$port" || return 1
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+listener = socket.socket()
+try:
+    listener.bind(("127.0.0.1", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    listener.close()
+PY
+}
+
+next_available_port() {
+  local occupied_port="$1"
+  local reserved_port="${2:-0}"
+  valid_service_port "$occupied_port" || return 1
+  if [[ "$reserved_port" != 0 ]]; then
+    valid_service_port "$reserved_port" || return 1
+  fi
+  python3 - "$occupied_port" "$reserved_port" <<'PY'
+import socket
+import sys
+
+start, reserved = map(int, sys.argv[1:])
+ports = range(start + 1, 65536)
+for port in ports:
+    if port == reserved:
+        continue
+    listener = socket.socket()
+    try:
+        listener.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    finally:
+        listener.close()
+    print(port)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+select_service_port() {
+  local service_name="$1"
+  local override_name="$2"
+  local desired_port="$3"
+  local reserved_port="$4"
+  local owned_listener="$5"
+  local interactive="$6"
+  local suggested_port selected_port
+
+  valid_service_port "$desired_port" || return 1
+  if [[ "$reserved_port" != 0 ]]; then
+    valid_service_port "$reserved_port" || return 1
+    [[ "$desired_port" != "$reserved_port" ]] || return 1
+  fi
+  if port_is_available "$desired_port" || [[ "$owned_listener" == true ]]; then
+    printf '%s\n' "$desired_port"
+    return 0
+  fi
+  suggested_port="$(next_available_port "$desired_port" "$reserved_port")" || {
+    workflow_die "$service_name port $desired_port is occupied and no later port is available"
+    return 1
+  }
+  if [[ "$interactive" != true ]]; then
+    workflow_die "$service_name port $desired_port is occupied; set $override_name to an available port (suggested: $suggested_port)"
+    return 1
+  fi
+
+  while true; do
+    printf '%s port %s is occupied. Port to use [%s]: ' \
+      "$service_name" "$desired_port" "$suggested_port" >&2
+    IFS= read -r selected_port || return 1
+    selected_port="${selected_port:-$suggested_port}"
+    if ! valid_service_port "$selected_port"; then
+      printf 'Port must be an integer from 1024 through 65535.\n' >&2
+      continue
+    fi
+    if [[ "$selected_port" == "$reserved_port" ]]; then
+      printf 'Port %s is reserved by the other Claudex service.\n' \
+        "$selected_port" >&2
+      continue
+    fi
+    if ! port_is_available "$selected_port"; then
+      printf 'Port %s is also occupied.\n' "$selected_port" >&2
+      continue
+    fi
+    printf '%s\n' "$selected_port"
+    return 0
+  done
+}
+
+print_install_summary() {
+  local workflow_root="$1"
+  local data_root="$2"
+  local user_bin_dir="$3"
+  local claudex_binary="$4"
+  local cliproxy_binary="$5"
+  local headroom_binary="$6"
+  local mempalace_binary="$7"
+  local graphify_binary="$8"
+  local cliproxy_service_file="$9"
+  local headroom_service_file="${10}"
+  local cliproxy_port="${11}"
+  local headroom_port="${12}"
+  local cliproxy_action="${13}"
+  local headroom_action="${14}"
+
+  printf '%s\n' \
+    '' \
+    'Installation locations' \
+    "  Workflow checkout: $workflow_root" \
+    "  Workflow data:     $data_root" \
+    "  Launcher links:    $user_bin_dir -> $workflow_root/bin" \
+    "  Claudex runtime:   $claudex_binary" \
+    "  CLIProxyAPI:       $cliproxy_binary" \
+    "  Headroom:          $headroom_binary" \
+    "  MemPalace MCP:     $mempalace_binary" \
+    "  Graphify MCP:      $graphify_binary" \
+    '' \
+    'Services' \
+    "  CLIProxyAPI: $cliproxy_action at 127.0.0.1:$cliproxy_port" \
+    "    $cliproxy_service_file" \
+    "  Headroom:    $headroom_action at 127.0.0.1:$headroom_port" \
+    "    $headroom_service_file"
+}
+
+service_definition_is_owned() {
+  local service_file="$1"
+  local data_root="$2"
+  local service_kind="$3"
+  local ownership_mode="${4:-either}"
+  [[ -f "$service_file" && ! -L "$service_file" ]] || return 1
+  python3 - "$service_file" "$data_root" "$service_kind" "$ownership_mode" <<'PY'
+import os
+import plistlib
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data_root = sys.argv[2]
+kind = sys.argv[3]
+mode = sys.argv[4]
+
+
+def valid_port(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return False
+    return str(port) == str(value) and 1024 <= port <= 65535
+
+
+def headroom_arguments_owned(arguments):
+    if not isinstance(arguments, list) or len(arguments) != 12:
+        return False
+    executable = arguments[0]
+    if not os.path.isabs(executable) or os.path.basename(executable) != "headroom":
+        return False
+    if mode == "new" and executable != f"{data_root}/headroom/bin/headroom":
+        return False
+    port = arguments[5]
+    return valid_port(port) and arguments[1:] == [
+        "proxy",
+        "--host", "127.0.0.1",
+        "--port", port,
+        "--mode", "token",
+        "--no-cache",
+        "--intercept-tool-results",
+        "--lossless",
+        "--code-aware",
+    ]
+
+
+raw = path.read_bytes()
+if b"<plist" in raw[:500]:
+    document = plistlib.loads(raw)
+    arguments = document.get("ProgramArguments")
+    if kind == "cliproxy":
+        owned = (
+            document.get("Label") == "com.user.claudex-cliproxy"
+            and arguments == [
+                f"{data_root}/bin/cli-proxy-api",
+                "--config",
+                f"{data_root}/cliproxy.yaml",
+            ]
+        )
+    else:
+        labels = {
+            "new": {"com.user.claudex-headroom"},
+            "legacy": {"com.user.headroom-proxy"},
+            "either": {"com.user.claudex-headroom", "com.user.headroom-proxy"},
+        }
+        environment = document.get("EnvironmentVariables")
+        owned = (
+            document.get("Label") in labels[mode]
+            and headroom_arguments_owned(arguments)
+            and isinstance(environment, dict)
+            and environment.get("HEADROOM_CONFIG_DIR") == f"{data_root}/headroom/config"
+            and environment.get("HEADROOM_WORKSPACE_DIR") == f"{data_root}/headroom/state"
+        )
+    raise SystemExit(0 if owned else 1)
+
+lines = [
+    line.strip() for line in raw.decode("utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith(("#", ";"))
+]
+
+
+def decoded_words(value):
+    return shlex.split(value.replace("%%", "%").replace("$$", "$"))
+
+
+exec_lines = [line[len("ExecStart="):] for line in lines if line.startswith("ExecStart=")]
+if len(exec_lines) != 1:
+    raise SystemExit(1)
+try:
+    arguments = decoded_words(exec_lines[0])
+except ValueError:
+    raise SystemExit(1)
+
+if kind == "cliproxy":
+    expected = [
+        f"{data_root}/bin/cli-proxy-api",
+        "--config",
+        f"{data_root}/cliproxy.yaml",
+    ]
+    raise SystemExit(0 if arguments == expected else 1)
+
+descriptions = [line for line in lines if line.startswith("Description=")]
+expected_descriptions = {
+    "new": {"Description=Claudex Headroom proxy"},
+    "legacy": {"Description=Headroom proxy for Claudex"},
+    "either": {
+        "Description=Claudex Headroom proxy",
+        "Description=Headroom proxy for Claudex",
+    },
+}
+environment = {}
+for line in lines:
+    if not line.startswith("Environment="):
+        continue
+    try:
+        values = decoded_words(line[len("Environment="):])
+    except ValueError:
+        raise SystemExit(1)
+    for value in values:
+        if "=" in value:
+            key, item = value.split("=", 1)
+            environment[key] = item
+owned = (
+    len(descriptions) == 1
+    and descriptions[0] in expected_descriptions[mode]
+    and headroom_arguments_owned(arguments)
+    and environment.get("HEADROOM_CONFIG_DIR") == f"{data_root}/headroom/config"
+    and environment.get("HEADROOM_WORKSPACE_DIR") == f"{data_root}/headroom/state"
+)
+raise SystemExit(0 if owned else 1)
+PY
+}
+
+cliproxy_service_is_owned() {
+  service_definition_is_owned "$1" "$2" cliproxy
+}
+
+headroom_service_is_owned() {
+  service_definition_is_owned "$1" "$2" headroom "${3:-either}"
+}
+
 validated_workflow_data_dir() {
   local checkout_root="$1"
   local data_root="${CLAUDEX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow}"
@@ -389,8 +715,15 @@ service_restart_required() {
 }
 
 upgrade_headroom_distribution() {
+  local tool_dir="${1:-}"
+  local bin_dir="${2:-}"
   headroom_transaction_active=true
-  uv tool install --upgrade 'headroom-ai[all]'
+  if [[ -n "$tool_dir" && -n "$bin_dir" ]]; then
+    PATH="$bin_dir:$PATH" UV_TOOL_DIR="$tool_dir" UV_TOOL_BIN_DIR="$bin_dir" \
+      uv tool install --upgrade 'headroom-ai[all]'
+  else
+    uv tool install --upgrade 'headroom-ai[all]'
+  fi
 }
 
 reconcile_headroom_transaction() {
@@ -468,6 +801,39 @@ path_mode() {
 
 model_config_root() {
   printf '%s/model-config' "$1"
+}
+
+endpoint_config_lock_path() {
+  printf '%s/endpoint.lock' "$(model_config_root "$1")"
+}
+
+acquire_endpoint_config_lock() {
+  local data_root="$1"
+  local lock_token="$2"
+  local lock_path
+  lock_path="$(endpoint_config_lock_path "$data_root")"
+  if ! python3 - "$lock_token" "$lock_path" 2>/dev/null <<'PY'
+import os
+import sys
+os.symlink(sys.argv[1], sys.argv[2])
+PY
+  then
+    workflow_die "endpoint model publication is already locked (busy or stale)"
+    return 1
+  fi
+}
+
+release_endpoint_config_lock() {
+  local data_root="$1"
+  local lock_token="$2"
+  local lock_path
+  lock_path="$(endpoint_config_lock_path "$data_root")"
+  if [[ ! -L "$lock_path" ]] || \
+     [[ "$(readlink "$lock_path" 2>/dev/null || true)" != "$lock_token" ]]; then
+    workflow_die "endpoint model publication lock ownership changed (fail-closed)"
+    return 1
+  fi
+  rm -f -- "$lock_path"
 }
 
 acquire_model_publication_lock() {
@@ -618,12 +984,128 @@ _activate_model_config_generation() {
   ensure_model_config_compat_links "$data_root" || \
     printf 'WARN: model config compatibility links could not be refreshed\n' >&2
 
-  active_name="$(readlink "$config_root/current")"
+  if [[ "${CLAUDEX_DEFER_MODEL_PRUNE:-0}" != 1 ]]; then
+    active_name="$(readlink "$config_root/current")"
+    for stale_generation in "$config_root"/generation.*; do
+      [[ -d "$stale_generation" ]] || continue
+      [[ "$(basename "$stale_generation")" == "$active_name" ]] || \
+        rm -rf -- "$stale_generation"
+    done
+  fi
+}
+
+restore_model_config_generation() {
+  local data_root="$1"
+  local prior_target="$2"
+  local prior_snapshot="${3:-}"
+  local config_root current_target current_generation pointer_candidate config_name
+  local lock_token restore_candidate
+  config_root="$(model_config_root "$data_root")"
+  case "$prior_target" in
+    ''|generation.*) ;;
+    *) return 1 ;;
+  esac
+  if [[ -n "$prior_snapshot" ]] && \
+     [[ ! -f "$prior_snapshot/models.json" || \
+        ! -f "$prior_snapshot/claudex.toml" ]]; then
+    return 1
+  fi
+  lock_token="$$:$RANDOM:$RANDOM"
+  acquire_model_publication_lock "$data_root" "$lock_token" || return 1
+  if [[ -n "$prior_target" ]] && \
+     [[ ! -f "$config_root/$prior_target/models.json" || \
+        ! -f "$config_root/$prior_target/claudex.toml" ]]; then
+    [[ -n "$prior_snapshot" ]] || {
+      release_model_publication_lock \
+        "$config_root/publication.lock" "$lock_token" || true
+      return 1
+    }
+    if [[ -e "$config_root/$prior_target" || \
+          -L "$config_root/$prior_target" ]]; then
+      release_model_publication_lock \
+        "$config_root/publication.lock" "$lock_token" || true
+      return 1
+    fi
+    restore_candidate="$config_root/.generation.rollback.$$.$RANDOM"
+    cp -pPR "$prior_snapshot" "$restore_candidate" || {
+      rm -rf -- "$restore_candidate"
+      release_model_publication_lock \
+        "$config_root/publication.lock" "$lock_token" || true
+      return 1
+    }
+    if ! mv "$restore_candidate" "$config_root/$prior_target"; then
+      rm -rf -- "$restore_candidate"
+      if [[ ! -f "$config_root/$prior_target/models.json" || \
+            ! -f "$config_root/$prior_target/claudex.toml" ]]; then
+        release_model_publication_lock \
+          "$config_root/publication.lock" "$lock_token" || true
+        return 1
+      fi
+    fi
+  fi
+  current_target="$(readlink "$config_root/current" 2>/dev/null || true)"
+  if [[ "$current_target" == "$prior_target" ]] && \
+     { [[ -n "$prior_target" ]] || \
+       [[ ! -e "$config_root/current" && ! -L "$config_root/current" ]]; }; then
+    release_model_publication_lock "$config_root/publication.lock" "$lock_token"
+    return
+  fi
+  current_generation=
+  case "$current_target" in
+    generation.*) current_generation="$config_root/$current_target" ;;
+  esac
+  if [[ -n "$prior_target" ]]; then
+    pointer_candidate="$config_root/.current.rollback.$$.$RANDOM"
+    ln -s "$prior_target" "$pointer_candidate" || {
+      release_model_publication_lock \
+        "$config_root/publication.lock" "$lock_token" || true
+      return 1
+    }
+    atomic_replace_path "$pointer_candidate" "$config_root/current" || {
+      rm -f -- "$pointer_candidate"
+      release_model_publication_lock \
+        "$config_root/publication.lock" "$lock_token" || true
+      return 1
+    }
+    ensure_model_config_compat_links "$data_root" || true
+  else
+    rm -f -- "$config_root/current"
+    for config_name in models.json claudex.toml; do
+      if [[ -L "$data_root/$config_name" ]] && \
+         [[ "$(readlink "$data_root/$config_name")" == \
+            "model-config/current/$config_name" ]]; then
+        rm -f -- "$data_root/$config_name"
+      fi
+    done
+  fi
+  if [[ -n "$current_generation" && \
+        "$(basename "$current_generation")" != "$prior_target" ]]; then
+    rm -rf -- "$current_generation"
+  fi
+  release_model_publication_lock "$config_root/publication.lock" "$lock_token"
+}
+
+prune_model_config_generations() {
+  local data_root="$1"
+  local config_root active_name stale_generation lock_token
+  config_root="$(model_config_root "$data_root")"
+  lock_token="$$:$RANDOM:$RANDOM"
+  acquire_model_publication_lock "$data_root" "$lock_token" || return 1
+  active_name="$(readlink "$config_root/current" 2>/dev/null || true)"
+  case "$active_name" in
+    generation.*) ;;
+    *)
+      release_model_publication_lock \
+        "$config_root/publication.lock" "$lock_token"
+      return 0
+      ;;
+  esac
   for stale_generation in "$config_root"/generation.*; do
     [[ -d "$stale_generation" ]] || continue
     [[ "$(basename "$stale_generation")" == "$active_name" ]] || \
       rm -rf -- "$stale_generation"
   done
+  release_model_publication_lock "$config_root/publication.lock" "$lock_token"
 }
 
 restore_model_publication_signal_traps() {
@@ -774,6 +1256,12 @@ render_claudex_config() {
   local sonnet_model="$7"
   local opus_model="$8"
   local claude_binary="${9:-}"
+  local cliproxy_port="${10:-8317}"
+  local headroom_port="${11:-8787}"
+
+  valid_service_port "$cliproxy_port" || return 1
+  valid_service_port "$headroom_port" || return 1
+  [[ "$cliproxy_port" != "$headroom_port" ]] || return 1
 
   if [[ -z "$claude_binary" ]]; then
     claude_binary="$(command -v claude)" || {
@@ -797,7 +1285,7 @@ render_claudex_config() {
     '[[profiles]]' \
     'name = "gpt"' \
     'provider_type = "DirectAnthropic"' \
-    'base_url = "http://127.0.0.1:8787"' \
+    "base_url = \"http://127.0.0.1:$headroom_port\"" \
     'api_key = "claudex-passthrough"' \
     "default_model = \"$default_model\"" \
     'enabled = true' \
@@ -809,7 +1297,7 @@ render_claudex_config() {
     "opus = \"$opus_model\"" \
     '' \
     '[profiles.custom_headers]' \
-    'X-Headroom-Base-Url = "http://127.0.0.1:8317"' \
+    "X-Headroom-Base-Url = \"http://127.0.0.1:$cliproxy_port\"" \
     '' \
     '[router]' \
     'enabled = false' \
@@ -827,10 +1315,13 @@ render_claudex_config() {
 render_cliproxy_config() {
   local output_file="$1"
   local auth_dir="$2"
+  local cliproxy_port="${3:-8317}"
+
+  valid_service_port "$cliproxy_port" || return 1
 
   printf '%s\n' \
     'host: "127.0.0.1"' \
-    'port: 8317' \
+    "port: $cliproxy_port" \
     'tls:' \
     '  enable: false' \
     'remote-management:' \
@@ -898,6 +1389,8 @@ login_flag_for_provider() {
 render_discovered_claudex_config() {
   local models_json="$1"
   local output_file="$2"
+  local cliproxy_port="${3:-8317}"
+  local headroom_port="${4:-8787}"
   local model_ids gpt_models claude_models
   local fast_model balanced_model powerful_model
   local haiku_model sonnet_model opus_model
@@ -917,7 +1410,8 @@ render_discovered_claudex_config() {
 
   render_claudex_config "$output_file" \
     "$powerful_model" "$fast_model" "$balanced_model" "$powerful_model" \
-    "$haiku_model" "$sonnet_model" "$opus_model"
+    "$haiku_model" "$sonnet_model" "$opus_model" "" \
+    "$cliproxy_port" "$headroom_port"
 }
 
 extract_semver() {
@@ -939,9 +1433,17 @@ distribution_version_changed() {
 
 restore_headroom_distribution() {
   local prior_version="$1"
+  local tool_dir="${2:-}"
+  local bin_dir="${3:-}"
   local restored_binary restored_version
-  uv tool install --force "headroom-ai[all]==$prior_version" || return 1
-  restored_binary="$(command -v headroom)" || return 1
+  if [[ -n "$tool_dir" && -n "$bin_dir" ]]; then
+    UV_TOOL_DIR="$tool_dir" UV_TOOL_BIN_DIR="$bin_dir" \
+      uv tool install --force "headroom-ai[all]==$prior_version" || return 1
+    restored_binary="$bin_dir/headroom"
+  else
+    uv tool install --force "headroom-ai[all]==$prior_version" || return 1
+    restored_binary="$(command -v headroom)" || return 1
+  fi
   restored_version="$(headroom_distribution_version "$restored_binary")" || return 1
   [[ "$restored_version" == "$prior_version" ]]
 }
@@ -949,9 +1451,18 @@ restore_headroom_distribution() {
 binary_reports_semver() {
   local binary="$1"
   local expected="$2"
-  local expected_semver reported_output reported_semver
+  local binary_dir binary_name expected_semver reported_output reported_semver
+  local version_probe=--version
   expected_semver="$(extract_semver "$expected")" || return 1
-  reported_output="$("$binary" --version 2>&1)" || return 1
+  binary_dir="$(dirname "$binary")"
+  binary_name="$(basename "$binary")"
+  if [[ "$binary_name" == cli-proxy-api ]]; then
+    version_probe=--help
+  fi
+  reported_output="$(
+    cd "$binary_dir" || exit 1
+    "./$binary_name" "$version_probe" 2>&1
+  )" || return 1
   reported_semver="$(extract_semver "$reported_output")" || return 1
   [[ "$reported_semver" == "$expected_semver" ]]
 }
@@ -1146,6 +1657,7 @@ render_headroom_launch_agent() {
   local data_root="$2"
   local headroom_binary="$3"
   local ca_bundle="$4"
+  local headroom_port="${5:-8787}"
   local escaped_binary escaped_log escaped_home
   local escaped_config escaped_workspace escaped_ca
   escaped_binary="$(xml_escape "$headroom_binary")"
@@ -1154,13 +1666,14 @@ render_headroom_launch_agent() {
   escaped_config="$(xml_escape "$data_root/headroom/config")"
   escaped_workspace="$(xml_escape "$data_root/headroom/state")"
   escaped_ca="$(xml_escape "$ca_bundle")"
+  valid_service_port "$headroom_port" || return 1
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
     '<plist version="1.0">' \
     '<dict>' \
     '  <key>Label</key>' \
-    '  <string>com.user.headroom-proxy</string>' \
+    '  <string>com.user.claudex-headroom</string>' \
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
@@ -1168,7 +1681,7 @@ render_headroom_launch_agent() {
     '    <string>--host</string>' \
     '    <string>127.0.0.1</string>' \
     '    <string>--port</string>' \
-    '    <string>8787</string>' \
+    "    <string>$headroom_port</string>" \
     '    <string>--mode</string>' \
     '    <string>token</string>' \
     '    <string>--no-cache</string>' \
@@ -1212,6 +1725,7 @@ render_headroom_systemd_user_unit() {
   local data_root="$2"
   local headroom_binary="$3"
   local ca_bundle="$4"
+  local headroom_port="${5:-8787}"
   local executable log config_environment workspace_environment ca_environment
   executable="$(systemd_quote "$headroom_binary")"
   log="$(systemd_quote "append:$data_root/logs/headroom.log")"
@@ -1220,14 +1734,15 @@ render_headroom_systemd_user_unit() {
   workspace_environment="$(systemd_environment_quote \
     "HEADROOM_WORKSPACE_DIR=$data_root/headroom/state")"
   ca_environment="$(systemd_environment_quote "SSL_CERT_FILE=$ca_bundle")"
+  valid_service_port "$headroom_port" || return 1
   printf '%s\n' \
     '[Unit]' \
-    'Description=Headroom proxy for Claudex' \
+    'Description=Claudex Headroom proxy' \
     'After=network-online.target' \
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable proxy --host 127.0.0.1 --port 8787 --mode token --no-cache --intercept-tool-results --lossless --code-aware" \
+    "ExecStart=$executable proxy --host 127.0.0.1 --port $headroom_port --mode token --no-cache --intercept-tool-results --lossless --code-aware" \
     'Restart=on-failure' \
     'RestartSec=3' \
     "Environment=$config_environment" \

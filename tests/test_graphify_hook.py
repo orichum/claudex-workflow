@@ -27,9 +27,9 @@ class GraphifyHookTests(unittest.TestCase):
         self.repo.mkdir(parents=True)
         self.palace.mkdir(mode=0o700)
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
-        graph = self.repo / "graphify-out" / "graph.json"
-        graph.parent.mkdir()
-        graph.write_text("{}", encoding="utf-8")
+        self.graph = self.repo / "graphify-out" / "graph.json"
+        self.graph.parent.mkdir()
+        self.graph.write_text("{}", encoding="utf-8")
         config = self.fixture / "context.json"
         config.write_text(json.dumps({"contexts": [{
             "root": str(self.repo.parent), "dockerProfile": "xebia",
@@ -69,6 +69,24 @@ class GraphifyHookTests(unittest.TestCase):
         self.assertEqual(calls.read_text().splitlines(), [
             f"hook status|{self.repo}", f"hook install|{self.repo}",
         ])
+
+    def test_missing_graph_is_a_silent_noop(self):
+        self.graph.unlink()
+        environment = os.environ.copy()
+        environment.update({
+            "CLAUDEX_WORKFLOW_ROOT": str(self.workflow),
+            "CLAUDEX_RUN_DIR": str(self.session.run_dir),
+            "CLAUDEX_RUN_ID": self.session.run_id,
+            "CLAUDEX_CONTEXT_FILE": str(self.session.context_file),
+            "CLAUDEX_CONTEXT_SHA256": self.session.context_sha256,
+        })
+        completed = subprocess.run(
+            [sys.executable, str(REPOSITORY_ROOT / "controller/plugin/scripts/ensure-graphify-hook.py")],
+            env=environment, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
 
 
 if __name__ == "__main__":

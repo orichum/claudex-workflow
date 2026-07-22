@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+WORKFLOW_ROOT="${CLAUDEX_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+# shellcheck source=../../../lib/workflow.sh
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
+  jq -cn '{systemMessage:"Claudex health warning: service port configuration is invalid."}'
+  exit 0
+fi
+
 tmp_dir=""
 headroom_response=""
 headroom_error=""
@@ -58,11 +68,11 @@ if ! (umask 077
 fi
 
 curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
-  http://127.0.0.1:8787/health \
+  "http://127.0.0.1:$HEADROOM_PORT/health" \
   >"$headroom_response" 2>"$headroom_error" &
 headroom_pid=$!
 curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
-  http://127.0.0.1:8317/v1/models \
+  "http://127.0.0.1:$CLIPROXY_PORT/v1/models" \
   >"$models_response" 2>"$models_error" &
 models_pid=$!
 

@@ -25,6 +25,30 @@ fixture="$(mktemp -d "${TMPDIR:-/tmp}/claudex-workflow-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
+# shellcheck source=../discover-models.sh
+source "$ROOT/discover-models.sh"
+
+launcher_data="$(cd "$fixture" && pwd -P)/launcher-data"
+install -d -m 0700 "$launcher_data"
+install -d "$launcher_data/bin" "$launcher_data/claude-config"
+printf 'placeholder\n' >"$launcher_data/claudex.toml"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "%s\n" "$@"' >"$launcher_data/bin/claudex"
+chmod 0755 "$launcher_data/bin/claudex"
+if ! launcher_output="$(
+  cd "$ROOT"
+  CLAUDEX_CONFIG_FILE=/inherited/poison \
+    CLAUDEX_DATA_DIR="$launcher_data" \
+    "$launcher" marker 2>"$fixture/launcher.stderr"
+)"; then
+  cat "$fixture/launcher.stderr" >&2
+  exit 1
+fi
+rg -Fxq -- '--config' <<<"$launcher_output"
+rg -Fxq -- "$launcher_data/claudex.toml" <<<"$launcher_output"
+rg -Fxq -- 'marker' <<<"$launcher_output"
+[[ ! -s "$fixture/launcher.stderr" ]]
 
 bash -c '
   set +e +u
@@ -37,20 +61,51 @@ bash -c '
 render_claudex_config "$fixture/claudex.toml" \
   gpt-5.6-sol gpt-5.6-luna gpt-5.6-terra gpt-5.6-sol \
   claude-haiku-4-5-20251001 claude-sonnet-5 claude-opus-4-8 \
-  /portable/bin/claude
+  /portable/bin/claude 18317 18787
 rg -q '^claude_binary = "/portable/bin/claude"$' "$fixture/claudex.toml"
+rg -q '^base_url = "http://127.0.0.1:18787"$' "$fixture/claudex.toml"
+rg -q '^X-Headroom-Base-Url = "http://127.0.0.1:18317"$' "$fixture/claudex.toml"
 rg -q '^sonnet = "claude-sonnet-5"$' "$fixture/claudex.toml"
 rg -q '^opus = "claude-opus-4-8"$' "$fixture/claudex.toml"
 rg -q '^balanced = "gpt-5.6-terra"$' "$fixture/claudex.toml"
+
+render_cliproxy_config "$fixture/cliproxy.yaml" /portable/auth 18317
+rg -q '^port: 18317$' "$fixture/cliproxy.yaml"
 
 jq -n '{data:[
   {id:"gpt-5.6-luna"},{id:"gpt-5.6-terra"},{id:"gpt-5.6-sol"},
   {id:"claude-haiku-4-5-20251001"},{id:"claude-sonnet-5"},
   {id:"claude-opus-4-8"}
 ]}' >"$fixture/models.json"
-render_discovered_claudex_config "$fixture/models.json" "$fixture/discovered.toml"
+render_discovered_claudex_config \
+  "$fixture/models.json" "$fixture/discovered.toml" 18317 18787
 rg -q '^default_model = "gpt-5.6-sol"$' "$fixture/discovered.toml"
 rg -q '^opus = "claude-opus-4-8"$' "$fixture/discovered.toml"
+rg -q '^base_url = "http://127.0.0.1:18787"$' "$fixture/discovered.toml"
+rg -q '^X-Headroom-Base-Url = "http://127.0.0.1:18317"$' \
+  "$fixture/discovered.toml"
+
+for runtime_consumer in \
+  bin/claude-headroom discover-models.sh doctor.sh \
+  controller/plugin/scripts/check-local-services.sh
+do
+  rg -Fq 'read_service_ports' "$ROOT/$runtime_consumer"
+done
+
+endpoint_lock_data="$(cd "$fixture" && pwd -P)/endpoint-lock-data"
+install -d "$endpoint_lock_data/model-config"
+endpoint_lock_token="test:$$:$RANDOM"
+acquire_endpoint_config_lock "$endpoint_lock_data" "$endpoint_lock_token"
+if CLAUDEX_DATA_DIR="$endpoint_lock_data" discover_models_main \
+    2>"$fixture/endpoint-lock.stderr"; then
+  printf 'discovery ignored an active endpoint transaction lock\n' >&2
+  exit 1
+fi
+rg -q 'endpoint model publication is already locked' \
+  "$fixture/endpoint-lock.stderr"
+release_endpoint_config_lock "$endpoint_lock_data" "$endpoint_lock_token"
+[[ ! -e "$endpoint_lock_data/model-config/endpoint.lock" && \
+   ! -L "$endpoint_lock_data/model-config/endpoint.lock" ]]
 
 generation_data="$fixture/generation-data"
 install -d "$generation_data"
@@ -122,6 +177,38 @@ active_generation="$(resolve_model_config_generation "$generation_data")"
 [[ "$(cat "$active_generation/models.json")" == 'new models' ]]
 [[ "$(cat "$active_generation/claudex.toml")" == 'new config' ]]
 [[ "$(find "$generation_root" -mindepth 1 -maxdepth 1 -type d \
+  -name 'generation.*' | wc -l | tr -d ' ')" == 1 ]]
+
+transaction_data="$fixture/transaction-generation-data"
+install -d "$transaction_data"
+printf 'rollback models\n' >"$transaction_data/models.json"
+printf 'rollback config\n' >"$transaction_data/claudex.toml"
+migrate_legacy_model_config "$transaction_data"
+transaction_root="$transaction_data/model-config"
+rollback_target="$(readlink "$transaction_root/current")"
+deferred_candidate="$(mktemp -d "$transaction_root/candidate.XXXXXX")"
+printf 'deferred models\n' >"$deferred_candidate/models.json"
+printf 'deferred config\n' >"$deferred_candidate/claudex.toml"
+CLAUDEX_DEFER_MODEL_PRUNE=1 \
+  activate_model_config_generation "$transaction_data" "$deferred_candidate"
+[[ "$(find "$transaction_root" -mindepth 1 -maxdepth 1 -type d \
+  -name 'generation.*' | wc -l | tr -d ' ')" == 2 ]]
+rollback_snapshot="$fixture/prior-model-generation"
+cp -pPR "$transaction_root/$rollback_target" "$rollback_snapshot"
+rm -rf -- "$transaction_root/$rollback_target"
+restore_model_config_generation \
+  "$transaction_data" "$rollback_target" "$rollback_snapshot"
+[[ "$(readlink "$transaction_root/current")" == "$rollback_target" ]]
+[[ "$(find "$transaction_root" -mindepth 1 -maxdepth 1 -type d \
+  -name 'generation.*' | wc -l | tr -d ' ')" == 1 ]]
+
+deferred_candidate="$(mktemp -d "$transaction_root/candidate.XXXXXX")"
+printf 'committed models\n' >"$deferred_candidate/models.json"
+printf 'committed config\n' >"$deferred_candidate/claudex.toml"
+CLAUDEX_DEFER_MODEL_PRUNE=1 \
+  activate_model_config_generation "$transaction_data" "$deferred_candidate"
+prune_model_config_generations "$transaction_data"
+[[ "$(find "$transaction_root" -mindepth 1 -maxdepth 1 -type d \
   -name 'generation.*' | wc -l | tr -d ' ')" == 1 ]]
 
 failure_current_target="$(readlink "$generation_root/current")"

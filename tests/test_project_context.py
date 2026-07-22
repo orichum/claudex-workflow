@@ -399,6 +399,54 @@ class ContextCommandTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
+        self.tool_directory = self.root / "fake-tools"
+        self.tool_directory.mkdir()
+        self.tool_calls_path = self.root / "fake-tool-calls.jsonl"
+        for name in ("mempalace", "graphify"):
+            tool = self.tool_directory / name
+            tool.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+tool = Path(sys.argv[0]).name
+with Path(os.environ["FAKE_TOOL_CALLS"]).open("a", encoding="utf-8") as log:
+    log.write(json.dumps({"tool": tool, "args": sys.argv[1:], "cwd": os.getcwd()}) + "\\n")
+
+if tool == "mempalace":
+    palace = Path(sys.argv[sys.argv.index("--palace") + 1])
+    if "mine" in sys.argv:
+        (palace / "population-artifact").write_text("populated", encoding="utf-8")
+    print("raw mempalace success output")
+    raise SystemExit(0)
+
+operation = sys.argv[1]
+if operation in {"extract", "update"}:
+    print("raw graphify success output")
+    repository = Path(sys.argv[2])
+    failure = os.environ.get("FAKE_GRAPHIFY_FAIL")
+    if failure and failure in {"1", repository.name}:
+        print("fixture graphify failure", file=sys.stderr)
+        raise SystemExit(1)
+    graph = repository / "graphify-out" / "graph.json"
+    graph.parent.mkdir(exist_ok=True)
+    graph.write_text(json.dumps({"nodes": [{"id": "fixture"}]}), encoding="utf-8")
+if operation == "hook" and sys.argv[2] == "status" and os.environ.get("FAKE_CONFIG_MUTATION"):
+    config = Path(os.environ["FAKE_CONFIG_MUTATION"])
+    root = Path(os.environ["FAKE_CONFIG_ROOT"])
+    config.write_text(json.dumps({"contexts": [{
+        "root": str(root),
+        "dockerProfile": "concurrent",
+        "memoryPalace": str(root.parent / "concurrent-palace"),
+        "memoryWing": "concurrent",
+    }]}) + "\\n", encoding="utf-8")
+raise SystemExit(0)
+""",
+                encoding="utf-8",
+            )
+            tool.chmod(0o755)
         self.config_path = self.root / "project-context.json"
         self.config_path.write_text('{\n  "contexts": []\n}\n', encoding="utf-8")
         os.chmod(self.config_path, 0o640)
@@ -406,9 +454,17 @@ class ContextCommandTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def run_context(self, *arguments, input_text=None):
-        environment = os.environ.copy()
-        environment["HOME"] = str(self.root)
+    def run_context(self, *arguments, input_text=None, environment=None):
+        command_environment = os.environ.copy()
+        command_environment.update(
+            {
+                "HOME": str(self.root),
+                "PATH": f"{self.tool_directory}{os.pathsep}{command_environment.get('PATH', '')}",
+                "FAKE_TOOL_CALLS": str(self.tool_calls_path),
+            }
+        )
+        if environment is not None:
+            command_environment.update(environment)
         return subprocess.run(
             [
                 sys.executable,
@@ -420,7 +476,7 @@ class ContextCommandTests(unittest.TestCase):
                 *arguments,
             ],
             cwd=REPO_ROOT,
-            env=environment,
+            env=command_environment,
             input=input_text,
             check=False,
             capture_output=True,
@@ -434,6 +490,23 @@ class ContextCommandTests(unittest.TestCase):
         self.config_path.write_text(
             json.dumps({"contexts": contexts}, indent=2) + "\n",
             encoding="utf-8",
+        )
+
+    def read_tool_calls(self):
+        if not self.tool_calls_path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in self.tool_calls_path.read_text(encoding="utf-8").splitlines()
+        ]
+
+    def init_git(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-q", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     def test_add_defaults_lists_and_updates_a_context_with_readable_atomic_json(self):
@@ -462,7 +535,8 @@ class ContextCommandTests(unittest.TestCase):
 
         listed = self.run_context("list")
         self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertIn("ROOT\tDOCKER\tPALACE\tWING", listed.stdout)
+        self.assertIn("| PROJECT ROOT", listed.stdout)
+        self.assertIn("| MCP_DOCKER PROFILE | MEMPALACE PATH", listed.stdout)
         self.assertIn("docker-dev", listed.stdout)
 
         updated = self.run_context(
@@ -471,6 +545,276 @@ class ContextCommandTests(unittest.TestCase):
         self.assertEqual(updated.returncode, 0, updated.stderr)
         self.assertEqual(self.load_contexts()[0]["dockerProfile"], "docker-prod")
         self.assertEqual(self.load_contexts()[0]["memoryWing"], "prod")
+
+    def test_add_populates_before_committing_mapping(self):
+        added = self.run_context("add", str(self.workspace), "--docker", "dev")
+
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertEqual(len(self.load_contexts()), 1)
+        self.assertIn(f"[discover] scanning {self.workspace}", added.stdout)
+        self.assertIn("[discover] found 0 repositories", added.stdout)
+        self.assertIn("[mempalace] mining", added.stdout)
+        self.assertIn("[mempalace] verifying store", added.stdout)
+        self.assertIn("MemPalace: populated wing workspace", added.stdout)
+        self.assertNotIn("raw mempalace success output", added.stdout)
+        self.assertNotIn("raw graphify success output", added.stdout)
+
+    def test_population_failure_does_not_commit_new_mapping(self):
+        self.init_git(self.workspace)
+
+        failed = self.run_context(
+            "add",
+            str(self.workspace),
+            "--docker",
+            "dev",
+            environment={"FAKE_GRAPHIFY_FAIL": "1"},
+        )
+
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.load_contexts(), [])
+        self.assertEqual(
+            failed.stderr.splitlines()[0],
+            "ERROR: project context operation rejected",
+        )
+        self.assertIn("Graphify extract failed", failed.stderr)
+        self.assertNotIn("Traceback", failed.stderr)
+
+    def test_later_repository_failure_keeps_completed_population_progress(self):
+        first = self.workspace / "first"
+        second = self.workspace / "second"
+        self.init_git(first)
+        self.init_git(second)
+
+        failed = self.run_context(
+            "add",
+            str(self.workspace),
+            "--docker",
+            "dev",
+            environment={"FAKE_GRAPHIFY_FAIL": "second"},
+        )
+
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.load_contexts(), [])
+        self.assertIn("[mempalace] store verified", failed.stdout)
+        self.assertIn(
+            "[graphify 1/2] hooks installed and verified", failed.stdout
+        )
+        self.assertIn("[graphify 2/2] creating second", failed.stdout)
+        self.assertNotIn(
+            "[graphify 2/2] hooks installed and verified", failed.stdout
+        )
+        self.assertLessEqual(len(failed.stderr), 4_100)
+
+    def test_final_revalidation_failure_keeps_all_population_progress(self):
+        first = self.workspace / "first"
+        second = self.workspace / "second"
+        self.init_git(first)
+        self.init_git(second)
+
+        failed = self.run_context(
+            "add",
+            str(self.workspace),
+            "--docker",
+            "dev",
+            environment={
+                "FAKE_CONFIG_MUTATION": str(self.config_path),
+                "FAKE_CONFIG_ROOT": str(self.workspace),
+            },
+        )
+
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(
+            self.load_contexts(),
+            [
+                {
+                    "root": str(self.workspace),
+                    "dockerProfile": "concurrent",
+                    "memoryPalace": str(self.root / "concurrent-palace"),
+                    "memoryWing": "concurrent",
+                }
+            ],
+        )
+        self.assertIn("[mempalace] store verified", failed.stdout)
+        self.assertIn(
+            "[graphify 1/2] hooks installed and verified", failed.stdout
+        )
+        self.assertIn(
+            "[graphify 2/2] hooks installed and verified", failed.stdout
+        )
+        self.assertNotIn("| REPOSITORY", failed.stdout)
+        self.assertLessEqual(len(failed.stderr), 4_100)
+
+    def test_populate_rejects_an_unconfigured_root(self):
+        unconfigured = self.root / "unconfigured"
+        unconfigured.mkdir()
+
+        rejected = self.run_context("populate", str(unconfigured))
+
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.load_contexts(), [])
+        self.assertEqual(self.read_tool_calls(), [])
+        self.assertEqual(
+            rejected.stderr.splitlines()[0],
+            "ERROR: project context operation rejected",
+        )
+        self.assertNotIn("usage:", rejected.stderr)
+
+    def test_populate_uses_configured_route_without_rewriting_json(self):
+        palace = self.root / "configured-palace"
+        palace.mkdir(mode=0o700)
+        alias = self.root / "workspace-alias"
+        alias.symlink_to(self.workspace, target_is_directory=True)
+        self.write_contexts(
+            [
+                {
+                    "root": str(self.workspace),
+                    "dockerProfile": "configured-docker",
+                    "memoryPalace": str(palace),
+                    "memoryWing": "configured-wing",
+                }
+            ]
+        )
+        original = self.config_path.read_bytes()
+        original_inode = self.config_path.stat().st_ino
+
+        populated = self.run_context("populate", str(alias))
+
+        self.assertEqual(populated.returncode, 0, populated.stderr)
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(self.config_path.stat().st_ino, original_inode)
+        self.assertIn("MemPalace: populated wing configured-wing", populated.stdout)
+        mempalace_calls = [
+            call for call in self.read_tool_calls() if call["tool"] == "mempalace"
+        ]
+        self.assertEqual(
+            mempalace_calls[0]["args"],
+            [
+                "--palace",
+                str(palace),
+                "mine",
+                str(self.workspace),
+                "--mode",
+                "projects",
+                "--wing",
+                "configured-wing",
+            ],
+        )
+
+    def test_populate_initializes_a_repository_created_after_add(self):
+        added = self.run_context("add", str(self.workspace), "--docker", "dev")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        repository = self.workspace / "later-repository"
+        self.init_git(repository)
+
+        populated = self.run_context("populate", str(self.workspace))
+
+        self.assertEqual(populated.returncode, 0, populated.stderr)
+        self.assertIn(str(repository), populated.stdout)
+        self.assertTrue((repository / "graphify-out" / "graph.json").is_file())
+
+    def test_palace_artifacts_survive_population_failure(self):
+        self.init_git(self.workspace)
+        palace = self.root / "failed-palace"
+
+        failed = self.run_context(
+            "add",
+            str(self.workspace),
+            "--docker",
+            "dev",
+            "--palace",
+            str(palace),
+            environment={"FAKE_GRAPHIFY_FAIL": "1"},
+        )
+
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.load_contexts(), [])
+        self.assertEqual(
+            (palace / "population-artifact").read_text(encoding="utf-8"),
+            "populated",
+        )
+
+    def test_add_revalidates_after_concurrent_configuration_mutation(self):
+        concurrent_context = {
+            "root": str(self.workspace),
+            "dockerProfile": "concurrent",
+            "memoryPalace": str(self.root / "concurrent-palace"),
+            "memoryWing": "concurrent",
+        }
+
+        def mutate_configuration(*_arguments, **_keywords):
+            self.write_contexts([concurrent_context])
+            return SimpleNamespace()
+
+        with mock.patch.object(Path, "home", return_value=self.root), mock.patch.object(
+            project_context, "_prepare_palace"
+        ), mock.patch.object(
+            project_context, "populate_context", side_effect=mutate_configuration
+        ) as populate, mock.patch.object(
+            project_context, "render_population_result", return_value="populated"
+        ), contextlib.redirect_stderr(io.StringIO()):
+            result = project_context.context_main(
+                [
+                    "--config",
+                    str(self.config_path),
+                    "add",
+                    str(self.workspace),
+                    "--docker",
+                    "dev",
+                ]
+            )
+
+        self.assertNotEqual(result, 0)
+        self.assertEqual(self.load_contexts(), [concurrent_context])
+        populate.assert_called_once_with(
+            self.workspace,
+            self.root / ".mempalace" / "palaces" / "workspace",
+            "workspace",
+            progress=project_context._print_population_progress,
+        )
+
+    def test_list_renders_a_bordered_table_with_dynamic_equal_width_lines(self):
+        second = self.root / "a-much-longer-project-root"
+        second.mkdir()
+        self.write_contexts(
+            [
+                {
+                    "root": "~/xebia",
+                    "dockerProfile": "xebia",
+                    "memoryPalace": "~/.mempalace/palaces/xebia",
+                    "memoryWing": "xebia",
+                },
+                {
+                    "root": "~/complion/a-much-longer-project-root",
+                    "dockerProfile": "realtime-production",
+                    "memoryPalace": "~/.mempalace/palaces/complion",
+                    "memoryWing": "complion",
+                },
+            ]
+        )
+
+        listed = self.run_context("list")
+
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertNotIn("ROOT\tDOCKER\tPALACE\tWING", listed.stdout)
+        self.assertIn("| PROJECT ROOT", listed.stdout)
+        self.assertIn("| MCP_DOCKER PROFILE", listed.stdout)
+        self.assertIn("| MEMPALACE PATH", listed.stdout)
+        self.assertIn("| MEMPALACE WING |", listed.stdout)
+        self.assertIn("~/complion/a-much-longer-project-root", listed.stdout)
+        self.assertIn("realtime-production", listed.stdout)
+        lines = listed.stdout.splitlines()
+        self.assertTrue(lines)
+        self.assertEqual(len({len(line) for line in lines}), 1)
+        self.assertTrue(lines[0].startswith("+") and lines[0].endswith("+"))
+        self.assertEqual(lines[0], lines[2])
+        self.assertEqual(lines[0], lines[-1])
+
+    def test_list_renders_headers_for_an_empty_configuration(self):
+        listed = self.run_context("list")
+
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("| PROJECT ROOT | MCP_DOCKER PROFILE", listed.stdout)
+        self.assertEqual(len(listed.stdout.splitlines()), 4)
 
     def test_add_and_update_reject_unsafe_or_conflicting_candidates_without_writing(self):
         second = self.root / "second"
@@ -539,7 +883,8 @@ class ContextCommandTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("ROOT\tDOCKER\tPALACE\tWING", completed.stdout)
+        self.assertIn("| PROJECT ROOT", completed.stdout)
+        self.assertIn("| MCP_DOCKER PROFILE", completed.stdout)
 
     def test_add_rejects_canonical_root_alias_overlap_before_writing(self):
         alias = self.root / "workspace-alias"

@@ -90,7 +90,7 @@ claudex-login claude
 claudex-doctor
 ```
 
-The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, upgrades Headroom, MemPalace, and Graphify through `uv`, and reconciles workflow-owned services. It does not patch any upstream package source or installed package file.
+The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. The installer does not patch any upstream package source or installed package file.
 
 To update an existing checkout:
 
@@ -100,6 +100,14 @@ git pull --ff-only
 ```
 
 The installer is safe to rerun. An upgrade can restart a changed or unhealthy owned service and may interrupt active Claudex sessions, so finish those sessions first.
+
+Defaults are CLIProxyAPI `8317` and Headroom `8787`. A healthy service is reused only when its service definition and workflow data paths prove that Claudex owns it. If an unrelated listener occupies a requested port, an interactive installation shows the collision and prompts with the next available port. Non-interactive installations fail with an explicit override:
+
+```bash
+CLAUDEX_CLIPROXY_PORT=18317 CLAUDEX_HEADROOM_PORT=18787 ./install.sh
+```
+
+The selected pair is saved privately in `service-ports.json` under `CLAUDEX_DATA_DIR` and used by every launcher, generated configuration, health hook, discovery command, and diagnostic. Unknown service files and unrelated Headroom or CLIProxyAPI processes are never stopped or overwritten.
 
 ### Upgrade transaction
 
@@ -116,9 +124,11 @@ flowchart LR
     Activate -->|"Failure"| Restore
 ```
 
-Unchanged healthy services remain running. If Headroom activation fails, the installer attempts to restore the exact previous package version and service definition; it exits nonzero if recovery cannot be proven healthy. CLIProxyAPI binary, configuration, and service activation use the same transactional boundary.
+Unchanged healthy services remain running. Before a Headroom cutover, the private runtime must become healthy on an unused loopback port, so cold initialization happens while the existing proxy still serves traffic. Headroom uses the workflow-specific `com.user.claudex-headroom` LaunchAgent on macOS or `claudex-headroom.service` on systemd. A legacy generic Headroom service is migrated only when its configuration and state paths match this workflow exactly. If activation fails, the installer restores the previous owned service and private package state; it exits nonzero if recovery cannot be proven healthy. CLIProxyAPI binary, configuration, service activation, and endpoint state use the same transactional boundary.
 
-Normal `HUP`, `INT`, and `TERM` interruptions release owned locks. An uncatchable `SIGKILL` can leave model publication fail-closed; inspect the exact `model-config/publication.lock` under the workflow data directory before removing it manually.
+After success, the **Installation locations** summary prints the checkout, data directory, launcher links, actual runtime binaries, service files, selected ports, and whether each service was installed, migrated, reconciled, or reused.
+
+Normal `HUP`, `INT`, and `TERM` interruptions release owned locks. An uncatchable `SIGKILL` can leave model publication fail-closed; inspect the exact `model-config/publication.lock` or `model-config/endpoint.lock` under the workflow data directory before removing it manually.
 
 There are no background auto-updaters and no repository-managed version pins. Rerun the installer whenever you want current compatible releases.
 
@@ -139,13 +149,52 @@ Map a top-level parent such as `~/xebia` or `~/complion` once; every repository 
 ```bash
 claudex-context list
 claudex-context add ~/work/acme --docker acme
+claudex-context populate ~/work/acme
 claudex-context update ~/work/acme --docker acme-prod --wing production
 claudex-context remove ~/work/acme       # prompts for REMOVE
 claudex-context remove ~/work/acme --yes
 claudex-context validate
 ```
 
-`add` requires an existing root. Unless overridden, it creates `~/.mempalace/palaces/<root-name>` with `<root-name>` as the wing. Context mutations are locked and written atomically; duplicate, overlapping, symlinked, or unsafe paths are rejected before filesystem changes.
+`add` requires an existing root. Unless overridden, it creates `~/.mempalace/palaces/<root-name>` with `<root-name>` as the wing. It validates first, mines each outermost canonical repository into the configured MemPalace wing, initializes or updates code-only Graphify in every current repository and submodule, installs Graphify Git hooks, and commits the mapping only after success. If no Git repository exists, MemPalace mines the configured root. Context mutations are locked and written atomically; duplicate, overlapping, symlinked, or unsafe paths are rejected before filesystem changes.
+
+`populate` is the explicit, idempotent refresh for repositories cloned later. It uses Graphify `--code-only`; Graphify Git hooks then maintain current code after Git events. MemPalace is not mined on every commit, and population does not run as a service. Existing contexts should run `claudex-context populate ~/work/acme` once after upgrading to this feature.
+
+Repository identity comes from Git's common directory, not just its filesystem path. Discovery skips linked worktrees when their primary checkout is already in the context root, preventing the same repository from being mined and graphified twice. A linked worktree remains eligible when it is the only checkout inside the configured root; if several linked checkouts are present without the primary, one deterministic checkout represents the repository. Real submodules remain separate repositories.
+
+Keep linked worktrees beside canonical repositories, as in `parent/.worktrees/repository-branch`, rather than inside a repository that MemPalace must scan. MemPalace has no dynamic CLI exclusion flag, so a skipped worktree nested inside a canonical memory source aborts before MemPalace starts. This fail-closed guard avoids duplicate drawers without editing the project's `.gitignore`, `mempalace.yaml`, or upstream package code.
+
+Repository discovery and elapsed heartbeats are visible by default; there is
+no `--verbose` mode to enable. Long operations identify their source, palace,
+wing, repository, planned action, and elapsed time, followed by graph and hook
+verification:
+
+```text
+[discover] found 2 repositories
+[discover] skipped linked worktree api-fix — same repository as api
+[mempalace 1/2] mining /home/me/work/acme/api into /home/me/.mempalace/palaces/acme; wing acme
+[mempalace 1/2] mining — 00:10 elapsed
+[graphify 1/2] updating api
+[graphify 1/2] graph validated
+[graphify 1/2] hooks installed and verified
+```
+
+Successful upstream tool output remains captured so project content does not
+spill into the terminal. A failed tool still returns its bounded diagnostic
+tail after the already completed stages.
+
+```mermaid
+flowchart TD
+    Add["claudex-context add parent"] --> Validate["Validate context"]
+    Validate --> Repositories["Canonical repositories and submodules\nskip duplicate linked worktrees"]
+    Repositories --> Memory["Outermost repositories → MemPalace\nshared configured wing"]
+    Repositories --> Graphify["Per-repository Graphify init or update\n--code-only"]
+    Graphify --> Hooks["Install Graphify Git hooks"]
+    Memory --> Commit["Commit context mapping after success"]
+    Hooks --> Commit
+```
+
+The normal `claudex-gpt` session-routing flow below is unchanged.
 
 The bounded legacy migration is dry-run by default and never deletes its source:
 
@@ -185,13 +234,13 @@ OAuth credentials, downloaded binaries, generated configuration, model generatio
 ${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow
 ```
 
-`claudex-gpt` uses an isolated `CLAUDE_CONFIG_DIR`, so normal Claude settings and claude.ai login configuration are not replaced. LaunchAgent and systemd service definitions live in their OS configuration directories.
+`claudex-gpt` uses an isolated `CLAUDE_CONFIG_DIR`, so normal Claude settings and claude.ai login configuration are not replaced. Headroom's executable and Python environment live below `CLAUDEX_DATA_DIR/headroom`; existing global Headroom installations are left untouched. LaunchAgent and systemd service definitions live in their OS configuration directories.
 
 The repository stores no credentials, generated archives, project memories, or Graphify graphs. There are no persistent backups. Destructive, production, authentication, and other high-impact external writes still require explicit authority.
 
 ## Diagnose, test, and rollback
 
-Run `claudex-doctor` after installation or when a dependency, generated configuration, service, project context, strict MCP fixture, or controller contract needs checking. Run `claudex-context validate` after manually editing context configuration.
+Run `claudex-doctor` after installation or when a dependency, generated configuration, service, project context, strict MCP fixture, or controller contract needs checking. The doctor performs disposable MemPalace and Graphify MCP handshakes and a non-billable Headroom-to-CLIProxyAPI routing check. Run `claudex-context validate` after manually editing context configuration.
 
 Paid provider requests never run during installation. Trigger them explicitly when you want end-to-end validation:
 
@@ -208,3 +257,6 @@ Paid provider requests never run during installation. Trigger them explicitly wh
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 - [Claudex](https://github.com/StringKe/claudex)
 - [Claudex documentation](https://claudex.space/en/)
+- [Headroom](https://github.com/chopratejas/headroom)
+- [MemPalace](https://github.com/MemPalace/mempalace)
+- [Graphify](https://github.com/Graphify-Labs/graphify)

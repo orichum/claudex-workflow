@@ -10,7 +10,6 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
-CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
 
 for argument in "$@"; do
   case "$argument" in
@@ -38,6 +37,7 @@ while IFS= read -r inherited_claudex_variable; do
   unset "$inherited_claudex_variable"
 done < <(compgen -A variable CLAUDEX_)
 unset inherited_claudex_variable
+CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
 
 umask 077
 launch_dir="$(physical_pwd)"
