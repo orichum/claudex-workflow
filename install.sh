@@ -731,7 +731,7 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     "CLIProxyAPI failed readiness checks; previous service will be restored"
 fi
 
-for launcher in claudex-gpt claude-headroom claudex-login claudex-doctor claudex-context claudex-plugin; do
+for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-doctor claudex-context claudex-plugin; do
   ln -sfn "$WORKFLOW_ROOT/bin/$launcher" "$USER_BIN_DIR/$launcher"
 done
 

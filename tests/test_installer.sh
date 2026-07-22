@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for script in \
   install.sh doctor.sh rollback.sh smoke-test.sh discover-models.sh \
   bin/claudex-gpt bin/claudex-login bin/claudex-doctor bin/claude-headroom \
-  bin/claudex-context bin/claudex-plugin \
+  bin/claudex-headroom bin/claudex-context bin/claudex-plugin \
   controller/plugin/scripts/check-local-services.sh \
   controller/plugin/scripts/guard-orchestration.sh
 do
@@ -29,6 +29,44 @@ trap 'rm -rf -- "$fixture"' EXIT
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
 data_root="$fixture/data with % and \$"
+
+headroom_cli_root="$fixture/headroom-cli"
+install -d "$headroom_cli_root/headroom/bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "%s\n" "$HEADROOM_CONFIG_DIR" "$HEADROOM_WORKSPACE_DIR" "${HEADROOM_SAVINGS_PATH-unset}" "${HEADROOM_SAVINGS_EVENTS_PATH-unset}" "${HEADROOM_TOIN_PATH-unset}" "${HEADROOM_SUBSCRIPTION_STATE_PATH-unset}" "${HEADROOM_SETTINGS_PATH-unset}" "$@"' \
+  >"$headroom_cli_root/headroom/bin/headroom"
+chmod 0755 "$headroom_cli_root/headroom/bin/headroom"
+headroom_cli_output="$(
+  CLAUDEX_DATA_DIR="$headroom_cli_root" \
+  HEADROOM_CONFIG_DIR=/inherited/config \
+  HEADROOM_WORKSPACE_DIR=/inherited/workspace \
+  HEADROOM_SAVINGS_PATH=/inherited/savings \
+  HEADROOM_SAVINGS_EVENTS_PATH=/inherited/savings-events \
+  HEADROOM_TOIN_PATH=/inherited/toin \
+  HEADROOM_SUBSCRIPTION_STATE_PATH=/inherited/subscription \
+  HEADROOM_SETTINGS_PATH=/inherited/settings \
+    "$ROOT/bin/claudex-headroom" perf --hours 24 --format json
+)"
+[[ "$(sed -n '1p' <<<"$headroom_cli_output")" == \
+   "$headroom_cli_root/headroom/config" ]]
+[[ "$(sed -n '2p' <<<"$headroom_cli_output")" == \
+   "$headroom_cli_root/headroom/state" ]]
+[[ "$(sed -n '3,7p' <<<"$headroom_cli_output")" == \
+   $'unset\nunset\nunset\nunset\nunset' ]]
+[[ "$(sed -n '8,12p' <<<"$headroom_cli_output")" == \
+   $'perf\n--hours\n24\n--format\njson' ]]
+
+if CLAUDEX_DATA_DIR="$fixture/missing-headroom" \
+    "$ROOT/bin/claudex-headroom" perf \
+    >"$fixture/missing-headroom.stdout" \
+    2>"$fixture/missing-headroom.stderr"; then
+  printf 'claudex-headroom accepted a missing private binary\n' >&2
+  exit 1
+fi
+[[ ! -s "$fixture/missing-headroom.stdout" ]]
+rg -q 'workflow Headroom is not installed' \
+  "$fixture/missing-headroom.stderr"
 
 for valid_port in 1024 8317 8787 65535; do
   valid_service_port "$valid_port"
@@ -1143,6 +1181,7 @@ rg -q 'interrupt active Claudex sessions' "$ROOT/install.sh"
 rg -q 'claudex-context' "$ROOT/install.sh"
 rg -Fq '"$WORKFLOW_ROOT/bin/claudex-plugin" sync' "$ROOT/install.sh"
 rg -q 'for launcher in .*claudex-plugin' "$ROOT/install.sh"
+rg -q 'for launcher in .*claudex-headroom' "$ROOT/install.sh"
 
 python3 - "$ROOT/README.md" <<'PY'
 import sys

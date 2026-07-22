@@ -137,8 +137,13 @@ There are no background auto-updaters and no repository-managed version pins. Re
 ```bash
 claudex-gpt          # GPT controller with bounded GPT and Claude specialists
 claude-headroom      # native Claude Code through Headroom
+claudex-headroom perf                       # workflow Headroom performance, last 7 days
+claudex-headroom perf --hours 24 --format json
 claudex-doctor       # configuration, dependency, model, and service checks
 ```
+
+`claudex-headroom` reads only this workflow's private Headroom state and leaves
+any global Headroom installation untouched.
 
 Inside `claudex-gpt`, `/model opus` selects `claude-opus-4-8`; `/model gpt-5.6-sol` returns to Sol. Do not set `CLAUDE_CODE_SUBAGENT_MODEL` globally—the controller owns specialist selection.
 

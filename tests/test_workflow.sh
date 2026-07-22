@@ -671,6 +671,31 @@ rg -q 'claudex-login codex.*claudex-login claude.*discover-models.sh' \
 rg -q 'Graphify is present' "$ROOT/controller/controller-policy.md"
 rg -q 'Use MemPalace automatically' "$ROOT/controller/controller-policy.md"
 rg -q 'Docker MCP profile selected' "$ROOT/controller/controller-policy.md"
+rg -q 'Lead user-facing updates and final responses with the outcome' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'give one concise opening update' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'update only on a material' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'approval need, or wait beyond 60 seconds' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'tool calls, interface activity, or repeat plans already visible' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'For multi-repository or ordered handoffs' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'numbered headings, consistent semantic markers, and syntax-highlighted command blocks' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'Never rely on color alone or emit raw ANSI escapes' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'Number only ordered steps' "$ROOT/controller/controller-policy.md"
+rg -q 'Omit unrelated sidebars and speculative work' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'State what changed' "$ROOT/controller/controller-policy.md"
+rg -q 'Give a next action only when the user must act' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'Never omit blockers, uncertainty, validation, safety, rollback' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'self-contained handoff' "$ROOT/controller/controller-policy.md"
 test ! -d "$ROOT/integrations/docker"
 
 # Sol receives complete independent evidence directly; an extra mandatory

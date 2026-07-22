@@ -39,3 +39,15 @@ transcripts or routine progress. Use the Docker MCP profile selected for the
 current parent workspace, when one is configured and its tools are relevant.
 Routine create, update, comment, delete, and transition operations are available; obtain confirmation
 before destructive, production, or otherwise high-impact external writes.
+
+Lead user-facing updates and final responses with the outcome.
+For non-trivial work, give one concise opening update.
+After that, update only on a material discovery, blocker, approval need, or wait beyond 60 seconds.
+Do not narrate tool calls, interface activity, or repeat plans already visible.
+For multi-repository or ordered handoffs, use numbered headings, consistent semantic markers, and syntax-highlighted command blocks.
+Never rely on color alone or emit raw ANSI escapes.
+Number only ordered steps.
+Omit unrelated sidebars and speculative work.
+State what changed.
+Give a next action only when the user must act.
+Never omit blockers, uncertainty, validation, safety, rollback, or context required for a self-contained handoff.
