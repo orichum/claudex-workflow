@@ -38,12 +38,14 @@ class SessionConfigTests(unittest.TestCase):
         self.xebia = self.home / "xebia"
         self.complion = self.home / "complion"
         self.launch_dir = self.xebia / "project"
-        self.palace = self.home / ".mempalace" / "palace"
+        self.palace = self.home / ".mempalace" / "palaces" / "xebia"
+        self.complion_palace = self.home / ".mempalace" / "palaces" / "complion"
         for directory in (
             self.runtime,
             self.launch_dir,
             self.complion,
             self.palace,
+            self.complion_palace,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         self.palace.chmod(0o700)
@@ -65,16 +67,17 @@ class SessionConfigTests(unittest.TestCase):
         self.config_path.write_text(
             json.dumps(
                 {
-                    "palacePath": str(palace),
                     "contexts": [
                         {
                             "root": str(self.xebia),
                             "dockerProfile": "xebia",
+                            "memoryPalace": str(palace),
                             "memoryWing": "xebia",
                         },
                         {
                             "root": str(self.complion),
                             "dockerProfile": "realtime",
+                            "memoryPalace": str(self.complion_palace),
                             "memoryWing": "complion",
                         },
                     ],
@@ -128,6 +131,23 @@ class SessionConfigTests(unittest.TestCase):
             self.workflow_root, session.run_dir, session.context_sha256
         )
         self.assertEqual(verified, session)
+
+    def test_explicit_private_data_root_keeps_state_outside_checkout(self) -> None:
+        data_root = self.fixture / "data-root"
+        data_root.mkdir(mode=0o700)
+        session = create_session(
+            self.workflow_root, self.launch_dir, self.config_path,
+            data_root=data_root,
+        )
+        self.assertEqual(session.run_dir.parent, data_root / "state" / "sessions")
+        self.assertFalse((self.workflow_root / "runtime" / "state").exists())
+        self.assertEqual(
+            verify_session(
+                self.workflow_root, session.run_dir, session.context_sha256,
+                data_root=data_root,
+            ),
+            session,
+        )
 
     def test_context_binding_reuses_verified_bytes_without_requiring_empty_mcp(self) -> None:
         session = self.create()

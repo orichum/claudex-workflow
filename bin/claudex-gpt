@@ -9,6 +9,8 @@ done
 WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
 
 for argument in "$@"; do
   case "$argument" in
@@ -43,6 +45,7 @@ session_json="$({
   cd "$WORKFLOW_ROOT"
   python3 -m integrations.common.session_config create \
     --workflow-root "$WORKFLOW_ROOT" \
+    --data-root "$WORKFLOW_DATA_ROOT" \
     --launch-dir "$launch_dir"
 })"
 if ! jq -e '
@@ -63,7 +66,7 @@ fi
 session_run_dir="$(jq -er '.runDir' <<<"$session_json")"
 session_mcp_config="$(jq -er '.mcpFile' <<<"$session_json")"
 session_context_sha256="$(jq -er '.contextSha256' <<<"$session_json")"
-assert_owned_session "$WORKFLOW_ROOT" "$session_run_dir" "$session_context_sha256"
+assert_owned_session "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$session_run_dir" "$session_context_sha256"
 
 export CLAUDEX_MCP_CONFIG="$session_mcp_config"
 CLAUDEX_RUN_DIR="$(dirname "$session_mcp_config")"
@@ -72,8 +75,14 @@ export CLAUDEX_CONTEXT_FILE="$CLAUDEX_RUN_DIR/context.json"
 export CLAUDEX_CONTEXT_SHA256="$session_context_sha256"
 CLAUDEX_RUN_ID="$(basename "$CLAUDEX_RUN_DIR")"
 export CLAUDEX_RUN_ID
+export CLAUDEX_WORKFLOW_ROOT="$WORKFLOW_ROOT"
+export CLAUDEX_DATA_DIR="$WORKFLOW_DATA_ROOT"
 
-export CLAUDE_CONFIG_DIR="$WORKFLOW_ROOT/runtime/claude-config"
+if ! python3 "$WORKFLOW_ROOT/controller/plugin/scripts/ensure-graphify-hook.py"; then
+  printf 'WARN: Graphify Git hook could not be verified; session will continue with the existing graph.\n' >&2
+fi
+
+export CLAUDE_CONFIG_DIR="$WORKFLOW_DATA_ROOT/claude-config"
 export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3
 export CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION=24
 export CLAUDE_CODE_MAX_RETRIES=2
@@ -85,8 +94,8 @@ unset CLAUDE_CODE_SUBAGENT_MODEL
 unset CLAUDE_CODE_DISABLE_WORKFLOWS
 unset CLAUDE_CODE_EFFORT_LEVEL
 
-exec "$WORKFLOW_ROOT/bin/claudex" \
-  --config "$WORKFLOW_ROOT/runtime/claudex.toml" \
+exec "$WORKFLOW_DATA_ROOT/bin/claudex" \
+  --config "$CLAUDEX_CONFIG_FILE" \
   run gpt \
   --mcp-config "$CLAUDEX_MCP_CONFIG" \
   --strict-mcp-config \

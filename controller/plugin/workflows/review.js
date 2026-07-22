@@ -31,12 +31,18 @@ if (parsedArgs.highRisk !== undefined && typeof parsedArgs.highRisk !== 'boolean
 }
 const highRisk = parsedArgs.highRisk === true
 
-const fence = value =>
-  '<<<UNTRUSTED_DATA\n' +
-  String(value == null ? '' : value)
+const fence = value => {
+  const sanitized = String(value == null ? '' : value)
     .replace(/<<<UNTRUSTED_DATA|UNTRUSTED_DATA>>>/g, '[marker stripped]')
-    .slice(0, 20000) +
-  '\nUNTRUSTED_DATA>>>'
+  const payload = sanitized.length <= 20000
+    ? sanitized
+    : JSON.stringify({
+        truncated: true,
+        originalLength: sanitized.length,
+        prefix: sanitized.slice(0, 19000),
+      })
+  return '<<<UNTRUSTED_DATA\n' + payload + '\nUNTRUSTED_DATA>>>'
+}
 
 const taskData = fence(JSON.stringify({ subject, scope }))
 

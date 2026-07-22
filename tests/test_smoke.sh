@@ -11,6 +11,7 @@ cp "$WORKFLOW_ROOT/smoke-test.sh" "$fixture_root/smoke-test.sh"
 cat >"$fixture_root/bin/claudex-gpt" <<'EOF'
 #!/usr/bin/env bash
 fixture_workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fixture_data_root="${CLAUDEX_DATA_DIR:-$fixture_workflow_root/runtime}"
 expanded_review_path="$fixture_workflow_root/controller/plugin/workflows/review.js"
 controller_session_id='11111111-1111-4111-8111-111111111111'
 
@@ -70,7 +71,7 @@ if [[ "${SMOKE_SCENARIO:-expanded}" == degraded ]]; then
   workflow_status=degraded
   workflow_missing='[{"label":"critique","agentType":"claudex-controller:sonnet-critic","reason":"missing-structured-result"}]'
 fi
-workflow_record_dir="$fixture_workflow_root/runtime/claude-config/projects/-fixture/$controller_session_id/workflows"
+workflow_record_dir="$fixture_data_root/claude-config/projects/-fixture/$controller_session_id/workflows"
 mkdir -p "$workflow_record_dir"
 jq -cn \
   --arg status "$workflow_status" \
@@ -94,6 +95,7 @@ case "${SMOKE_SCENARIO:-expanded}" in
 esac
 EOF
 chmod 0755 "$fixture_root/bin/claudex-gpt"
+export CLAUDEX_DATA_DIR="$fixture_root/runtime"
 
 assert_passes() {
   local scenario="$1"

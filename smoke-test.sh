@@ -2,6 +2,7 @@
 set -euo pipefail
 
 WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKFLOW_DATA_ROOT="${CLAUDEX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow}"
 provider="${1:-gpt}"
 smoke_output="$(mktemp /tmp/claudex-smoke.XXXXXX)"
 trap 'rm -f "$smoke_output"' EXIT
@@ -90,7 +91,7 @@ EOF
   workflow_records=()
   while IFS= read -r record; do
     workflow_records+=("$record")
-  done < <(find "$WORKFLOW_ROOT/runtime/claude-config/projects" \
+  done < <(find "$WORKFLOW_DATA_ROOT/claude-config/projects" \
     -type f -path "*/$controller_session_id/workflows/*.json" \
     -print 2>/dev/null)
   if [[ "${#workflow_records[@]}" -ne 1 ]]; then

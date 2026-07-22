@@ -378,21 +378,31 @@ def _validated_workflow_root(workflow_root: Path) -> Path:
     return _require_directory(_absolute_lexical(workflow_root))
 
 
-def _validated_session_ancestors(workflow_root: Path) -> tuple[Path, Path, Path, Path]:
+def _validated_session_ancestors(
+    workflow_root: Path, data_root: Optional[Path] = None
+) -> tuple[Path, Path, Path, Path]:
     workflow_root = _validated_workflow_root(workflow_root)
-    runtime = require_owned_component(workflow_root, "runtime", private=False)
-    state = require_owned_component(runtime, "state", private=True)
+    if data_root is None:
+        data_root = require_owned_component(workflow_root, "runtime", private=False)
+    else:
+        data_root = _require_directory(_absolute_lexical(data_root), expected_mode=0o700)
+    state = require_owned_component(data_root, "state", private=True)
     sessions = require_owned_component(state, "sessions", private=True)
-    return workflow_root, runtime, state, sessions
+    return workflow_root, data_root, state, sessions
 
 
 def create_session(
-    workflow_root: Path, launch_dir: Path, config_path: Path
+    workflow_root: Path, launch_dir: Path, config_path: Path,
+    data_root: Optional[Path] = None,
 ) -> SessionPaths:
     """Create one session with project-relevant MCP servers only."""
     workflow_root = _validated_workflow_root(workflow_root)
-    runtime = require_owned_component(workflow_root, "runtime", private=False)
-    state = require_owned_component(runtime, "state", private=True, create=True)
+    verification_data_root = data_root
+    if data_root is None:
+        data_root = require_owned_component(workflow_root, "runtime", private=False)
+    else:
+        data_root = _require_directory(_absolute_lexical(data_root), expected_mode=0o700)
+    state = require_owned_component(data_root, "state", private=True, create=True)
     sessions = require_owned_component(state, "sessions", private=True, create=True)
     try:
         run_dir = Path(tempfile.mkdtemp(prefix="run.", dir=sessions))
@@ -407,7 +417,9 @@ def create_session(
     context_sha256 = hashlib.sha256(context_bytes).hexdigest()
     mcp_file = run_dir / "mcp.json"
     atomic_json(mcp_file, _session_mcp_payload(context), 0o600)
-    return verify_session(workflow_root, run_dir, context_sha256)
+    return verify_session(
+        workflow_root, run_dir, context_sha256, verification_data_root
+    )
 
 
 def verify_context_binding(
@@ -416,9 +428,12 @@ def verify_context_binding(
     context_file: Path,
     context_sha256: str,
     run_id: str,
+    data_root: Optional[Path] = None,
 ) -> ContextBinding:
     """Bind fixed authority fields to the exact verified context bytes."""
-    workflow_root, _, _, sessions = _validated_session_ancestors(workflow_root)
+    workflow_root, _, _, sessions = _validated_session_ancestors(
+        workflow_root, data_root
+    )
     if (
         not isinstance(run_id, str)
         or not run_id.startswith("run.")
@@ -466,7 +481,8 @@ def verify_context_binding(
 
 
 def verify_session(
-    workflow_root: Path, run_dir: Path, context_sha256: str
+    workflow_root: Path, run_dir: Path, context_sha256: str,
+    data_root: Optional[Path] = None,
 ) -> SessionPaths:
     """Revalidate session context and its exact project MCP configuration."""
     run_dir = _absolute_lexical(run_dir)
@@ -476,6 +492,7 @@ def verify_session(
         run_dir / "context.json",
         context_sha256,
         run_dir.name,
+        data_root,
     )
     mcp_file = binding.run_dir / "mcp.json"
     mcp_bytes = _read_owned_file(binding.run_dir, "mcp.json", 0o600)
@@ -498,11 +515,13 @@ def _create_parser() -> argparse.ArgumentParser:
     create.add_argument("--workflow-root", required=True, type=Path)
     create.add_argument("--launch-dir", required=True, type=Path)
     create.add_argument("--config", type=Path)
+    create.add_argument("--data-root", type=Path)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--workflow-root", required=True, type=Path)
     verify.add_argument("--run-dir", required=True, type=Path)
     verify.add_argument("--context-sha256", required=True)
+    verify.add_argument("--data-root", type=Path)
     return parser
 
 
@@ -514,7 +533,8 @@ def main() -> int:
                 arguments.workflow_root / "controller" / "project-context.json"
             )
             session = create_session(
-                arguments.workflow_root, arguments.launch_dir, config_path
+                arguments.workflow_root, arguments.launch_dir, config_path,
+                arguments.data_root,
             )
             print(
                 json.dumps(
@@ -534,6 +554,7 @@ def main() -> int:
                 arguments.workflow_root,
                 arguments.run_dir,
                 arguments.context_sha256,
+                arguments.data_root,
             )
     except (SessionError, ContextError, json.JSONDecodeError, OSError, ValueError):
         print("ERROR: owned session state rejected", file=os.sys.stderr)

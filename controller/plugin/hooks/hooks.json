@@ -21,6 +21,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "mcp__mempalace__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/route-mempalace-input.py\"",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -29,8 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/check-local-services.sh",
-            "args": [],
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/check-local-services.sh\"",
             "timeout": 3
           }
         ]

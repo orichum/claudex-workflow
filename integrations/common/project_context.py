@@ -2,6 +2,8 @@
 """Resolve immutable workflow context from a physical launch directory."""
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import stat
@@ -102,10 +104,68 @@ def _structural_path(value: object, home: Path, label: str) -> Path:
     return Path(os.path.normpath(str(expanded)))
 
 
+def _structural_existing_ancestor_path(
+    path: Path, home: Path, label: str, *, reject_symlinks: bool
+) -> Path:
+    home_real = home.resolve(strict=False)
+    lexical_root = Path(path.anchor)
+    if path == lexical_root or path == home:
+        raise ContextError(f"{label} is unsafe")
+    cursor = lexical_root
+    for component in path.parts[1:]:
+        cursor /= component
+        try:
+            value = cursor.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as error:
+            raise ContextError(f"{label} existing ancestor is inaccessible") from error
+        if reject_symlinks and stat.S_ISLNK(value.st_mode):
+            raise ContextError(f"{label} existing ancestors must not be symlinks")
+    try:
+        canonical = path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise ContextError(f"{label} could not be resolved") from error
+    if canonical == Path(canonical.anchor) or canonical == home_real:
+        raise ContextError(f"{label} is unsafe")
+    return canonical
+
+
+def _validate_config_value(raw: object, home: Path) -> None:
+    config = _require_exact_keys(raw, {"contexts"}, "configuration")
+    raw_contexts = config["contexts"]
+    if not isinstance(raw_contexts, list):
+        raise ContextError("contexts must be a list")
+
+    lexical_roots = []
+    lexical_palaces = set()
+    memory_wings = set()
+    for index, raw_context in enumerate(raw_contexts):
+        context = _require_exact_keys(
+            raw_context,
+            {"root", "dockerProfile", "memoryPalace", "memoryWing"},
+            f"context {index}",
+        )
+        root = _structural_path(context["root"], home, "root")
+        palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
+        _require_non_blank(context["dockerProfile"], "dockerProfile")
+        memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
+        if any(_contains(existing_root, root) or _contains(root, existing_root)
+               for existing_root in lexical_roots):
+            raise ContextError("configured roots must not overlap")
+        if palace in lexical_palaces:
+            raise ContextError("configured palaces must be lexically unique")
+        if memory_wing in memory_wings:
+            raise ContextError("memoryWing values must be unique")
+        lexical_roots.append(root)
+        lexical_palaces.add(palace)
+        memory_wings.add(memory_wing)
+
+
 def validate_config_structure(
     config_path: Path, home: Optional[Path] = None
 ) -> None:
-    """Validate closed routing syntax without accessing configured paths."""
+    """Validate routing structure and existing path ancestors without mutation."""
     home = Path.home() if home is None else Path(home)
     try:
         with Path(config_path).open(encoding="utf-8") as handle:
@@ -113,29 +173,16 @@ def validate_config_structure(
     except (json.JSONDecodeError, UnicodeError, OSError) as error:
         raise ContextError("configuration could not be parsed") from error
 
-    config = _require_exact_keys(raw, {"palacePath", "contexts"}, "configuration")
-    _structural_path(config["palacePath"], home, "palacePath")
-    raw_contexts = config["contexts"]
-    if not isinstance(raw_contexts, list):
-        raise ContextError("contexts must be a list")
-
-    lexical_roots = set()
-    memory_wings = set()
-    for index, raw_context in enumerate(raw_contexts):
-        context = _require_exact_keys(
-            raw_context,
-            {"root", "dockerProfile", "memoryWing"},
-            f"context {index}",
-        )
+    _validate_config_value(raw, home)
+    for context in raw["contexts"]:
         root = _structural_path(context["root"], home, "root")
-        _require_non_blank(context["dockerProfile"], "dockerProfile")
-        memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
-        if root in lexical_roots:
-            raise ContextError("configured roots must be lexically unique")
-        if memory_wing in memory_wings:
-            raise ContextError("memoryWing values must be unique")
-        lexical_roots.add(root)
-        memory_wings.add(memory_wing)
+        palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
+        _structural_existing_ancestor_path(
+            root, home, "root", reject_symlinks=False
+        )
+        _structural_existing_ancestor_path(
+            palace, home, "memoryPalace", reject_symlinks=True
+        )
 
 
 def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
@@ -144,10 +191,7 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
     with Path(config_path).open(encoding="utf-8") as handle:
         raw = json.load(handle)
 
-    config = _require_exact_keys(raw, {"palacePath", "contexts"}, "configuration")
-    palace_path = _expand(config["palacePath"], home)
-    if not palace_path.is_absolute():
-        raise ContextError("configured palace must expand to an absolute path")
+    config = _require_exact_keys(raw, {"contexts"}, "configuration")
 
     raw_contexts = config["contexts"]
     if not isinstance(raw_contexts, list):
@@ -155,11 +199,12 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
 
     contexts = []
     canonical_roots = set()
+    canonical_palaces = set()
     memory_wings = set()
     for index, raw_context in enumerate(raw_contexts):
         context = _require_exact_keys(
             raw_context,
-            {"root", "dockerProfile", "memoryWing"},
+            {"root", "dockerProfile", "memoryPalace", "memoryWing"},
             f"context {index}",
         )
         root_path = _expand(context["root"], home)
@@ -171,26 +216,42 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
             raise ContextError("configured root must resolve to a directory") from error
         if not root_real.is_dir():
             raise ContextError("configured root must resolve to a directory")
+        if root_real == Path(root_real.anchor) or root_real == home.resolve(strict=False):
+            raise ContextError("configured root is unsafe")
+
+        palace_path = _expand(context["memoryPalace"], home)
+        if not palace_path.is_absolute():
+            raise ContextError("configured palace must expand to an absolute path")
+        try:
+            palace_real = palace_path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            palace_real = None
 
         docker_profile = _require_non_blank(
             context["dockerProfile"], "dockerProfile"
         )
         memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
-        if root_real in canonical_roots:
-            raise ContextError("configured roots must be canonically unique")
+        if any(_contains(existing_root, root_real) or _contains(root_real, existing_root)
+               for existing_root in canonical_roots):
+            raise ContextError("configured roots must not overlap")
+        if palace_real is not None and palace_real in canonical_palaces:
+            raise ContextError("configured palaces must be canonically unique")
         if memory_wing in memory_wings:
             raise ContextError("memoryWing values must be unique")
         canonical_roots.add(root_real)
+        if palace_real is not None:
+            canonical_palaces.add(palace_real)
         memory_wings.add(memory_wing)
         contexts.append(
             {
                 "root": root_real,
                 "dockerProfile": docker_profile,
+                "memoryPalace": palace_path,
                 "memoryWing": memory_wing,
             }
         )
 
-    return {"palacePath": palace_path, "contexts": contexts}
+    return {"contexts": contexts}
 
 
 def resolve_context(config: dict, launch_dir: Path) -> dict:
@@ -210,7 +271,7 @@ def resolve_context(config: dict, launch_dir: Path) -> dict:
     if matches:
         selected = matches[0]
         palace_real, failure_code = _validate_palace_candidate(
-            config["palacePath"]
+            selected["memoryPalace"]
         )
         route = {
             "id": selected["memoryWing"],
@@ -261,14 +322,250 @@ def _descriptor_is_open(file_descriptor: int) -> bool:
         return False
 
 
-def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "validate-config":
+def _read_context_document(config_path: Path, home: Path) -> dict:
+    try:
+        with Path(config_path).open(encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (json.JSONDecodeError, UnicodeError, OSError) as error:
+        raise ContextError("configuration could not be parsed") from error
+    _validate_config_value(document, home)
+    return document
+
+
+def _write_context_document(config_path: Path, document: dict) -> None:
+    config_path = Path(config_path)
+    mode = stat.S_IMODE(config_path.stat().st_mode)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{config_path.name}.", dir=config_path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, config_path)
+    except BaseException:
+        os.close(descriptor) if _descriptor_is_open(descriptor) else None
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+@contextlib.contextmanager
+def _context_lock(config_path: Path):
+    descriptor = None
+    try:
+        descriptor = os.open(Path(config_path).parent, os.O_RDONLY)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise ContextError("configuration lock is unavailable") from error
+    try:
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _context_root(value: str, home: Path, *, must_exist: bool) -> Path:
+    root = _structural_path(value, home, "root")
+    if root == Path(root.anchor) or root == home:
+        raise ContextError("root is unsafe")
+    if not must_exist:
+        return root
+    try:
+        resolved = root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ContextError("root must resolve to an existing directory") from error
+    if not resolved.is_dir():
+        raise ContextError("root must resolve to an existing directory")
+    if resolved == Path(resolved.anchor) or resolved == home.resolve(strict=False):
+        raise ContextError("root is unsafe")
+    return resolved
+
+
+def _context_palace(value: str, home: Path) -> Path:
+    palace = _structural_path(value, home, "memoryPalace")
+    if palace == Path(palace.anchor) or palace == home:
+        raise ContextError("memoryPalace is unsafe")
+    return palace
+
+
+def _ensure_new_palace(palace: Path) -> None:
+    if palace.exists():
+        return
+    palace.mkdir(parents=True, mode=0o700)
+    os.chmod(palace, 0o700)
+
+
+def _prepare_palace(palace: Path) -> None:
+    _structural_existing_ancestor_path(
+        palace, Path.home(), "memoryPalace", reject_symlinks=True
+    )
+    try:
+        _ensure_new_palace(palace)
+    except OSError as error:
+        raise ContextError("memoryPalace could not be created") from error
+    _, failure_code = _validate_palace_candidate(palace)
+    if failure_code is not None:
+        raise ContextError("memoryPalace is unsafe")
+
+
+def _validate_context_candidate(document: dict, home: Path) -> None:
+    _validate_config_value(document, home)
+    canonical_roots = []
+    canonical_palaces = set()
+    for context in document["contexts"]:
+        root = _context_root(context["root"], home, must_exist=True)
+        palace = _context_palace(context["memoryPalace"], home).resolve(strict=False)
+        if any(_contains(existing_root, root) or _contains(root, existing_root)
+               for existing_root in canonical_roots):
+            raise ContextError("configured roots must not overlap")
+        if palace in canonical_palaces:
+            raise ContextError("configured palaces must be canonically unique")
+        canonical_roots.append(root)
+        canonical_palaces.add(palace)
+
+
+def _find_context_index(contexts: list[dict], root: Path, home: Path) -> int:
+    for index, context in enumerate(contexts):
+        if _context_root(context["root"], home, must_exist=False) == root:
+            return index
+    raise ContextError("context root is not configured")
+
+
+def _find_exact_context_index(contexts: list[dict], root: str) -> int:
+    for index, context in enumerate(contexts):
+        if context["root"] == root:
+            return index
+    raise ContextError("context root is not configured")
+
+
+def context_main(arguments: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="claudex-context")
+    parser.add_argument("--config", required=True, type=Path)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list")
+    add = commands.add_parser("add")
+    add.add_argument("root")
+    add.add_argument("--docker", required=True)
+    add.add_argument("--palace")
+    add.add_argument("--wing")
+    update = commands.add_parser("update")
+    update.add_argument("root")
+    update.add_argument("--docker")
+    update.add_argument("--palace")
+    update.add_argument("--wing")
+    remove = commands.add_parser("remove")
+    remove.add_argument("root")
+    remove.add_argument("--yes", action="store_true")
+    commands.add_parser("validate")
+    parsed = parser.parse_args(arguments)
+    home = Path.home()
+
+    try:
+        lock = (
+            _context_lock(parsed.config)
+            if parsed.command not in ("list", "validate")
+            else contextlib.nullcontext()
+        )
+        with lock:
+            document = _read_context_document(parsed.config, home)
+            contexts = document["contexts"]
+            if parsed.command == "validate":
+                _validate_context_candidate(document, home)
+                return 0
+            if parsed.command == "list":
+                print("ROOT\tDOCKER\tPALACE\tWING")
+                for context in contexts:
+                    print(
+                        "{root}\t{dockerProfile}\t{memoryPalace}\t{memoryWing}".format(
+                            **context
+                        )
+                    )
+                return 0
+            if parsed.command == "add":
+                root = _context_root(parsed.root, home, must_exist=True)
+                palace_value = parsed.palace or f"~/.mempalace/palaces/{root.name}"
+                palace = _context_palace(palace_value, home)
+                context = {
+                    "root": str(root),
+                    "dockerProfile": parsed.docker,
+                    "memoryPalace": (
+                        palace_value if parsed.palace is None else str(palace)
+                    ),
+                    "memoryWing": parsed.wing or root.name,
+                }
+                candidate = {"contexts": [*contexts, context]}
+                _validate_context_candidate(candidate, home)
+                _prepare_palace(palace)
+                _write_context_document(parsed.config, candidate)
+                return 0
+
+            try:
+                root = _context_root(parsed.root, home, must_exist=False)
+                index = _find_context_index(contexts, root, home)
+            except ContextError:
+                if parsed.command != "remove":
+                    raise
+                index = _find_exact_context_index(contexts, parsed.root)
+            if parsed.command == "update":
+                if all(value is None for value in (parsed.docker, parsed.palace, parsed.wing)):
+                    raise ContextError("update requires a replacement field")
+                replacement = dict(contexts[index])
+                if parsed.docker is not None:
+                    replacement["dockerProfile"] = parsed.docker
+                if parsed.palace is not None:
+                    palace = _context_palace(parsed.palace, home)
+                    replacement["memoryPalace"] = str(palace)
+                else:
+                    palace = None
+                if parsed.wing is not None:
+                    replacement["memoryWing"] = parsed.wing
+                candidate = {"contexts": list(contexts)}
+                candidate["contexts"][index] = replacement
+                _validate_context_candidate(candidate, home)
+                if palace is not None:
+                    _prepare_palace(palace)
+                _write_context_document(parsed.config, candidate)
+                return 0
+
+            context = contexts[index]
+            print(json.dumps(context, indent=2))
+            if not parsed.yes:
+                try:
+                    confirmation = input("Type REMOVE to confirm: ")
+                except EOFError as error:
+                    raise ContextError("remove requires confirmation") from error
+                if confirmation != "REMOVE":
+                    raise ContextError("remove requires confirmation")
+            candidate = {"contexts": list(contexts)}
+            del candidate["contexts"][index]
+            _validate_config_value(candidate, home)
+            _write_context_document(parsed.config, candidate)
+            return 0
+    except ContextError:
+        print("ERROR: project context operation rejected", file=sys.stderr)
+        return 1
+
+
+def main(arguments: Optional[list[str]] = None) -> int:
+    arguments = sys.argv[1:] if arguments is None else arguments
+    if arguments and arguments[0] == "context":
+        return context_main(arguments[1:])
+    if arguments and arguments[0] == "validate-config":
         parser = argparse.ArgumentParser()
         parser.add_argument("command", choices=("validate-config",))
         parser.add_argument("--config", required=True, type=Path)
-        arguments = parser.parse_args()
+        parsed = parser.parse_args(arguments)
         try:
-            validate_config_structure(arguments.config)
+            validate_config_structure(parsed.config)
         except ContextError:
             print("ERROR: project context configuration rejected", file=sys.stderr)
             return 1
@@ -278,10 +575,10 @@ def main() -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--launch-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    arguments = parser.parse_args()
+    parsed = parser.parse_args(arguments)
 
-    payload = resolve_context(load_config(arguments.config), arguments.launch_dir)
-    _atomic_json(arguments.output, payload)
+    payload = resolve_context(load_config(parsed.config), parsed.launch_dir)
+    _atomic_json(parsed.output, payload)
     return 0
 
 

@@ -27,7 +27,6 @@ case "$tool_name" in
       claudex-controller:terra-explorer|\
       claudex-controller:terra-verifier|\
       claudex-controller:sonnet-critic|\
-      claudex-controller:sonnet-synthesizer|\
       claudex-controller:opus-architect|\
       claudex-controller:sol-builder)
         exit 0

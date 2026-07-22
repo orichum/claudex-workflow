@@ -1,10 +1,12 @@
-# Machine-local runtime state, credentials, logs, backups, and downloaded release binaries.
+# Legacy machine-local state and exact downloaded binary names. Source wrappers
+# under bin/ remain visible to Git.
 /runtime/
 /logs/
 /backups/
 /bin/claudex
 /bin/cli-proxy-api
-/.superpowers/
+
+# Local editor and language caches.
 .DS_Store
 __pycache__/
 *.py[cod]

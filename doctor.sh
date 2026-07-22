@@ -4,6 +4,8 @@ set -euo pipefail
 WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
 
 failures=0
 models_response="$(mktemp /tmp/claudex-doctor-models.XXXXXX)"
@@ -66,17 +68,21 @@ fi
 
 hooks_file="$WORKFLOW_ROOT/controller/plugin/hooks/hooks.json"
 health_hook="$WORKFLOW_ROOT/controller/plugin/scripts/check-local-services.sh"
-if [[ -x "$health_hook" ]] && jq -e '.hooks | type == "object"' \
+memory_hook="$WORKFLOW_ROOT/controller/plugin/scripts/route-mempalace-input.py"
+graphify_hook="$WORKFLOW_ROOT/controller/plugin/scripts/ensure-graphify-hook.py"
+if [[ -x "$health_hook" && -x "$memory_hook" && -x "$graphify_hook" ]] && \
+   jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__mempalace__.*")' \
   "$hooks_file" >/dev/null 2>&1; then
-  check_ok 'hook configuration and health executable are present'
+  check_ok 'health, MemPalace routing, and Graphify maintenance hooks are present'
 else
-  check_fail 'hook configuration or health executable is invalid'
+  check_fail 'automatic integration hook configuration is incomplete'
 fi
 
 state_ok=true
 for state_directory in \
-  "$WORKFLOW_ROOT/runtime/state" \
-  "$WORKFLOW_ROOT/runtime/state/sessions"
+  "$WORKFLOW_DATA_ROOT" \
+  "$WORKFLOW_DATA_ROOT/state" \
+  "$WORKFLOW_DATA_ROOT/state/sessions"
 do
   if [[ -L "$state_directory" || ! -d "$state_directory" ]] || \
      [[ "$(file_owner "$state_directory" 2>/dev/null || true)" != "$(id -u)" ]] || \
@@ -94,10 +100,12 @@ doctor_fixture="$(mktemp -d /tmp/claudex-doctor-session.XXXXXX)"
 chmod 0700 "$doctor_fixture"
 doctor_fixture="$(cd -P "$doctor_fixture" && pwd)"
 fixture_workflow="$doctor_fixture/workflow"
+fixture_data="$doctor_fixture/data"
 fixture_home="$doctor_fixture/home"
 fixture_project="$fixture_home/project"
 fixture_palace="$fixture_home/palace"
-install -d -m 0755 "$fixture_workflow" "$fixture_workflow/runtime"
+install -d -m 0755 "$fixture_workflow"
+install -d -m 0700 "$fixture_data"
 install -d -m 0700 "$fixture_home" "$fixture_project" "$fixture_palace"
 install -d -m 0755 "$fixture_workflow/integrations/common"
 install -m 0644 \
@@ -111,18 +119,19 @@ install -m 0644 \
 jq -n \
   --arg palace "$fixture_palace" \
   --arg root "$fixture_project" \
-  '{palacePath:$palace,contexts:[{root:$root,dockerProfile:"fixture",memoryWing:"fixture"}]}' \
+  '{contexts:[{root:$root,dockerProfile:"fixture",memoryPalace:$palace,memoryWing:"fixture"}]}' \
   >"$doctor_fixture/project-context.json"
 if fixture_session_json="$({
   cd "$fixture_workflow"
   HOME="$fixture_home" PYTHONDONTWRITEBYTECODE=1 \
     python3 -B -m integrations.common.session_config create \
     --workflow-root "$fixture_workflow" \
+    --data-root "$fixture_data" \
     --launch-dir "$fixture_project" \
     --config "$doctor_fixture/project-context.json"
 } 2>/dev/null)" && \
    fixture_mcp="$(jq -er '.mcpFile' <<<"$fixture_session_json" 2>/dev/null)" && \
-   [[ "$fixture_mcp" == "$fixture_workflow/runtime/state/sessions/"run.*/mcp.json ]] && \
+   [[ "$fixture_mcp" == "$fixture_data/state/sessions/"run.*/mcp.json ]] && \
    jq -e '
      (.mcpServers | type == "object") and
      ([.mcpServers | keys[]] - ["docker", "mempalace", "graphify"] | length == 0)
@@ -139,7 +148,14 @@ else
   doctor_fixture=""
 fi
 
-for binary in cli-proxy-api claudex claudex-gpt claude-headroom claudex-login; do
+for binary in cli-proxy-api claudex; do
+  if [[ -x "$WORKFLOW_DATA_ROOT/bin/$binary" ]]; then
+    check_ok "executable: $binary"
+  else
+    check_fail "executable: $binary"
+  fi
+done
+for binary in claudex-gpt claude-headroom claudex-login; do
   if [[ -x "$WORKFLOW_ROOT/bin/$binary" ]]; then
     check_ok "executable: $binary"
   else
@@ -159,7 +175,7 @@ else
 fi
 
 controller_settings="$WORKFLOW_ROOT/controller/settings.json"
-runtime_settings="$WORKFLOW_ROOT/runtime/claude-config/settings.json"
+runtime_settings="$WORKFLOW_DATA_ROOT/claude-config/settings.json"
 if cmp -s "$controller_settings" "$runtime_settings"; then
   check_ok 'isolated Claude settings match controller settings'
 else
@@ -186,7 +202,6 @@ controller_files=(
   "$plugin_root/agents/terra-explorer.md"
   "$plugin_root/agents/terra-verifier.md"
   "$plugin_root/agents/sonnet-critic.md"
-  "$plugin_root/agents/sonnet-synthesizer.md"
   "$plugin_root/agents/opus-architect.md"
   "$plugin_root/agents/sol-builder.md"
 )
@@ -203,13 +218,11 @@ fi
 
 agent_contracts_ok=true
 for agent_name in \
-  terra-explorer terra-verifier sonnet-critic sonnet-synthesizer \
+  terra-explorer terra-verifier sonnet-critic \
   opus-architect sol-builder
 do
   rg -q '^effort: high$' "$plugin_root/agents/$agent_name.md" || agent_contracts_ok=false
 done
-rg -q '^tools: \[\]$' "$plugin_root/agents/sonnet-synthesizer.md" || agent_contracts_ok=false
-rg -q '^maxTurns: 1$' "$plugin_root/agents/sonnet-synthesizer.md" || agent_contracts_ok=false
 rg -q '^maxTurns: 9$' "$plugin_root/agents/sonnet-critic.md" || agent_contracts_ok=false
 if [[ "$agent_contracts_ok" == true ]]; then
   check_ok 'all controller agents enforce high effort and bounded specialist contracts'
@@ -218,7 +231,7 @@ else
 fi
 
 if [[ -n "${CLAUDE_BIN:-}" ]] && \
-   CLAUDE_CONFIG_DIR="$WORKFLOW_ROOT/runtime/claude-config" \
+   CLAUDE_CONFIG_DIR="$WORKFLOW_DATA_ROOT/claude-config" \
      "$CLAUDE_BIN" plugin validate --strict "$plugin_root" >/dev/null 2>&1; then
   check_ok 'controller plugin validates strictly'
 else
@@ -264,12 +277,26 @@ for port in 8787 8317; do
   fi
 done
 
-installed_headroom_version="$(headroom --version 2>/dev/null | rg -o -m1 '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+installed_headroom_version="$(headroom_distribution_version \
+  "$(command -v headroom 2>/dev/null)" 2>/dev/null || true)"
 running_headroom_version="$(curl -fsS http://127.0.0.1:8787/health 2>/dev/null | jq -r '.version // empty' || true)"
 if [[ -n "$installed_headroom_version" && "$installed_headroom_version" == "$running_headroom_version" ]]; then
   check_ok "Headroom runtime matches installed version $installed_headroom_version"
 else
   check_fail "Headroom version drift (installed=${installed_headroom_version:-unknown}, running=${running_headroom_version:-unknown})"
+fi
+
+if curl -fsS http://127.0.0.1:8787/health 2>/dev/null | jq -e '
+  .ready == true and .config.optimize == true and
+  .config.cache == false and .config.memory == false and
+  .config.code_graph == false and
+  .config.runtime_env.HEADROOM_OUTPUT_SHAPER == "0" and
+  .config.runtime_env.HEADROOM_VERBOSITY_AUTOTUNE == "0" and
+  .config.runtime_env.HEADROOM_EFFORT_ROUTER == "0"
+' >/dev/null; then
+  check_ok 'Headroom does not limit worker output or effort'
+else
+  check_fail 'Headroom effective optimization policy has drifted'
 fi
 
 if curl --fail --silent --show-error http://127.0.0.1:8317/v1/models >"$models_response"; then
@@ -290,17 +317,17 @@ else
   check_fail 'CLIProxyAPI /v1/models is unavailable'
 fi
 
-if "$WORKFLOW_ROOT/bin/claudex" --config "$WORKFLOW_ROOT/runtime/claudex.toml" config validate >/dev/null 2>&1; then
+if "$WORKFLOW_DATA_ROOT/bin/claudex" --config "$CLAUDEX_CONFIG_FILE" config validate >/dev/null 2>&1; then
   check_ok 'Claudex config validates'
 else
   check_fail 'Claudex config validation failed'
 fi
 
-auth_count="$(find "$WORKFLOW_ROOT/runtime/auth" -type f -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+auth_count="$(find "$WORKFLOW_DATA_ROOT/auth" -type f -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
 auth_permissions_ok=true
 while IFS= read -r auth_file; do
   [[ "$(file_mode "$auth_file")" == "600" ]] || auth_permissions_ok=false
-done < <(find "$WORKFLOW_ROOT/runtime/auth" -type f -maxdepth 1 2>/dev/null)
+done < <(find "$WORKFLOW_DATA_ROOT/auth" -type f -maxdepth 1 2>/dev/null)
 if [[ "$auth_count" -ge 2 && "$auth_permissions_ok" == true ]]; then
   check_ok "$auth_count OAuth credential files exist with mode 0600 (content not inspected)"
 elif [[ "$auth_count" -gt 0 ]]; then

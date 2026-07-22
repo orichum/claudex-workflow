@@ -10,6 +10,7 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 # shellcheck disable=SC1091
 source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 
 provider="codex"
 if [[ "$#" -gt 0 && "$1" != -* ]]; then
@@ -20,7 +21,7 @@ login_flag="$(login_flag_for_provider "$provider")"
 
 umask 077
 set +e
-"$WORKFLOW_ROOT/bin/cli-proxy-api" --config "$WORKFLOW_ROOT/runtime/cliproxy.yaml" "$login_flag" "$@"
+"$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" --config "$WORKFLOW_DATA_ROOT/cliproxy.yaml" "$login_flag" "$@"
 login_status=$?
-find "$WORKFLOW_ROOT/runtime/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
+find "$WORKFLOW_DATA_ROOT/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
 exit "$login_status"
