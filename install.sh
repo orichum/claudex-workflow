@@ -25,11 +25,15 @@ python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || \
   workflow_die "Python 3.10 or newer is required"
 [[ -x "$WORKFLOW_ROOT/bin/claudex-models" ]] || \
   workflow_die "required launcher is missing or not executable: claudex-models"
-if [[ -d "$USER_BIN_DIR/claudex-models" && \
-      ! -L "$USER_BIN_DIR/claudex-models" ]]; then
-  workflow_die \
-    "refusing to replace real launcher directory: $USER_BIN_DIR/claudex-models"
-fi
+[[ -x "$WORKFLOW_ROOT/bin/claudex-provider" ]] || \
+  workflow_die "required launcher is missing or not executable: claudex-provider"
+for managed_launcher in claudex-models claudex-provider; do
+  if [[ -d "$USER_BIN_DIR/$managed_launcher" && \
+        ! -L "$USER_BIN_DIR/$managed_launcher" ]]; then
+    workflow_die \
+      "refusing to replace real launcher directory: $USER_BIN_DIR/$managed_launcher"
+  fi
+done
 
 install -d -m 0700 "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state"
 acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
@@ -535,6 +539,8 @@ snapshot_path "$claudex_proxy_service_file" \
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
 snapshot_path "$USER_BIN_DIR/claudex-models" \
   "$snapshot_dir" claudex-models-launcher
+snapshot_path "$USER_BIN_DIR/claudex-provider" \
+  "$snapshot_dir" claudex-provider-launcher
 if [[ "$legacy_headroom_service_owned" == true ]]; then
   snapshot_path "$legacy_headroom_service_file" \
     "$snapshot_dir" legacy-headroom-service
@@ -546,6 +552,7 @@ claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
 claudex_models_launcher_mutated=false
+claudex_provider_launcher_mutated=false
 legacy_headroom_stopped=false
 headroom_health_is_ready() {
   local expected_version="$1"
@@ -785,6 +792,12 @@ rollback_install_transaction() {
       "$snapshot_dir" claudex-models-launcher || rollback_ready=false
     snapshot_path_matches "$USER_BIN_DIR/claudex-models" \
       "$snapshot_dir" claudex-models-launcher || rollback_ready=false
+  fi
+  if [[ "${claudex_provider_launcher_mutated:-false}" == true ]]; then
+    restore_snapshot "$USER_BIN_DIR/claudex-provider" \
+      "$snapshot_dir" claudex-provider-launcher || rollback_ready=false
+    snapshot_path_matches "$USER_BIN_DIR/claudex-provider" \
+      "$snapshot_dir" claudex-provider-launcher || rollback_ready=false
   fi
 
   [[ "$rollback_ready" == true ]]
@@ -1086,9 +1099,11 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     "CLIProxyAPI failed readiness checks; previous service will be restored"
 fi
 
-for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-models claudex-doctor claudex-context claudex-plugin; do
+for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-models claudex-provider claudex-doctor claudex-context claudex-plugin; do
   if [[ "$launcher" == claudex-models ]]; then
     claudex_models_launcher_mutated=true
+  elif [[ "$launcher" == claudex-provider ]]; then
+    claudex_provider_launcher_mutated=true
   fi
   ln -sfn "$WORKFLOW_ROOT/bin/$launcher" "$USER_BIN_DIR/$launcher"
 done

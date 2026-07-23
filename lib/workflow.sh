@@ -1649,8 +1649,13 @@ render_cliproxy_config() {
     'usage-statistics-enabled: false' \
     'passthrough-headers: true' \
     'request-retry: 1' \
-    'max-retry-credentials: 1' \
-    'max-retry-interval: 10' >"$output_file"
+    'max-retry-credentials: 0' \
+    'max-retry-interval: 10' \
+    'quota-exceeded:' \
+    '  antigravity-credits: true' \
+    'routing:' \
+    '  strategy: "fill-first"' \
+    '  session-affinity: true' >"$output_file"
 }
 
 sha256_file() {
