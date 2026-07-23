@@ -9,6 +9,7 @@ from integrations.common.model_routing import (
     load_catalog,
     load_routing,
     resolve_effective,
+    validate_stack_name,
 )
 
 
@@ -123,3 +124,14 @@ class ModelRoutingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RoutingError, "schemaVersion"):
             load_routing(self.routing_path)
+
+    def test_validate_stack_name_returns_safe_name(self) -> None:
+        self.assertEqual(validate_stack_name("balanced"), "balanced")
+
+    def test_validate_stack_name_rejects_invalid_values(self) -> None:
+        for value in (None, "", "Upper", "safe\nstack", "a" * 64):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    RoutingError, "project model stack.*invalid"
+                ):
+                    validate_stack_name(value, "project model stack")

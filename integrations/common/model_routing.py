@@ -48,6 +48,12 @@ def _exact_object(value: object, keys: set[str], label: str) -> dict:
     return value
 
 
+def validate_stack_name(value: object, label: str = "stack name") -> str:
+    if not isinstance(value, str) or not _STACK_PATTERN.fullmatch(value):
+        raise RoutingError(f"{label} is invalid")
+    return value
+
+
 def validate_model_id(value: object, label: str) -> str:
     if not isinstance(value, str) or not _MODEL_PATTERN.fullmatch(value):
         raise RoutingError(f"{label} has an unsafe model ID")
@@ -64,16 +70,13 @@ def load_routing(path: Path) -> dict[str, object]:
     )
     if type(document["schemaVersion"]) is not int or document["schemaVersion"] != 1:
         raise RoutingError("schemaVersion must be exactly 1")
-    default = document["defaultStack"]
+    default = validate_stack_name(document["defaultStack"], "defaultStack")
     stacks = document["stacks"]
-    if not isinstance(default, str) or not _STACK_PATTERN.fullmatch(default):
-        raise RoutingError("defaultStack is invalid")
     if not isinstance(stacks, dict) or not stacks:
         raise RoutingError("stacks must be a non-empty object")
     normalized: dict[str, object] = {}
-    for name, raw_stack in stacks.items():
-        if not isinstance(name, str) or not _STACK_PATTERN.fullmatch(name):
-            raise RoutingError("stack name is invalid")
+    for raw_name, raw_stack in stacks.items():
+        name = validate_stack_name(raw_name)
         stack = _exact_object(
             raw_stack, {"controller", "agents"}, f"stack {name}"
         )
