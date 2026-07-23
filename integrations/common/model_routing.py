@@ -3,8 +3,11 @@
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import stat
 from typing import Mapping, Optional, Sequence
 
 
@@ -17,6 +20,7 @@ ROLES: tuple[str, ...] = (
 )
 _STACK_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}$")
+_AGENT_FILES = {role: f"agents/{role}.md" for role in ROLES}
 
 
 class RoutingError(RuntimeError):
@@ -169,3 +173,277 @@ def resolve_effective(
             )
         selected[role] = selected_model
     return EffectiveStack(name, controller, candidates, selected)
+
+
+def _rewrite_agent_model(text: str, model: str, role: str) -> str:
+    lines = text.splitlines(keepends=True)
+    indexes = [
+        index for index, line in enumerate(lines) if line.startswith("model: ")
+    ]
+    if len(indexes) != 1 or not lines or lines[0].strip() != "---":
+        raise RoutingError(f"agent {role} has invalid frontmatter")
+    newline = "\n" if lines[indexes[0]].endswith("\n") else ""
+    lines[indexes[0]] = f"model: {model}{newline}"
+    return "".join(lines)
+
+
+def _same_object(first: os.stat_result, second: os.stat_result) -> bool:
+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
+def _same_source_state(
+    first: os.stat_result, second: os.stat_result
+) -> bool:
+    return (
+        _same_object(first, second)
+        and stat.S_IFMT(first.st_mode) == stat.S_IFMT(second.st_mode)
+        and stat.S_IMODE(first.st_mode) == stat.S_IMODE(second.st_mode)
+        and first.st_uid == second.st_uid
+        and first.st_gid == second.st_gid
+        and first.st_size == second.st_size
+        and first.st_mtime_ns == second.st_mtime_ns
+        and first.st_ctime_ns == second.st_ctime_ns
+    )
+
+
+def _require_source_owner(observed: os.stat_result) -> None:
+    if observed.st_uid != os.getuid():
+        raise RoutingError("plugin source entry has an unexpected owner")
+
+
+def _canonical_directory(path: Path, mode: Optional[int] = None) -> Path:
+    path = path if path.is_absolute() else Path.cwd() / path
+    try:
+        observed = os.lstat(path)
+        canonical = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise RoutingError("plugin directory is unavailable") from error
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+        raise RoutingError("plugin directory must be a real directory")
+    if observed.st_uid != os.getuid():
+        raise RoutingError("plugin directory has an unexpected owner")
+    if mode is not None and stat.S_IMODE(observed.st_mode) != mode:
+        raise RoutingError("plugin directory has unsafe permissions")
+    if canonical != path:
+        raise RoutingError("plugin directory is not canonical")
+    final = os.lstat(path)
+    if not _same_object(observed, final):
+        raise RoutingError("plugin directory changed during validation")
+    return canonical
+
+
+def _read_regular_file(
+    directory_fd: int,
+    name: str,
+    path: Path,
+    observed: os.stat_result,
+) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise RoutingError("no-follow plugin access is unavailable")
+    descriptor: Optional[int] = None
+    try:
+        _require_source_owner(observed)
+        descriptor = os.open(
+            name, os.O_RDONLY | no_follow, dir_fd=directory_fd
+        )
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or not _same_source_state(observed, descriptor_before)
+        ):
+            raise RoutingError("plugin source file changed before reading")
+        _require_source_owner(descriptor_before)
+        blocks = []
+        while True:
+            block = os.read(descriptor, 65536)
+            if not block:
+                break
+            blocks.append(block)
+        descriptor_after = os.fstat(descriptor)
+        path_after = os.stat(
+            name, dir_fd=directory_fd, follow_symlinks=False
+        )
+        _require_source_owner(descriptor_after)
+        _require_source_owner(path_after)
+        if (
+            not _same_source_state(descriptor_before, descriptor_after)
+            or not _same_source_state(descriptor_after, path_after)
+            or not _same_source_state(path_after, os.lstat(path))
+        ):
+            raise RoutingError("plugin source file changed during reading")
+        return b"".join(blocks)
+    except OSError as error:
+        raise RoutingError("plugin source file could not be read safely") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _write_private_file(path: Path, data: bytes, mode: int) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise RoutingError("no-follow plugin access is unavailable")
+    descriptor: Optional[int] = None
+    try:
+        descriptor = os.open(path, flags | no_follow, mode)
+        os.fchmod(descriptor, mode)
+        written = 0
+        while written < len(data):
+            written += os.write(descriptor, data[written:])
+        os.fsync(descriptor)
+    except OSError as error:
+        raise RoutingError("runtime plugin file could not be created") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def materialize_runtime_plugin(
+    source: Path, destination: Path, effective: EffectiveStack
+) -> Path:
+    """Copy one source plugin into a private session and bind its agent models."""
+    source = _canonical_directory(Path(source))
+    destination = (
+        Path(destination)
+        if Path(destination).is_absolute()
+        else Path.cwd() / destination
+    )
+    parent = _canonical_directory(destination.parent, 0o700)
+    if (
+        destination.parent != parent
+        or destination.name in {"", ".", ".."}
+        or destination != parent / destination.name
+    ):
+        raise RoutingError("runtime plugin must be a direct session child")
+    try:
+        os.lstat(destination)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise RoutingError("runtime plugin destination is unavailable") from error
+    else:
+        raise RoutingError("runtime plugin destination already exists")
+
+    rewritten: set[str] = set()
+
+    def copy_directory(
+        source_dir: Path,
+        destination_dir: Path,
+        expected: Optional[os.stat_result] = None,
+    ) -> None:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise RoutingError("no-follow plugin access is unavailable")
+        source_path_before = os.lstat(source_dir)
+        _require_source_owner(source_path_before)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        source_fd: Optional[int] = None
+        try:
+            source_fd = os.open(
+                source_dir, directory_flags | no_follow
+            )
+            source_before = os.fstat(source_fd)
+            _require_source_owner(source_before)
+            if (
+                stat.S_ISLNK(source_path_before.st_mode)
+                or not stat.S_ISDIR(source_before.st_mode)
+                or not _same_source_state(source_path_before, source_before)
+                or (
+                    expected is not None
+                    and not _same_source_state(expected, source_before)
+                )
+            ):
+                raise RoutingError(
+                    "plugin source directory changed before reading"
+                )
+            with os.scandir(source_fd) as iterator:
+                entries = list(iterator)
+            for entry in entries:
+                source_path = source_dir / entry.name
+                destination_path = destination_dir / entry.name
+                try:
+                    observed = entry.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise RoutingError(
+                        "plugin source entry is unavailable"
+                    ) from error
+                _require_source_owner(observed)
+                if stat.S_ISLNK(observed.st_mode):
+                    raise RoutingError("plugin source contains a symlink")
+                if stat.S_ISDIR(observed.st_mode):
+                    try:
+                        os.mkdir(destination_path, 0o700)
+                        os.chmod(destination_path, 0o700)
+                    except OSError as error:
+                        raise RoutingError(
+                            "runtime plugin directory could not be created"
+                        ) from error
+                    copy_directory(
+                        source_path, destination_path, observed
+                    )
+                    continue
+                if not stat.S_ISREG(observed.st_mode):
+                    raise RoutingError(
+                        "plugin source contains a special file"
+                    )
+                data = _read_regular_file(
+                    source_fd, entry.name, source_path, observed
+                )
+                relative = source_path.relative_to(source).as_posix()
+                for role, agent_file in _AGENT_FILES.items():
+                    if relative == agent_file:
+                        try:
+                            text = data.decode("utf-8")
+                        except UnicodeDecodeError as error:
+                            raise RoutingError(
+                                f"agent {role} has invalid frontmatter"
+                            ) from error
+                        data = _rewrite_agent_model(
+                            text, effective.agents[role], role
+                        ).encode("utf-8")
+                        rewritten.add(role)
+                        break
+                mode = (
+                    0o700
+                    if stat.S_IMODE(observed.st_mode) & 0o111
+                    else 0o600
+                )
+                _write_private_file(destination_path, data, mode)
+            source_after = os.fstat(source_fd)
+            source_path_after = os.lstat(source_dir)
+            _require_source_owner(source_after)
+            _require_source_owner(source_path_after)
+            if (
+                not _same_source_state(source_before, source_after)
+                or not _same_source_state(
+                    source_after, source_path_after
+                )
+            ):
+                raise RoutingError(
+                    "plugin source changed during materialization"
+                )
+        except OSError as error:
+            raise RoutingError("plugin source could not be enumerated") from error
+        finally:
+            if source_fd is not None:
+                os.close(source_fd)
+
+    created = False
+    try:
+        os.mkdir(destination, 0o700)
+        created = True
+        os.chmod(destination, 0o700)
+        copy_directory(source, destination)
+        if rewritten != set(ROLES):
+            raise RoutingError("plugin source is missing a required agent")
+    except RoutingError:
+        if created:
+            shutil.rmtree(destination)
+        raise
+    except OSError as error:
+        if created:
+            shutil.rmtree(destination)
+        raise RoutingError("runtime plugin could not be created") from error
+    return _canonical_directory(destination, 0o700)

@@ -63,7 +63,7 @@ printf '%s\n' \
   >"$launcher_tools/ss"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
-  'case "${FAKE_MODELS_MODE:-healthy}" in healthy) printf '\''{"object":"list","data":[{"id":"gpt-5.6-sol"}]}\n'\'' ;; missing) printf '\''{"object":"list","data":[{"id":"gpt-5.6-terra"}]}\n'\'' ;; invalid) printf '\''not-json\n'\'' ;; *) exit 7 ;; esac' \
+  'case "${FAKE_MODELS_MODE:-healthy}" in healthy) printf '\''{"object":"list","data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"claude-sonnet-5"},{"id":"claude-opus-4-8"}]}\n'\'' ;; missing) printf '\''{"object":"list","data":[{"id":"gpt-5.6-terra"}]}\n'\'' ;; invalid) printf '\''not-json\n'\'' ;; *) exit 7 ;; esac' \
   >"$launcher_tools/curl"
 chmod 0755 "$launcher_data/bin/claudex" "$launcher_tools"/*
 
@@ -109,12 +109,32 @@ assert_launcher_proxy_rejected invalid-json \
 assert_launcher_proxy_rejected missing-model \
   env FAKE_MODELS_MODE=missing
 
+before_rejected_model="$(launcher_session_count)"
+set +e
+(
+  cd "$ROOT"
+  CLAUDEX_DATA_DIR="$launcher_data" \
+    XDG_CONFIG_HOME="$launcher_xdg" \
+    FAKE_SERVICE_PATH="$launcher_service" \
+    PATH="$launcher_tools:$PATH" \
+    "$launcher" --model caller/override marker \
+      >"$fixture/launcher-model.stdout" \
+      2>"$fixture/launcher-model.stderr"
+)
+rejected_model_status=$?
+set -e
+[[ "$rejected_model_status" == 2 ]]
+[[ "$(launcher_session_count)" == "$before_rejected_model" ]]
+[[ "$(cat "$fixture/launcher-model.stderr")" == \
+   'ERROR: claudex-gpt owns controller option: --model' ]]
+
 if ! launcher_output="$(
   cd "$ROOT"
   CLAUDEX_CONFIG_FILE=/inherited/poison \
     CLAUDEX_DATA_DIR="$launcher_data" \
     XDG_CONFIG_HOME="$launcher_xdg" \
     FAKE_SERVICE_PATH="$launcher_service" \
+    TMPDIR="$fixture" \
     PATH="$launcher_tools:$PATH" \
     "$launcher" marker 2>"$fixture/launcher.stderr"
 )"; then
@@ -124,7 +144,51 @@ fi
 rg -Fxq -- '--config' <<<"$launcher_output"
 rg -Fxq -- "$launcher_data/claudex.toml" <<<"$launcher_output"
 rg -Fxq -- 'marker' <<<"$launcher_output"
+[[ "$(rg -Fxc -- '--model' <<<"$launcher_output")" == 1 ]]
+[[ "$(awk 'previous == "--model" {print; exit} {previous=$0}' \
+  <<<"$launcher_output")" == 'gpt-5.6-sol' ]]
+[[ "$(rg -Fxc -- '--plugin-dir' <<<"$launcher_output")" == 1 ]]
+session_plugin_dir="$(awk \
+  'previous == "--plugin-dir" {print; exit} {previous=$0}' \
+  <<<"$launcher_output")"
+[[ "$session_plugin_dir" == \
+  "$launcher_data/state/sessions/run."*/plugin ]]
+[[ -d "$session_plugin_dir" && ! -L "$session_plugin_dir" ]]
+[[ "$session_plugin_dir" != "$ROOT/controller/plugin" ]]
+[[ -f "${session_plugin_dir%/plugin}/effective-models.json" ]]
+[[ ! -e "$fixture"/claudex-launch-models.* ]]
 [[ ! -s "$fixture/launcher.stderr" ]]
+
+sessions_before_resume="$(launcher_session_count)"
+if ! resume_output="$(
+  cd "$ROOT"
+  CLAUDEX_DATA_DIR="$launcher_data" \
+    XDG_CONFIG_HOME="$launcher_xdg" \
+    FAKE_SERVICE_PATH="$launcher_service" \
+    TMPDIR="$fixture" \
+    PATH="$launcher_tools:$PATH" \
+    "$launcher" --resume owned-resume-id \
+      2>"$fixture/launcher-resume.stderr"
+)"; then
+  cat "$fixture/launcher-resume.stderr" >&2
+  exit 1
+fi
+[[ "$(launcher_session_count)" == $((sessions_before_resume + 1)) ]]
+rg -Fxq -- '--resume' <<<"$resume_output"
+rg -Fxq -- 'owned-resume-id' <<<"$resume_output"
+[[ "$(rg -Fxc -- '--model' <<<"$resume_output")" == 1 ]]
+[[ "$(awk 'previous == "--model" {print; exit} {previous=$0}' \
+  <<<"$resume_output")" == 'gpt-5.6-sol' ]]
+[[ "$(rg -Fxc -- '--plugin-dir' <<<"$resume_output")" == 1 ]]
+resume_plugin_dir="$(awk \
+  'previous == "--plugin-dir" {print; exit} {previous=$0}' \
+  <<<"$resume_output")"
+[[ "$resume_plugin_dir" == \
+  "$launcher_data/state/sessions/run."*/plugin ]]
+[[ "$resume_plugin_dir" != "$session_plugin_dir" ]]
+[[ -f "${resume_plugin_dir%/plugin}/effective-models.json" ]]
+[[ ! -e "$fixture"/claudex-launch-models.* ]]
+[[ ! -s "$fixture/launcher-resume.stderr" ]]
 
 bash -c '
   set +e +u

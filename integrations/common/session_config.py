@@ -14,6 +14,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from integrations.common.model_routing import (
+    EffectiveStack,
+    ROLES,
+    RoutingError,
+    load_catalog,
+    load_routing,
+    materialize_runtime_plugin,
+    resolve_effective,
+    validate_model_id,
+    validate_stack_name,
+)
 from integrations.common.project_context import ContextError, load_config, resolve_context
 
 
@@ -28,6 +39,10 @@ class SessionPaths:
     context_file: Path
     context_sha256: str
     mcp_file: Path
+    effective_models_file: Path
+    effective_models_sha256: str
+    plugin_dir: Path
+    controller_model: str
 
 
 @dataclass(frozen=True)
@@ -44,6 +59,20 @@ class ContextBinding:
 
 def _same_object(first: os.stat_result, second: os.stat_result) -> bool:
     return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
+def _same_stable_state(
+    first: os.stat_result, second: os.stat_result
+) -> bool:
+    return (
+        _same_object(first, second)
+        and stat.S_IFMT(first.st_mode) == stat.S_IFMT(second.st_mode)
+        and stat.S_IMODE(first.st_mode) == stat.S_IMODE(second.st_mode)
+        and first.st_uid == second.st_uid
+        and first.st_size == second.st_size
+        and first.st_mtime_ns == second.st_mtime_ns
+        and first.st_ctime_ns == second.st_ctime_ns
+    )
 
 
 def _absolute_lexical(path: Path) -> Path:
@@ -317,7 +346,7 @@ def _read_owned_file(
     file_fd: Optional[int] = None
     try:
         parent_before = os.fstat(directory_fd)
-        if not _same_object(parent_before, _stable_lstat(parent)):
+        if not _same_stable_state(parent_before, _stable_lstat(parent)):
             raise SessionError("session directory changed before file read")
         try:
             path_before = os.stat(
@@ -331,7 +360,7 @@ def _read_owned_file(
         descriptor_before = os.fstat(file_fd)
         _validate_file_stat(path_before, expected_mode)
         _validate_file_stat(descriptor_before, expected_mode)
-        if not _same_object(path_before, descriptor_before):
+        if not _same_stable_state(path_before, descriptor_before):
             raise SessionError("session file changed before reading")
 
         blocks = []
@@ -350,12 +379,14 @@ def _read_owned_file(
             raise SessionError("session file changed during reading") from error
         _validate_file_stat(descriptor_after, expected_mode)
         _validate_file_stat(path_after, expected_mode)
-        if not _same_object(descriptor_before, descriptor_after):
+        if not _same_stable_state(descriptor_before, descriptor_after):
             raise SessionError("session file descriptor changed during reading")
-        if not _same_object(descriptor_after, path_after):
+        if not _same_stable_state(descriptor_after, path_after):
             raise SessionError("session file path changed during reading")
         parent_after = os.fstat(directory_fd)
-        if not _same_object(parent_before, parent_after) or not _same_object(
+        if not _same_stable_state(
+            parent_before, parent_after
+        ) or not _same_stable_state(
             parent_after, _stable_lstat(parent)
         ):
             raise SessionError("session directory changed during file read")
@@ -392,10 +423,16 @@ def _validated_session_ancestors(
 
 
 def create_session(
-    workflow_root: Path, launch_dir: Path, config_path: Path,
+    workflow_root: Path,
+    launch_dir: Path,
+    config_path: Path,
     data_root: Optional[Path] = None,
+    *,
+    routing_path: Path,
+    models_path: Path,
+    plugin_source: Path,
 ) -> SessionPaths:
-    """Create one session with project-relevant MCP servers only."""
+    """Create one session with immutable routing and project MCP state."""
     workflow_root = _validated_workflow_root(workflow_root)
     verification_data_root = data_root
     if data_root is None:
@@ -415,10 +452,32 @@ def create_session(
     context = resolve_context(load_config(config_path), launch_dir)
     context_bytes = atomic_json(context_file, context, 0o600)
     context_sha256 = hashlib.sha256(context_bytes).hexdigest()
+
+    routing = load_routing(routing_path)
+    route = context.get("route")
+    requested_stack = (
+        route.get("modelStack")
+        if isinstance(route, dict) and isinstance(route.get("modelStack"), str)
+        else None
+    )
+    effective = resolve_effective(
+        routing, load_catalog(models_path), requested_stack
+    )
+    effective_file = run_dir / "effective-models.json"
+    effective_bytes = atomic_json(effective_file, effective.as_json(), 0o600)
+    effective_sha256 = hashlib.sha256(effective_bytes).hexdigest()
+    plugin_dir = materialize_runtime_plugin(
+        plugin_source, run_dir / "plugin", effective
+    )
+
     mcp_file = run_dir / "mcp.json"
     atomic_json(mcp_file, _session_mcp_payload(context), 0o600)
     return verify_session(
-        workflow_root, run_dir, context_sha256, verification_data_root
+        workflow_root,
+        run_dir,
+        context_sha256,
+        effective_sha256,
+        verification_data_root,
     )
 
 
@@ -480,11 +539,289 @@ def verify_context_binding(
     )
 
 
+def _exact_effective_object(
+    value: object, keys: set[str], label: str
+) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise SessionError(f"{label} has invalid fields")
+    return value
+
+
+def _parse_effective_models(data: bytes) -> EffectiveStack:
+    try:
+        raw = json.loads(data)
+        document = _exact_effective_object(
+            raw,
+            {
+                "schemaVersion",
+                "stack",
+                "controller",
+                "configuredCandidates",
+                "agents",
+            },
+            "effective model mapping",
+        )
+        if (
+            type(document["schemaVersion"]) is not int
+            or document["schemaVersion"] != 1
+        ):
+            raise SessionError("effective model mapping has invalid schema")
+        stack_name = validate_stack_name(document["stack"], "effective stack")
+        controller = validate_model_id(
+            document["controller"], "effective controller"
+        )
+        candidates_raw = _exact_effective_object(
+            document["configuredCandidates"],
+            set(ROLES),
+            "effective configured candidates",
+        )
+        agents_raw = _exact_effective_object(
+            document["agents"], set(ROLES), "effective agents"
+        )
+        candidates: dict[str, tuple[str, ...]] = {}
+        agents: dict[str, str] = {}
+        for role in ROLES:
+            values = candidates_raw[role]
+            if not isinstance(values, list) or not values:
+                raise SessionError(
+                    f"effective role {role} has invalid candidates"
+                )
+            role_candidates = tuple(
+                validate_model_id(value, f"effective role {role}")
+                for value in values
+            )
+            if len(role_candidates) != len(set(role_candidates)):
+                raise SessionError(
+                    f"effective role {role} has duplicate candidates"
+                )
+            selected = validate_model_id(
+                agents_raw[role], f"effective role {role}"
+            )
+            if selected not in role_candidates:
+                raise SessionError(
+                    f"effective role {role} selection is not configured"
+                )
+            candidates[role] = role_candidates
+            agents[role] = selected
+        return EffectiveStack(
+            stack_name, controller, candidates, agents
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, RoutingError) as error:
+        raise SessionError("effective model mapping is invalid") from error
+
+
+def _validate_plugin_directory_stat(observed: os.stat_result) -> None:
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+        raise SessionError("runtime plugin entry must be a real directory")
+    if observed.st_uid != os.getuid():
+        raise SessionError("runtime plugin entry has an unexpected owner")
+    if stat.S_IMODE(observed.st_mode) != 0o700:
+        raise SessionError("runtime plugin directory has unsafe permissions")
+
+
+def _verify_plugin_file_entry(
+    directory_fd: int,
+    name: str,
+    observed: os.stat_result,
+    mode: int,
+) -> None:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    file_fd: Optional[int] = None
+    try:
+        file_fd = os.open(
+            name, os.O_RDONLY | no_follow, dir_fd=directory_fd
+        )
+        descriptor_before = os.fstat(file_fd)
+        _validate_file_stat(descriptor_before, mode)
+        if not _same_stable_state(observed, descriptor_before):
+            raise SessionError(
+                "runtime plugin file changed before verification"
+            )
+        descriptor_after = os.fstat(file_fd)
+        path_after = os.stat(
+            name, dir_fd=directory_fd, follow_symlinks=False
+        )
+        _validate_file_stat(descriptor_after, mode)
+        _validate_file_stat(path_after, mode)
+        if not _same_stable_state(
+            descriptor_before, descriptor_after
+        ) or not _same_stable_state(descriptor_after, path_after):
+            raise SessionError(
+                "runtime plugin file changed during verification"
+            )
+    except OSError as error:
+        raise SessionError(
+            "runtime plugin file could not be verified safely"
+        ) from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+
+def _verify_plugin_tree(
+    directory: Path,
+    file_modes: dict[Path, int],
+    *,
+    parent_fd: Optional[int] = None,
+    entry_name: Optional[str] = None,
+    expected: Optional[os.stat_result] = None,
+) -> None:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise SessionError("no-follow plugin access is unavailable")
+    directory_fd: Optional[int] = None
+    try:
+        if parent_fd is None:
+            path_before = _stable_lstat(directory)
+            directory_fd = os.open(
+                directory, directory_flags | no_follow
+            )
+        else:
+            if entry_name is None:
+                raise SessionError("runtime plugin entry name is missing")
+            path_before = os.stat(
+                entry_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            directory_fd = os.open(
+                entry_name,
+                directory_flags | no_follow,
+                dir_fd=parent_fd,
+            )
+        descriptor_before = os.fstat(directory_fd)
+        _validate_plugin_directory_stat(path_before)
+        _validate_plugin_directory_stat(descriptor_before)
+        if (
+            not _same_stable_state(path_before, descriptor_before)
+            or (
+                expected is not None
+                and not _same_stable_state(expected, descriptor_before)
+            )
+        ):
+            raise SessionError(
+                "runtime plugin directory changed before verification"
+            )
+
+        with os.scandir(directory_fd) as iterator:
+            entries = list(iterator)
+        for entry in entries:
+            path = directory / entry.name
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise SessionError(
+                    "runtime plugin entry is unavailable"
+                ) from error
+            if stat.S_ISLNK(observed.st_mode):
+                raise SessionError("runtime plugin contains a symlink")
+            if stat.S_ISDIR(observed.st_mode):
+                _validate_plugin_directory_stat(observed)
+                _require_directory(
+                    path, parent=directory, expected_mode=0o700
+                )
+                _verify_plugin_tree(
+                    path,
+                    file_modes,
+                    parent_fd=directory_fd,
+                    entry_name=entry.name,
+                    expected=observed,
+                )
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise SessionError(
+                    "runtime plugin contains a special file"
+                )
+            mode = stat.S_IMODE(observed.st_mode)
+            if mode not in {0o600, 0o700}:
+                raise SessionError(
+                    "runtime plugin file has unsafe permissions"
+                )
+            _validate_file_stat(observed, mode)
+            _verify_plugin_file_entry(
+                directory_fd, entry.name, observed, mode
+            )
+            file_modes[path] = mode
+
+        descriptor_after = os.fstat(directory_fd)
+        if parent_fd is None:
+            path_after = _stable_lstat(directory)
+        else:
+            path_after = os.stat(
+                entry_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        _validate_plugin_directory_stat(descriptor_after)
+        _validate_plugin_directory_stat(path_after)
+        if not _same_stable_state(
+            descriptor_before, descriptor_after
+        ) or not _same_stable_state(descriptor_after, path_after):
+            raise SessionError(
+                "runtime plugin directory changed during verification"
+            )
+    except OSError as error:
+        raise SessionError(
+            "runtime plugin could not be enumerated safely"
+        ) from error
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _verify_runtime_plugin(
+    run_dir: Path, effective: EffectiveStack
+) -> Path:
+    plugin_dir = require_private_direct_child(
+        run_dir, run_dir / "plugin", expected_mode=0o700
+    )
+    file_modes: dict[Path, int] = {}
+    _verify_plugin_tree(plugin_dir, file_modes)
+    for role in ROLES:
+        agents_dir = _require_directory(
+            plugin_dir / "agents",
+            parent=plugin_dir,
+            expected_mode=0o700,
+        )
+        agent_name = f"{role}.md"
+        agent_mode = file_modes.get(agents_dir / agent_name)
+        if agent_mode not in {0o600, 0o700}:
+            raise SessionError(
+                f"runtime agent {role} has unsafe permissions"
+            )
+        agent_path = _require_owned_file(
+            agents_dir, agents_dir / agent_name, agent_mode
+        )
+        try:
+            text = _read_owned_file(
+                agent_path.parent, agent_path.name, agent_mode
+            ).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SessionError(
+                f"runtime agent {role} is not valid UTF-8"
+            ) from error
+        lines = text.splitlines()
+        models = [line for line in lines if line.startswith("model: ")]
+        if (
+            not lines
+            or lines[0].strip() != "---"
+            or models != [f"model: {effective.agents[role]}"]
+        ):
+            raise SessionError(
+                f"runtime agent {role} does not match effective models"
+            )
+    return plugin_dir
+
+
 def verify_session(
-    workflow_root: Path, run_dir: Path, context_sha256: str,
+    workflow_root: Path,
+    run_dir: Path,
+    context_sha256: str,
+    effective_models_sha256: str,
     data_root: Optional[Path] = None,
 ) -> SessionPaths:
-    """Revalidate session context and its exact project MCP configuration."""
+    """Revalidate immutable routing, context, plugin, and MCP session state."""
     run_dir = _absolute_lexical(run_dir)
     binding = verify_context_binding(
         workflow_root,
@@ -498,12 +835,34 @@ def verify_session(
     mcp_bytes = _read_owned_file(binding.run_dir, "mcp.json", 0o600)
     if mcp_bytes != _canonical_json_bytes(_session_mcp_payload(binding.context)):
         raise SessionError("session MCP configuration does not match its context")
+    if (
+        not isinstance(effective_models_sha256, str)
+        or len(effective_models_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in effective_models_sha256
+        )
+    ):
+        raise SessionError("effective model digest is invalid")
+    effective_models_file = binding.run_dir / "effective-models.json"
+    effective_bytes = _read_owned_file(
+        binding.run_dir, "effective-models.json", 0o600
+    )
+    observed_digest = hashlib.sha256(effective_bytes).hexdigest()
+    if not hmac.compare_digest(observed_digest, effective_models_sha256):
+        raise SessionError("effective model digest mismatch")
+    effective = _parse_effective_models(effective_bytes)
+    plugin_dir = _verify_runtime_plugin(binding.run_dir, effective)
     return SessionPaths(
-        binding.run_id,
-        binding.run_dir,
-        binding.context_file,
-        binding.context_sha256,
-        mcp_file,
+        run_id=binding.run_id,
+        run_dir=binding.run_dir,
+        context_file=binding.context_file,
+        context_sha256=binding.context_sha256,
+        mcp_file=mcp_file,
+        effective_models_file=effective_models_file,
+        effective_models_sha256=effective_models_sha256,
+        plugin_dir=plugin_dir,
+        controller_model=effective.controller,
     )
 
 
@@ -516,11 +875,15 @@ def _create_parser() -> argparse.ArgumentParser:
     create.add_argument("--launch-dir", required=True, type=Path)
     create.add_argument("--config", type=Path)
     create.add_argument("--data-root", type=Path)
+    create.add_argument("--routing-config", required=True, type=Path)
+    create.add_argument("--models-file", required=True, type=Path)
+    create.add_argument("--plugin-source", required=True, type=Path)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--workflow-root", required=True, type=Path)
     verify.add_argument("--run-dir", required=True, type=Path)
     verify.add_argument("--context-sha256", required=True)
+    verify.add_argument("--effective-models-sha256", required=True)
     verify.add_argument("--data-root", type=Path)
     return parser
 
@@ -535,6 +898,9 @@ def main() -> int:
             session = create_session(
                 arguments.workflow_root, arguments.launch_dir, config_path,
                 arguments.data_root,
+                routing_path=arguments.routing_config,
+                models_path=arguments.models_file,
+                plugin_source=arguments.plugin_source,
             )
             print(
                 json.dumps(
@@ -544,6 +910,14 @@ def main() -> int:
                         "contextFile": str(session.context_file),
                         "contextSha256": session.context_sha256,
                         "mcpFile": str(session.mcp_file),
+                        "effectiveModelsFile": str(
+                            session.effective_models_file
+                        ),
+                        "effectiveModelsSha256": (
+                            session.effective_models_sha256
+                        ),
+                        "pluginDir": str(session.plugin_dir),
+                        "controllerModel": session.controller_model,
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -554,9 +928,17 @@ def main() -> int:
                 arguments.workflow_root,
                 arguments.run_dir,
                 arguments.context_sha256,
+                arguments.effective_models_sha256,
                 arguments.data_root,
             )
-    except (SessionError, ContextError, json.JSONDecodeError, OSError, ValueError):
+    except (
+        SessionError,
+        ContextError,
+        RoutingError,
+        json.JSONDecodeError,
+        OSError,
+        ValueError,
+    ):
         print("ERROR: owned session state rejected", file=os.sys.stderr)
         return 1
     return 0

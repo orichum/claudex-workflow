@@ -14,6 +14,7 @@ WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 for argument in "$@"; do
   case "$argument" in
     --effort|--effort=*|\
+    --model|--model=*|\
     --config|--config=*|\
     --plugin-dir|--plugin-dir=*|\
     --append-system-prompt|--append-system-prompt=*|\
@@ -92,8 +93,6 @@ if ! curl -fsS --connect-timeout 1 --max-time 2 \
      "$proxy_models_response" "$controller_model"; then
   proxy_not_ready
 fi
-cleanup_proxy_models
-trap - EXIT
 
 launch_dir="$(physical_pwd)"
 session_json="$({
@@ -101,18 +100,40 @@ session_json="$({
   python3 -m integrations.common.session_config create \
     --workflow-root "$WORKFLOW_ROOT" \
     --data-root "$WORKFLOW_DATA_ROOT" \
-    --launch-dir "$launch_dir"
+    --launch-dir "$launch_dir" \
+    --routing-config "$WORKFLOW_ROOT/controller/model-routing.json" \
+    --models-file "$proxy_models_response" \
+    --plugin-source "$WORKFLOW_ROOT/controller/plugin"
 })"
 if ! jq -e '
   type == "object" and
-  (keys == ["contextFile", "contextSha256", "mcpFile", "runDir", "runId"]) and
+  (keys == [
+    "contextFile",
+    "contextSha256",
+    "controllerModel",
+    "effectiveModelsFile",
+    "effectiveModelsSha256",
+    "mcpFile",
+    "pluginDir",
+    "runDir",
+    "runId"
+  ]) and
   (.runId | type == "string" and startswith("run.")) and
   (.runDir | type == "string" and startswith("/")) and
   (.contextFile | type == "string" and startswith("/")) and
   (.contextSha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  (.controllerModel |
+    type == "string" and
+    test("^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}$")) and
+  (.effectiveModelsFile | type == "string" and startswith("/")) and
+  (.effectiveModelsSha256 |
+    type == "string" and test("^[0-9a-f]{64}$")) and
   (.mcpFile | type == "string" and startswith("/")) and
+  (.pluginDir | type == "string" and startswith("/")) and
   (.contextFile == (.runDir + "/context.json")) and
+  (.effectiveModelsFile == (.runDir + "/effective-models.json")) and
   (.mcpFile == (.runDir + "/mcp.json")) and
+  (.pluginDir == (.runDir + "/plugin")) and
   (.runId == (.runDir | split("/") | last))
 ' <<<"$session_json" >/dev/null; then
   printf 'ERROR: invalid owned session metadata\n' >&2
@@ -121,13 +142,25 @@ fi
 session_run_dir="$(jq -er '.runDir' <<<"$session_json")"
 session_mcp_config="$(jq -er '.mcpFile' <<<"$session_json")"
 session_context_sha256="$(jq -er '.contextSha256' <<<"$session_json")"
-assert_owned_session "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$session_run_dir" "$session_context_sha256"
+session_plugin_dir="$(jq -er '.pluginDir' <<<"$session_json")"
+session_effective_models="$(jq -er '.effectiveModelsFile' <<<"$session_json")"
+session_effective_sha256="$(jq -er '.effectiveModelsSha256' <<<"$session_json")"
+controller_model="$(jq -er '.controllerModel' <<<"$session_json")"
+assert_owned_session \
+  "$WORKFLOW_ROOT" \
+  "$WORKFLOW_DATA_ROOT" \
+  "$session_run_dir" \
+  "$session_context_sha256" \
+  "$session_effective_sha256"
+cleanup_proxy_models
+trap - EXIT
 
 export CLAUDEX_MCP_CONFIG="$session_mcp_config"
-CLAUDEX_RUN_DIR="$(dirname "$session_mcp_config")"
+CLAUDEX_RUN_DIR="$session_run_dir"
 export CLAUDEX_RUN_DIR
 export CLAUDEX_CONTEXT_FILE="$CLAUDEX_RUN_DIR/context.json"
 export CLAUDEX_CONTEXT_SHA256="$session_context_sha256"
+export CLAUDEX_EFFECTIVE_MODELS_FILE="$session_effective_models"
 CLAUDEX_RUN_ID="$(basename "$CLAUDEX_RUN_DIR")"
 export CLAUDEX_RUN_ID
 export CLAUDEX_WORKFLOW_ROOT="$WORKFLOW_ROOT"
@@ -152,9 +185,10 @@ unset CLAUDE_CODE_EFFORT_LEVEL
 exec "$WORKFLOW_DATA_ROOT/bin/claudex" \
   --config "$CLAUDEX_CONFIG_FILE" \
   run gpt \
+  --model "$controller_model" \
   --mcp-config "$CLAUDEX_MCP_CONFIG" \
   --strict-mcp-config \
   --effort high \
   --append-system-prompt-file "$WORKFLOW_ROOT/controller/controller-policy.md" \
-  --plugin-dir "$WORKFLOW_ROOT/controller/plugin" \
+  --plugin-dir "$session_plugin_dir" \
   "$@"

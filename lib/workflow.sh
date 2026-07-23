@@ -1517,13 +1517,15 @@ assert_owned_session() {
   local data_root="$2"
   local run_dir="$3"
   local context_sha256="$4"
+  local effective_models_sha256="$5"
   (
     cd "$workflow_root" || exit 1
     python3 -m integrations.common.session_config verify \
       --workflow-root "$workflow_root" \
       --data-root "$data_root" \
       --run-dir "$run_dir" \
-      --context-sha256 "$context_sha256"
+      --context-sha256 "$context_sha256" \
+      --effective-models-sha256 "$effective_models_sha256"
   )
 }
 
