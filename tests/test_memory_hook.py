@@ -38,8 +38,22 @@ class MemoryHookTests(unittest.TestCase):
             "memoryPalace": str(self.palace),
             "memoryWing": "xebia",
         }]}), encoding="utf-8")
+        models = self.fixture / "models.json"
+        models.write_text(json.dumps({"object": "list", "data": [
+            {"id": "gpt-5.6-sol"},
+            {"id": "gpt-5.6-terra"},
+            {"id": "claude-sonnet-5"},
+            {"id": "claude-opus-4-8"},
+        ]}), encoding="utf-8")
         with mock.patch("integrations.common.session_config.shutil.which", return_value=None):
-            self.session = create_session(self.workflow, self.project, self.config)
+            self.session = create_session(
+                self.workflow,
+                self.project,
+                self.config,
+                routing_path=REPOSITORY_ROOT / "controller" / "model-routing.json",
+                models_path=models,
+                plugin_source=REPOSITORY_ROOT / "controller" / "plugin",
+            )
 
     def invoke(self, payload, *, digest=None):
         environment = os.environ.copy()

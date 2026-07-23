@@ -1,8 +1,8 @@
 ---
-name: terra-explorer
-description: Read-only bounded repository reconnaissance with concise file and line evidence.
+name: repository-explorer
+description: Read-only allowed bounded replacement for generic repository exploration, with concise file and line evidence.
 tools: Read, Glob, Grep
-model: gpt-5.6-terra
+model: inherit
 maxTurns: 6
 effort: high
 ---

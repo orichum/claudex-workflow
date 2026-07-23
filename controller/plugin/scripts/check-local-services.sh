@@ -123,35 +123,72 @@ elif ! jq -e '
 ' "$headroom_response" >/dev/null 2>&1; then
   warning="Claudex health warning: Headroom is not healthy and ready."
 else
-  missing_models=""
-  if ! jq -e '
-    (.data | type == "array") and
-    any(.data[]?; .id == "gpt-5.6-sol")
+  effective_models_file="${CLAUDEX_EFFECTIVE_MODELS_FILE:-}"
+  effective_controller=""
+  if [[ -z "${CLAUDEX_RUN_DIR:-}" ]] || \
+     [[ "$effective_models_file" != \
+        "$CLAUDEX_RUN_DIR/effective-models.json" ]] || \
+     [[ ! -f "$effective_models_file" || -L "$effective_models_file" ]] || \
+     [[ "$(path_mode "$effective_models_file" 2>/dev/null || true)" != 600 ]] || \
+     ! effective_controller="$(jq -er '
+       def model:
+         type == "string" and
+         test("^[A-Za-z0-9][A-Za-z0-9._:/@+\\\\-]{0,254}$");
+       . as $document |
+       ($document | keys) == [
+         "agents",
+         "configuredCandidates",
+         "controller",
+         "schemaVersion",
+         "stack"
+       ] and
+       .schemaVersion == 1 and
+       (.stack | type == "string" and length > 0) and
+       (.controller | model) and
+       (.agents | type == "object") and
+       (.agents | keys) == [
+         "architecture-advisor",
+         "correctness-critic",
+         "implementation-worker",
+         "repository-explorer",
+         "repository-verifier"
+       ] and
+       (.agents | all(.[]; model)) |
+       select(.) |
+       $document.controller
+     ' "$effective_models_file" 2>/dev/null)"; then
+    warning="Claudex health warning: immutable session effective model mapping is missing or invalid."
+  elif ! jq -e '
+    (.data | type == "array" and length > 0) and
+    all(
+      .data[];
+      (.id | type == "string") and
+      (.id | test("^[A-Za-z0-9][A-Za-z0-9._:/@+\\\\-]{0,254}$"))
+    )
   ' "$models_response" >/dev/null 2>&1; then
-    missing_models="gpt-5.6-sol"
-  fi
-  if ! jq -e '
-    (.data | type == "array") and
-    any(.data[]?; .id == "claude-opus-4-8")
-  ' "$models_response" >/dev/null 2>&1; then
+    warning="Claudex health warning: CLIProxyAPI model catalogue is invalid."
+  else
+    missing_models="$(jq -r \
+      --slurpfile effective "$effective_models_file" '
+      [.data[]?.id | select(type == "string")] as $available |
+      [
+        $effective[0].controller,
+        ($effective[0].agents[]?)
+      ] |
+      unique |
+      map(select(. as $model | $available | index($model) | not)) |
+      join(", ")
+    ' "$models_response" 2>/dev/null || true)"
     if [[ -n "$missing_models" ]]; then
-      missing_models="$missing_models, claude-opus-4-8"
-    else
-      missing_models="claude-opus-4-8"
+      warning="Claudex health warning: required effective model missing: $missing_models."
     fi
-  fi
-  if [[ -n "$missing_models" ]]; then
-    warning="Claudex health warning: required model missing: $missing_models."
   fi
 fi
 
 if [[ -z "$warning" ]]; then
-  claudex_config_file="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
-  claudex_controller_model="$(claudex_config_default_model \
-    "$claudex_config_file" 2>/dev/null || true)"
-  if [[ -z "$claudex_controller_model" ]] || \
+  if [[ -z "$effective_controller" ]] || \
      ! claudex_proxy_models_response_is_ready \
-       "$claudex_response" "$claudex_controller_model"; then
+       "$claudex_response" "$effective_controller"; then
     warning="Claudex health warning: persistent Claudex proxy does not expose the configured controller model."
   fi
 fi

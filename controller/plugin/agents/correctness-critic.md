@@ -1,8 +1,8 @@
 ---
-name: sonnet-critic
+name: correctness-critic
 description: Read-only model-diverse correctness and regression-risk critic.
 tools: Read, Glob, Grep
-model: claude-sonnet-5
+model: inherit
 maxTurns: 9
 effort: high
 ---

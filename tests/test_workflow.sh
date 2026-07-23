@@ -30,6 +30,45 @@ source "$ROOT/lib/workflow.sh"
 # shellcheck source=../discover-models.sh
 source "$ROOT/discover-models.sh"
 
+[[ "$(rg -F -c 'tag: $tag, changed:' "$ROOT/lib/workflow.sh")" == 2 ]]
+
+fake_proxy="$fixture/cli-proxy-api"
+cat >"$fake_proxy" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\n' \
+    '-codex-login' \
+    '-claude-login' \
+    '-kimi-login' \
+    '-antigravity-login'
+  exit 0
+fi
+exit 2
+EOF
+chmod 0755 "$fake_proxy"
+[[ "$(login_flag_for_provider "$fake_proxy" kimi)" == "-kimi-login" ]]
+[[ "$(login_flag_for_provider "$fake_proxy" antigravity)" == \
+  "-antigravity-login" ]]
+if login_flag_for_provider "$fake_proxy" 'kimi;touch /tmp/bad'; then
+  exit 1
+fi
+if login_flag_for_provider "$fake_proxy" unsupported; then
+  exit 1
+fi
+fake_proxy_double="$fixture/cli-proxy-api-double"
+cat >"$fake_proxy_double" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\n' '--kimi-login' '--antigravity-login'
+  exit 0
+fi
+exit 2
+EOF
+chmod 0755 "$fake_proxy_double"
+[[ "$(login_flag_for_provider "$fake_proxy_double" kimi)" == "-kimi-login" ]]
+[[ "$(login_flag_for_provider "$fake_proxy_double" antigravity)" == \
+  "-antigravity-login" ]]
+
 launcher_data="$(cd "$fixture" && pwd -P)/launcher-data"
 launcher_xdg="$fixture/launcher-xdg"
 launcher_tools="$fixture/launcher-tools"
@@ -63,7 +102,7 @@ printf '%s\n' \
   >"$launcher_tools/ss"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
-  'case "${FAKE_MODELS_MODE:-healthy}" in healthy) printf '\''{"object":"list","data":[{"id":"gpt-5.6-sol"}]}\n'\'' ;; missing) printf '\''{"object":"list","data":[{"id":"gpt-5.6-terra"}]}\n'\'' ;; invalid) printf '\''not-json\n'\'' ;; *) exit 7 ;; esac' \
+  'case "${FAKE_MODELS_MODE:-healthy}" in healthy) printf '\''{"object":"list","data":[{"id":"gpt-5.6-sol"},{"id":"gpt-5.6-terra"},{"id":"claude-sonnet-5"},{"id":"claude-opus-4-8"}]}\n'\'' ;; missing) printf '\''{"object":"list","data":[{"id":"gpt-5.6-terra"}]}\n'\'' ;; invalid) printf '\''not-json\n'\'' ;; *) exit 7 ;; esac' \
   >"$launcher_tools/curl"
 chmod 0755 "$launcher_data/bin/claudex" "$launcher_tools"/*
 
@@ -109,12 +148,32 @@ assert_launcher_proxy_rejected invalid-json \
 assert_launcher_proxy_rejected missing-model \
   env FAKE_MODELS_MODE=missing
 
+before_rejected_model="$(launcher_session_count)"
+set +e
+(
+  cd "$ROOT"
+  CLAUDEX_DATA_DIR="$launcher_data" \
+    XDG_CONFIG_HOME="$launcher_xdg" \
+    FAKE_SERVICE_PATH="$launcher_service" \
+    PATH="$launcher_tools:$PATH" \
+    "$launcher" --model caller/override marker \
+      >"$fixture/launcher-model.stdout" \
+      2>"$fixture/launcher-model.stderr"
+)
+rejected_model_status=$?
+set -e
+[[ "$rejected_model_status" == 2 ]]
+[[ "$(launcher_session_count)" == "$before_rejected_model" ]]
+[[ "$(cat "$fixture/launcher-model.stderr")" == \
+   'ERROR: claudex-gpt owns controller option: --model' ]]
+
 if ! launcher_output="$(
   cd "$ROOT"
   CLAUDEX_CONFIG_FILE=/inherited/poison \
     CLAUDEX_DATA_DIR="$launcher_data" \
     XDG_CONFIG_HOME="$launcher_xdg" \
     FAKE_SERVICE_PATH="$launcher_service" \
+    TMPDIR="$fixture" \
     PATH="$launcher_tools:$PATH" \
     "$launcher" marker 2>"$fixture/launcher.stderr"
 )"; then
@@ -124,7 +183,51 @@ fi
 rg -Fxq -- '--config' <<<"$launcher_output"
 rg -Fxq -- "$launcher_data/claudex.toml" <<<"$launcher_output"
 rg -Fxq -- 'marker' <<<"$launcher_output"
+[[ "$(rg -Fxc -- '--model' <<<"$launcher_output")" == 1 ]]
+[[ "$(awk 'previous == "--model" {print; exit} {previous=$0}' \
+  <<<"$launcher_output")" == 'gpt-5.6-sol' ]]
+[[ "$(rg -Fxc -- '--plugin-dir' <<<"$launcher_output")" == 1 ]]
+session_plugin_dir="$(awk \
+  'previous == "--plugin-dir" {print; exit} {previous=$0}' \
+  <<<"$launcher_output")"
+[[ "$session_plugin_dir" == \
+  "$launcher_data/state/sessions/run."*/plugin ]]
+[[ -d "$session_plugin_dir" && ! -L "$session_plugin_dir" ]]
+[[ "$session_plugin_dir" != "$ROOT/controller/plugin" ]]
+[[ -f "${session_plugin_dir%/plugin}/effective-models.json" ]]
+[[ ! -e "$fixture"/claudex-launch-models.* ]]
 [[ ! -s "$fixture/launcher.stderr" ]]
+
+sessions_before_resume="$(launcher_session_count)"
+if ! resume_output="$(
+  cd "$ROOT"
+  CLAUDEX_DATA_DIR="$launcher_data" \
+    XDG_CONFIG_HOME="$launcher_xdg" \
+    FAKE_SERVICE_PATH="$launcher_service" \
+    TMPDIR="$fixture" \
+    PATH="$launcher_tools:$PATH" \
+    "$launcher" --resume owned-resume-id \
+      2>"$fixture/launcher-resume.stderr"
+)"; then
+  cat "$fixture/launcher-resume.stderr" >&2
+  exit 1
+fi
+[[ "$(launcher_session_count)" == $((sessions_before_resume + 1)) ]]
+rg -Fxq -- '--resume' <<<"$resume_output"
+rg -Fxq -- 'owned-resume-id' <<<"$resume_output"
+[[ "$(rg -Fxc -- '--model' <<<"$resume_output")" == 1 ]]
+[[ "$(awk 'previous == "--model" {print; exit} {previous=$0}' \
+  <<<"$resume_output")" == 'gpt-5.6-sol' ]]
+[[ "$(rg -Fxc -- '--plugin-dir' <<<"$resume_output")" == 1 ]]
+resume_plugin_dir="$(awk \
+  'previous == "--plugin-dir" {print; exit} {previous=$0}' \
+  <<<"$resume_output")"
+[[ "$resume_plugin_dir" == \
+  "$launcher_data/state/sessions/run."*/plugin ]]
+[[ "$resume_plugin_dir" != "$session_plugin_dir" ]]
+[[ -f "${resume_plugin_dir%/plugin}/effective-models.json" ]]
+[[ ! -e "$fixture"/claudex-launch-models.* ]]
+[[ ! -s "$fixture/launcher-resume.stderr" ]]
 
 bash -c '
   set +e +u
@@ -149,19 +252,45 @@ rg -q '^balanced = "gpt-5.6-terra"$' "$fixture/claudex.toml"
 render_cliproxy_config "$fixture/cliproxy.yaml" /portable/auth 18317
 rg -q '^port: 18317$' "$fixture/cliproxy.yaml"
 
-jq -n '{data:[
+jq -n '{
+  schemaVersion: 1,
+  stack: "portable",
+  controller: "provider/controller",
+  configuredCandidates: {
+    "repository-explorer": ["provider/explorer"],
+    "repository-verifier": ["provider/verifier"],
+    "correctness-critic": ["provider/critic"],
+    "architecture-advisor": ["provider/architect"],
+    "implementation-worker": ["provider/worker"]
+  },
+  agents: {
+    "repository-explorer": "provider/explorer",
+    "repository-verifier": "provider/verifier",
+    "correctness-critic": "provider/critic",
+    "architecture-advisor": "provider/architect",
+    "implementation-worker": "provider/worker"
+  }
+}' >"$fixture/effective-models.json"
+render_discovered_claudex_config \
+  "$fixture/effective-models.json" "$fixture/discovered.toml" \
+  18317 18787 13457
+rg -q '^default_model = "provider/controller"$' "$fixture/discovered.toml"
+rg -q '^proxy_port = 13457$' "$fixture/discovered.toml"
+rg -q '^fast = "provider/explorer"$' "$fixture/discovered.toml"
+rg -q '^balanced = "provider/verifier"$' "$fixture/discovered.toml"
+rg -q '^powerful = "provider/controller"$' "$fixture/discovered.toml"
+rg -q '^haiku = "provider/explorer"$' "$fixture/discovered.toml"
+rg -q '^sonnet = "provider/critic"$' "$fixture/discovered.toml"
+rg -q '^opus = "provider/architect"$' "$fixture/discovered.toml"
+rg -q '^base_url = "http://127.0.0.1:18787"$' "$fixture/discovered.toml"
+rg -q '^X-Headroom-Base-Url = "http://127.0.0.1:18317"$' \
+  "$fixture/discovered.toml"
+
+jq -n '{object:"list",data:[
   {id:"gpt-5.6-luna"},{id:"gpt-5.6-terra"},{id:"gpt-5.6-sol"},
   {id:"claude-haiku-4-5-20251001"},{id:"claude-sonnet-5"},
   {id:"claude-opus-4-8"}
 ]}' >"$fixture/models.json"
-render_discovered_claudex_config \
-  "$fixture/models.json" "$fixture/discovered.toml" 18317 18787 13457
-rg -q '^default_model = "gpt-5.6-sol"$' "$fixture/discovered.toml"
-rg -q '^proxy_port = 13457$' "$fixture/discovered.toml"
-rg -q '^opus = "claude-opus-4-8"$' "$fixture/discovered.toml"
-rg -q '^base_url = "http://127.0.0.1:18787"$' "$fixture/discovered.toml"
-rg -q '^X-Headroom-Base-Url = "http://127.0.0.1:18317"$' \
-  "$fixture/discovered.toml"
 
 for runtime_consumer in \
   bin/claude-headroom discover-models.sh doctor.sh \
@@ -705,21 +834,36 @@ if CLAUDEX_DATA_DIR="$discovery_data" \
 fi
 [[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
 [[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
-rg -q 'claudex-login codex.*claudex-login claude.*install.sh' \
+rg -q 'claudex-login <installed-oauth-provider>.*install.sh' \
   "$fixture/discovery-validation.stderr"
 
-printf '{"data":[]}\n' >"$fixture/discovery-empty.json"
-if CLAUDEX_DATA_DIR="$discovery_data" \
+printf '{"object":"list","data":[]}\n' >"$fixture/discovery-empty.json"
+discovery_generation_status=0
+CLAUDEX_DATA_DIR="$discovery_data" \
   DISCOVERY_MODELS_FIXTURE="$fixture/discovery-empty.json" \
   PATH="$fixture/discovery-bin:$PATH" \
-  discover_models_main 2>"$fixture/discovery-generation.stderr"; then
+  discover_models_main 2>"$fixture/discovery-generation.stderr" || \
+  discovery_generation_status=$?
+if [[ "$discovery_generation_status" -eq 0 ]]; then
   printf 'incomplete discovered model set was activated\n' >&2
   exit 1
 fi
+[[ "$discovery_generation_status" -eq "$MODEL_DISCOVERY_LOGIN_INCOMPLETE" ]]
 [[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
 [[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
-rg -q 'claudex-login codex.*claudex-login claude.*install.sh' \
+rg -q 'claudex-login <installed-oauth-provider>.*install.sh' \
   "$fixture/discovery-generation.stderr"
+
+printf 'not-json\n' >"$fixture/discovery-malformed.json"
+discovery_malformed_status=0
+CLAUDEX_DATA_DIR="$discovery_data" \
+  DISCOVERY_MODELS_FIXTURE="$fixture/discovery-malformed.json" \
+  PATH="$fixture/discovery-bin:$PATH" \
+  discover_models_main 2>"$fixture/discovery-malformed.stderr" || \
+  discovery_malformed_status=$?
+[[ "$discovery_malformed_status" -eq 1 ]]
+[[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
+[[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
 
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -743,8 +887,154 @@ if CLAUDEX_DATA_DIR="$discovery_data" \
 fi
 [[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
 [[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
-rg -q 'claudex-login codex.*claudex-login claude.*install.sh' \
+rg -q 'claudex-login <installed-oauth-provider>.*install.sh' \
   "$fixture/discovery-activation.stderr"
+rm -f -- "$fixture/discovery-bin/python3"
+
+role_surface="$fixture/role-surface"
+install -d "$role_surface/agents" "$role_surface/scripts"
+for role in \
+  repository-explorer repository-verifier correctness-critic \
+  architecture-advisor implementation-worker
+do
+  printf '%s\n' "$role" >"$role_surface/agents/$role.md"
+done
+cp "$ROOT/controller/plugin/scripts/guard-orchestration.sh" \
+  "$role_surface/scripts/guard-orchestration.sh"
+workflow_role_surface_is_exact "$ROOT" "$role_surface"
+printf 'extra\n' >"$role_surface/agents/extra-agent.md"
+if workflow_role_surface_is_exact "$ROOT" "$role_surface"; then
+  printf 'extra workflow source agent was accepted\n' >&2
+  exit 1
+fi
+rm -f -- "$role_surface/agents/extra-agent.md"
+printf '%s\n' \
+  '      claudex-controller:extra-agent)' \
+  >>"$role_surface/scripts/guard-orchestration.sh"
+if workflow_role_surface_is_exact "$ROOT" "$role_surface"; then
+  printf 'extra workflow allowlist agent was accepted\n' >&2
+  exit 1
+fi
+
+guard_behavior_regressions_ok=true
+cp "$ROOT/controller/plugin/scripts/guard-orchestration.sh" \
+  "$role_surface/scripts/guard-orchestration.sh"
+python3 - "$role_surface/scripts/guard-orchestration.sh" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = """      claudex-controller:repository-explorer|\\
+      claudex-controller:repository-verifier|\\
+"""
+replacement = """      # claudex-controller:repository-verifier
+      claudex-controller:repository-explorer|\\
+"""
+if text.count(needle) != 1:
+    raise SystemExit("required guard branch fixture could not be removed")
+path.write_text(text.replace(needle, replacement), encoding="utf-8")
+PY
+if workflow_role_surface_is_exact "$ROOT" "$role_surface"; then
+  printf 'comment-only required workflow guard role was accepted\n' >&2
+  guard_behavior_regressions_ok=false
+fi
+
+cp "$ROOT/controller/plugin/scripts/guard-orchestration.sh" \
+  "$role_surface/scripts/guard-orchestration.sh"
+python3 - "$role_surface/scripts/guard-orchestration.sh" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = """      *)
+        deny "Agent type is not in the Claudex controller allowlist: $agent_type. Do not retry a generic Agent type and do not escalate solely because this call was denied"
+"""
+replacement = """      claudex-controller:*)
+        ;;
+      *)
+        deny "Agent type is not in the Claudex controller allowlist: $agent_type. Do not retry a generic Agent type and do not escalate solely because this call was denied"
+"""
+if text.count(needle) != 1:
+    raise SystemExit("wildcard guard fixture could not be installed")
+path.write_text(text.replace(needle, replacement), encoding="utf-8")
+PY
+if workflow_role_surface_is_exact "$ROOT" "$role_surface"; then
+  printf 'wildcard workflow guard permission was accepted\n' >&2
+  guard_behavior_regressions_ok=false
+fi
+[[ "$guard_behavior_regressions_ok" == true ]] || exit 1
+
+neutral_workflow="$fixture/neutral-workflow"
+neutral_data="$fixture_physical/neutral-data"
+install -d \
+  "$neutral_workflow/lib" "$neutral_workflow/controller" \
+  "$neutral_workflow/integrations/common" "$neutral_data/bin"
+install -m 0755 "$ROOT/discover-models.sh" \
+  "$neutral_workflow/discover-models.sh"
+install -m 0644 "$ROOT/lib/workflow.sh" \
+  "$neutral_workflow/lib/workflow.sh"
+install -m 0644 \
+  "$ROOT/integrations/__init__.py" \
+  "$neutral_workflow/integrations/__init__.py"
+install -m 0644 \
+  "$ROOT/integrations/common/__init__.py" \
+  "$ROOT/integrations/common/model_routing.py" \
+  "$neutral_workflow/integrations/common/"
+jq -n '{
+  schemaVersion: 1,
+  defaultStack: "neutral",
+  stacks: {
+    neutral: {
+      controller: "provider/controller",
+      agents: {
+        "repository-explorer": ["provider/explorer"],
+        "repository-verifier": ["provider/verifier"],
+        "correctness-critic": ["provider/critic"],
+        "architecture-advisor": ["provider/architect"],
+        "implementation-worker": ["provider/worker"]
+      }
+    }
+  }
+}' >"$neutral_workflow/controller/model-routing.json"
+jq -n '{
+  object: "list",
+  data: [
+    {id: "provider/controller"},
+    {id: "provider/explorer"},
+    {id: "provider/verifier"},
+    {id: "provider/critic"},
+    {id: "provider/architect"},
+    {id: "provider/worker"}
+  ]
+}' >"$fixture/neutral-models.json"
+jq -n '{
+  claudexProxyPort: 13457,
+  cliproxyPort: 18317,
+  headroomPort: 18787
+}' >"$neutral_data/service-ports.json"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
+  >"$neutral_data/bin/claudex"
+chmod 0755 "$neutral_data/bin/claudex"
+(
+  source "$neutral_workflow/discover-models.sh"
+  CLAUDEX_DATA_DIR="$neutral_data" \
+  DISCOVERY_MODELS_FIXTURE="$fixture/neutral-models.json" \
+  PATH="$fixture/discovery-bin:$PATH" \
+    discover_models_main
+) >"$fixture/neutral-discovery.stdout"
+rg -q '^default_model = "provider/controller"$' \
+  "$neutral_data/claudex.toml"
+rg -q '^fast = "provider/explorer"$' "$neutral_data/claudex.toml"
+rg -q '^balanced = "provider/verifier"$' "$neutral_data/claudex.toml"
+rg -q '^sonnet = "provider/critic"$' "$neutral_data/claudex.toml"
+rg -q '^opus = "provider/architect"$' "$neutral_data/claudex.toml"
+jq -e '
+  .stack == "neutral" and
+  .controller == "provider/controller" and
+  .agents["implementation-worker"] == "provider/worker"
+' "$neutral_data/model-config/current/effective-models.json" >/dev/null
 
 rg -q 'Graphify is present' "$ROOT/controller/controller-policy.md"
 rg -q 'Use MemPalace automatically' "$ROOT/controller/controller-policy.md"
@@ -780,6 +1070,71 @@ rg -q 'without attribution trailers. Never require a Co-Authored-By, Claude-Sess
 rg -q 'or AI/tool attribution trailer' \
   "$ROOT/controller/controller-policy.md"
 test ! -d "$ROOT/integrations/docker"
+
+guard="$ROOT/controller/plugin/scripts/guard-orchestration.sh"
+
+invoke_agent_guard() {
+  local agent_type="$1"
+  local isolation="${2:-}"
+  jq -cn \
+    --arg agent_type "$agent_type" \
+    --arg isolation "$isolation" \
+    '{
+      tool_name: "Agent",
+      tool_input: (
+        {subagent_type: $agent_type} +
+        (if $isolation == "" then {} else {isolation: $isolation} end)
+      )
+    }' |
+    CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" "$guard"
+}
+
+generic_denial="$(invoke_agent_guard Explore)"
+jq -e '
+  .hookSpecificOutput.permissionDecision == "deny" and
+  (.hookSpecificOutput.permissionDecisionReason |
+    contains("Do not retry") and contains("do not escalate"))
+' >/dev/null <<<"$generic_denial"
+
+for read_only_agent in \
+  claudex-controller:repository-explorer \
+  claudex-controller:repository-verifier \
+  claudex-controller:correctness-critic \
+  claudex-controller:architecture-advisor
+do
+  isolation_denial="$(invoke_agent_guard "$read_only_agent" worktree)"
+  jq -e '
+    .hookSpecificOutput.permissionDecision == "deny" and
+    (.hookSpecificOutput.permissionDecisionReason |
+      contains("read-only") and contains("current checkout"))
+  ' >/dev/null <<<"$isolation_denial"
+done
+
+[[ -z "$(invoke_agent_guard claudex-controller:repository-explorer)" ]]
+[[ -z "$(invoke_agent_guard claudex-controller:implementation-worker worktree)" ]]
+
+for role in \
+  repository-explorer \
+  repository-verifier \
+  correctness-critic \
+  architecture-advisor \
+  implementation-worker
+do
+  agent_file="$ROOT/controller/plugin/agents/$role.md"
+  rg -q "^name: $role$" "$agent_file"
+  rg -q '^model: inherit$' "$agent_file"
+done
+
+rg -q 'Never invoke generic `Explore`, `Plan`, `general-purpose`, or `Bash` agents' \
+  "$ROOT/controller/controller-policy.md"
+rg -Uq 'A rejected orchestration call is\s+not evidence' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'Only implementation-worker may request worktree isolation' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'allowed bounded replacement for generic repository exploration' \
+  "$ROOT/controller/plugin/agents/repository-explorer.md"
+rg -q 'not a replacement for generic planning' \
+  "$ROOT/controller/plugin/agents/architecture-advisor.md"
 
 # Sol receives complete independent evidence directly; an extra mandatory
 # synthesis turn would add latency and token burn without increasing worker

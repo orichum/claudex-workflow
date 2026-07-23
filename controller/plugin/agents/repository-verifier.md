@@ -1,8 +1,8 @@
 ---
-name: terra-verifier
+name: repository-verifier
 description: Read-only independent verification of a diagnosis, change, or supplied evidence.
 tools: Read, Glob, Grep
-model: gpt-5.6-terra
+model: inherit
 maxTurns: 6
 effort: high
 ---

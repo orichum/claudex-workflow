@@ -61,6 +61,41 @@ class SessionConfigTests(unittest.TestCase):
         which.start()
         self.addCleanup(which.stop)
         self.config_path = self.workflow_root / "project-context.json"
+        self.routing_path = self.workflow_root / "model-routing.json"
+        self.models_path = self.fixture / "models.json"
+        self.plugin_source = REPOSITORY_ROOT / "controller" / "plugin"
+        self.first_catalog = ["controller/main"] + [
+            f"balanced/{role}" for role in session_config.ROLES
+        ]
+        self.second_catalog = ["controller/alternate"] + [
+            f"alternate/{role}" for role in session_config.ROLES
+        ]
+        self.routing_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "defaultStack": "balanced",
+                    "stacks": {
+                        "balanced": {
+                            "controller": "controller/main",
+                            "agents": {
+                                role: [f"balanced/{role}"]
+                                for role in session_config.ROLES
+                            },
+                        },
+                        "alternate": {
+                            "controller": "controller/alternate",
+                            "agents": {
+                                role: [f"alternate/{role}"]
+                                for role in session_config.ROLES
+                            },
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.write_catalog(self.first_catalog)
         self.write_config(self.palace)
 
     def write_config(self, palace: Path) -> None:
@@ -71,12 +106,14 @@ class SessionConfigTests(unittest.TestCase):
                         {
                             "root": str(self.xebia),
                             "dockerProfile": "xebia",
+                            "modelStack": None,
                             "memoryPalace": str(palace),
                             "memoryWing": "xebia",
                         },
                         {
                             "root": str(self.complion),
                             "dockerProfile": "realtime",
+                            "modelStack": None,
                             "memoryPalace": str(self.complion_palace),
                             "memoryWing": "complion",
                         },
@@ -86,9 +123,41 @@ class SessionConfigTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def create(self):
+    def write_catalog(self, models: list[str]) -> None:
+        self.models_path.write_text(
+            json.dumps(
+                {
+                    "object": "list",
+                    "data": [{"id": model} for model in models],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def routing_options(self) -> dict[str, Path]:
+        return {
+            "routing_path": self.routing_path,
+            "models_path": self.models_path,
+            "plugin_source": self.plugin_source,
+        }
+
+    def create(
+        self,
+        *,
+        stack: str | None = None,
+        models: list[str] | None = None,
+    ):
+        if stack is not None:
+            document = json.loads(self.config_path.read_text(encoding="utf-8"))
+            document["contexts"][0]["modelStack"] = stack
+            self.config_path.write_text(json.dumps(document), encoding="utf-8")
+        if models is not None:
+            self.write_catalog(models)
         return create_session(
-            self.workflow_root, self.launch_dir, self.config_path
+            self.workflow_root,
+            self.launch_dir,
+            self.config_path,
+            **self.routing_options(),
         )
 
     def assert_rejected(self, action) -> None:
@@ -99,10 +168,18 @@ class SessionConfigTests(unittest.TestCase):
         session = self.create()
 
         self.assertEqual(stat.S_IMODE(session.run_dir.stat().st_mode), 0o700)
+        completion = session.run_dir / ".complete"
+        self.assertTrue(completion.is_file())
+        self.assertFalse(completion.is_symlink())
+        self.assertEqual(stat.S_IMODE(completion.stat().st_mode), 0o600)
         self.assertEqual(
             stat.S_IMODE(session.context_file.stat().st_mode), 0o600
         )
         self.assertEqual(stat.S_IMODE(session.mcp_file.stat().st_mode), 0o600)
+        self.assertEqual(
+            stat.S_IMODE(session.effective_models_file.stat().st_mode), 0o600
+        )
+        self.assertEqual(stat.S_IMODE(session.plugin_dir.stat().st_mode), 0o700)
         self.assertEqual(
             json.loads(session.mcp_file.read_text()),
             {
@@ -128,9 +205,190 @@ class SessionConfigTests(unittest.TestCase):
             hashlib.sha256(session.context_file.read_bytes()).hexdigest(),
         )
         verified = verify_session(
-            self.workflow_root, session.run_dir, session.context_sha256
+            self.workflow_root,
+            session.run_dir,
+            session.context_sha256,
+            session.effective_models_sha256,
         )
         self.assertEqual(verified, session)
+
+    def test_create_session_removes_incomplete_run_after_failure(self) -> None:
+        real_atomic_json = session_config.atomic_json
+
+        def fail_mcp(path, payload, mode=0o600):
+            if Path(path).name == "mcp.json":
+                raise SessionError("injected MCP publication failure")
+            return real_atomic_json(path, payload, mode)
+
+        with mock.patch.object(
+            session_config, "atomic_json", side_effect=fail_mcp
+        ):
+            with self.assertRaisesRegex(SessionError, "injected MCP"):
+                self.create()
+
+        sessions = self.runtime / "state" / "sessions"
+        self.assertEqual(list(sessions.glob("run.*")), [])
+
+    def test_create_session_removes_run_when_initial_fsync_fails(self) -> None:
+        real_fsync_directory = session_config._fsync_directory
+        failed = False
+
+        def fail_session_publication(directory):
+            nonlocal failed
+            if Path(directory).name == "sessions" and not failed:
+                failed = True
+                raise OSError("injected session directory fsync failure")
+            return real_fsync_directory(directory)
+
+        with mock.patch.object(
+            session_config,
+            "_fsync_directory",
+            side_effect=fail_session_publication,
+        ):
+            with self.assertRaisesRegex(
+                SessionError, "session directory could not be created"
+            ):
+                self.create()
+
+        sessions = self.runtime / "state" / "sessions"
+        self.assertEqual(list(sessions.glob("run.*")), [])
+
+    def test_two_sessions_keep_independent_plugins(self) -> None:
+        first = self.create(stack="balanced", models=self.first_catalog)
+        second = self.create(stack="alternate", models=self.second_catalog)
+
+        self.assertNotEqual(first.plugin_dir, second.plugin_dir)
+        self.assertNotEqual(first.controller_model, second.controller_model)
+        self.assertTrue(first.plugin_dir.is_relative_to(first.run_dir))
+        self.assertTrue(second.plugin_dir.is_relative_to(second.run_dir))
+
+    def test_session_rejects_modified_effective_mapping(self) -> None:
+        session = self.create()
+        session.effective_models_file.write_text("{}", encoding="utf-8")
+        session.effective_models_file.chmod(0o600)
+
+        with self.assertRaises(SessionError):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+    def test_session_verification_uses_immutable_effective_mapping(self) -> None:
+        session = self.create()
+        self.write_catalog(self.second_catalog)
+
+        verified = verify_session(
+            self.workflow_root,
+            session.run_dir,
+            session.context_sha256,
+            session.effective_models_sha256,
+        )
+
+        self.assertEqual(verified.controller_model, "controller/main")
+
+    def test_session_rejects_modified_or_unsafe_runtime_plugin(self) -> None:
+        session = self.create()
+        agent = (
+            session.plugin_dir
+            / "agents"
+            / f"{session_config.ROLES[0]}.md"
+        )
+        original = agent.read_text(encoding="utf-8")
+        agent.write_text(original.replace("balanced/", "alternate/"), encoding="utf-8")
+        agent.chmod(0o600)
+        with self.assertRaises(SessionError):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+        agent.write_text(original, encoding="utf-8")
+        agent.chmod(0o640)
+        with self.assertRaises(SessionError):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+    def test_session_rejects_runtime_plugin_symlink(self) -> None:
+        session = self.create()
+        workflow = session.plugin_dir / "workflows" / "review.js"
+        original = workflow.with_suffix(".original")
+        workflow.rename(original)
+        workflow.symlink_to(original)
+
+        with self.assertRaises(SessionError):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+    def test_session_rejects_empty_plugin_directory_symlink_swap(self) -> None:
+        session = self.create()
+        empty = session.plugin_dir / "empty"
+        displaced = session.plugin_dir / "empty.original"
+        empty.mkdir(mode=0o700)
+        empty_inode = os.lstat(empty).st_ino
+        real_scandir = os.scandir
+        swapped = False
+
+        def swap_before_enumeration(target):
+            nonlocal swapped
+            targets_empty = (
+                isinstance(target, int)
+                and os.fstat(target).st_ino == empty_inode
+            ) or (not isinstance(target, int) and Path(target) == empty)
+            if not swapped and targets_empty:
+                empty.rename(displaced)
+                empty.symlink_to(displaced, target_is_directory=True)
+                swapped = True
+            return real_scandir(target)
+
+        with mock.patch.object(
+            session_config.os,
+            "scandir",
+            side_effect=swap_before_enumeration,
+        ):
+            with self.assertRaises(SessionError):
+                verify_session(
+                    self.workflow_root,
+                    session.run_dir,
+                    session.context_sha256,
+                    session.effective_models_sha256,
+                )
+        self.assertTrue(swapped)
+
+    def test_session_accepts_executable_agent_normalized_to_private_mode(
+        self,
+    ) -> None:
+        plugin_source = self.fixture / "executable-agent-plugin"
+        shutil.copytree(self.plugin_source, plugin_source)
+        role = session_config.ROLES[0]
+        (plugin_source / "agents" / f"{role}.md").chmod(0o755)
+
+        session = create_session(
+            self.workflow_root,
+            self.launch_dir,
+            self.config_path,
+            routing_path=self.routing_path,
+            models_path=self.models_path,
+            plugin_source=plugin_source,
+        )
+
+        self.assertEqual(
+            stat.S_IMODE(
+                (session.plugin_dir / "agents" / f"{role}.md").stat().st_mode
+            ),
+            0o700,
+        )
 
     def test_context_without_docker_profile_omits_docker_mcp(self) -> None:
         document = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -150,12 +408,14 @@ class SessionConfigTests(unittest.TestCase):
         session = create_session(
             self.workflow_root, self.launch_dir, self.config_path,
             data_root=data_root,
+            **self.routing_options(),
         )
         self.assertEqual(session.run_dir.parent, data_root / "state" / "sessions")
         self.assertFalse((self.workflow_root / "runtime" / "state").exists())
         self.assertEqual(
             verify_session(
                 self.workflow_root, session.run_dir, session.context_sha256,
+                session.effective_models_sha256,
                 data_root=data_root,
             ),
             session,
@@ -185,7 +445,10 @@ class SessionConfigTests(unittest.TestCase):
         self.assertEqual(binding.context, json.loads(session.context_file.read_bytes()))
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, session.run_dir, session.context_sha256
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -258,7 +521,10 @@ class SessionConfigTests(unittest.TestCase):
             return_value=str(repository.resolve()),
         ):
             session = create_session(
-                self.workflow_root, repository, self.config_path
+                self.workflow_root,
+                repository,
+                self.config_path,
+                **self.routing_options(),
             )
         context = json.loads(session.context_file.read_text())
 
@@ -291,7 +557,10 @@ class SessionConfigTests(unittest.TestCase):
             return_value=str(repository.resolve()),
         ):
             session = create_session(
-                self.workflow_root, repository, self.config_path
+                self.workflow_root,
+                repository,
+                self.config_path,
+                **self.routing_options(),
             )
 
         servers = json.loads(session.mcp_file.read_text())["mcpServers"]
@@ -319,7 +588,12 @@ class SessionConfigTests(unittest.TestCase):
         link = self.fixture / "workflow-link"
         link.symlink_to(self.workflow_root, target_is_directory=True)
         self.assert_rejected(
-            lambda: create_session(link, self.launch_dir, self.config_path)
+            lambda: create_session(
+                link,
+                self.launch_dir,
+                self.config_path,
+                **self.routing_options(),
+            )
         )
 
     def test_rejects_symlinked_runtime_component(self) -> None:
@@ -374,7 +648,10 @@ class SessionConfigTests(unittest.TestCase):
         session.run_dir.symlink_to(moved, target_is_directory=True)
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, session.run_dir, session.context_sha256
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -385,7 +662,10 @@ class SessionConfigTests(unittest.TestCase):
         outsider.chmod(0o700)
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, outsider, session.context_sha256
+                self.workflow_root,
+                outsider,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -396,7 +676,10 @@ class SessionConfigTests(unittest.TestCase):
         session.context_file.symlink_to(original)
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, session.run_dir, session.context_sha256
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -407,7 +690,10 @@ class SessionConfigTests(unittest.TestCase):
         session.mcp_file.symlink_to(original)
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, session.run_dir, session.context_sha256
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -425,7 +711,10 @@ class SessionConfigTests(unittest.TestCase):
 
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, session.run_dir, session.context_sha256
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -452,7 +741,10 @@ class SessionConfigTests(unittest.TestCase):
         ):
             self.assert_rejected(
                 lambda: verify_session(
-                    self.workflow_root, session.run_dir, session.context_sha256
+                    self.workflow_root,
+                    session.run_dir,
+                    session.context_sha256,
+                    session.effective_models_sha256,
                 )
             )
         self.assertTrue(swapped)
@@ -463,6 +755,43 @@ class SessionConfigTests(unittest.TestCase):
     def test_verify_rejects_mcp_inode_swap_during_read(self) -> None:
         self.assert_read_swap_rejected("mcp.json")
 
+    def test_verify_rejects_effective_mapping_in_place_mutation_during_read(
+        self,
+    ) -> None:
+        session = self.create()
+        target = session.effective_models_file
+        target_inode = os.lstat(target).st_ino
+        real_read = os.read
+        mutated = False
+
+        def mutate_file_during_read(
+            file_descriptor: int, size: int
+        ) -> bytes:
+            nonlocal mutated
+            data = real_read(file_descriptor, size)
+            if (
+                not mutated
+                and os.fstat(file_descriptor).st_ino == target_inode
+            ):
+                target.write_text("{}", encoding="utf-8")
+                target.chmod(0o600)
+                mutated = True
+            return data
+
+        with mock.patch.object(
+            session_config.os,
+            "read",
+            side_effect=mutate_file_during_read,
+        ):
+            with self.assertRaises(SessionError):
+                verify_session(
+                    self.workflow_root,
+                    session.run_dir,
+                    session.context_sha256,
+                    session.effective_models_sha256,
+                )
+        self.assertTrue(mutated)
+
     def test_verify_rejects_non_empty_foundation_mcp_config(self) -> None:
         session = self.create()
         session.mcp_file.write_text(
@@ -471,7 +800,10 @@ class SessionConfigTests(unittest.TestCase):
         session.mcp_file.chmod(0o600)
         self.assert_rejected(
             lambda: verify_session(
-                self.workflow_root, session.run_dir, session.context_sha256
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
             )
         )
 
@@ -490,6 +822,12 @@ class SessionConfigTests(unittest.TestCase):
                 str(self.launch_dir),
                 "--config",
                 str(self.config_path),
+                "--routing-config",
+                str(self.routing_path),
+                "--models-file",
+                str(self.models_path),
+                "--plugin-source",
+                str(self.plugin_source),
             ],
             cwd=REPOSITORY_ROOT,
             env=environment,
@@ -500,7 +838,17 @@ class SessionConfigTests(unittest.TestCase):
         payload = json.loads(create.stdout)
         self.assertEqual(
             set(payload),
-            {"runId", "runDir", "contextFile", "contextSha256", "mcpFile"},
+            {
+                "runId",
+                "runDir",
+                "contextFile",
+                "contextSha256",
+                "mcpFile",
+                "effectiveModelsFile",
+                "effectiveModelsSha256",
+                "pluginDir",
+                "controllerModel",
+            },
         )
         self.assertEqual(create.stderr, "")
         self.assertTrue(Path(payload["runDir"]).is_absolute())
@@ -518,6 +866,8 @@ class SessionConfigTests(unittest.TestCase):
                 payload["runDir"],
                 "--context-sha256",
                 payload["contextSha256"],
+                "--effective-models-sha256",
+                payload["effectiveModelsSha256"],
             ],
             cwd=REPOSITORY_ROOT,
             env=environment,

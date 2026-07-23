@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+# shellcheck disable=SC1091
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+
+if ! IFS=$'\t' read -r CLIPROXY_PORT _ _ \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
+  workflow_die "service port configuration is invalid"
+  exit 1
+fi
+
+umask 077
+catalogue="$(mktemp "${TMPDIR:-/tmp}/claudex-models.XXXXXX")" || {
+  workflow_die "private model catalogue could not be created"
+  exit 1
+}
+trap 'rm -f -- "$catalogue"' EXIT
+chmod 0600 "$catalogue"
+
+curl --fail --silent --show-error \
+  --connect-timeout 1 --max-time 4 \
+  "http://127.0.0.1:$CLIPROXY_PORT/v1/models" >"$catalogue"
+
+(
+  cd "$WORKFLOW_ROOT"
+  exec python3 -B -m integrations.common.model_routing "$@" \
+    --routing-config "$WORKFLOW_ROOT/controller/model-routing.json" \
+    --models-file "$catalogue"
+)

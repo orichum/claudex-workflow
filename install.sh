@@ -23,6 +23,13 @@ done
 command -v claude >/dev/null || workflow_die "Claude Code is not installed or not on PATH"
 python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || \
   workflow_die "Python 3.10 or newer is required"
+[[ -x "$WORKFLOW_ROOT/bin/claudex-models" ]] || \
+  workflow_die "required launcher is missing or not executable: claudex-models"
+if [[ -d "$USER_BIN_DIR/claudex-models" && \
+      ! -L "$USER_BIN_DIR/claudex-models" ]]; then
+  workflow_die \
+    "refusing to replace real launcher directory: $USER_BIN_DIR/claudex-models"
+fi
 
 install -d -m 0700 "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state"
 acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
@@ -66,6 +73,18 @@ if [[ "$platform" == darwin ]]; then
     command -v "$command_name" >/dev/null || workflow_die "missing required command: $command_name"
   done
 fi
+
+(
+  cd "$WORKFLOW_ROOT"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+    "$WORKFLOW_ROOT/controller/model-routing.json" <<'PY'
+import sys
+from pathlib import Path
+from integrations.common.model_routing import load_routing
+
+load_routing(Path(sys.argv[1]))
+PY
+) || workflow_die "controller/model-routing.json is invalid"
 
 (
   cd "$WORKFLOW_ROOT"
@@ -151,13 +170,30 @@ register_cleanup_path "$installer_temp"
 cliproxy_state="$(stage_latest_github_binary \
   router-for-me/CLIProxyAPI 'CLIProxyAPI_' "_${cliproxy_os}_${cliproxy_arch}.tar.gz" \
   cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$installer_temp/cliproxy")"
+cliproxy_tag="$(jq -r '.tag' <<<"$cliproxy_state")"
+cliproxy_version="$(jq -r '.version' <<<"$cliproxy_state")"
+headroom_models_registry="$installer_temp/cliproxy-models.registry.json"
+desired_headroom_models="$installer_temp/headroom-models.json"
+curl --fail --location --silent --show-error \
+  "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/$cliproxy_tag/internal/registry/models/models.json" \
+  --output "$headroom_models_registry"
+(
+  cd "$WORKFLOW_ROOT"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+    -m integrations.common.headroom_models generate \
+    --registry "$headroom_models_registry" \
+    --repository router-for-me/CLIProxyAPI \
+    --tag "$cliproxy_tag" \
+    --version "$cliproxy_version" \
+    --output "$desired_headroom_models"
+) || workflow_die "exact-release Headroom model metadata could not be generated"
 claudex_state="$(stage_latest_github_binary \
   StringKe/claudex 'claudex-v' "-${claudex_arch}-${claudex_os}.tar.gz" \
   claudex "$WORKFLOW_DATA_ROOT/bin/claudex" "$installer_temp/claudex")"
-cliproxy_version="$(jq -r '.version' <<<"$cliproxy_state")"
 claudex_version="$(jq -r '.version' <<<"$claudex_state")"
 cliproxy_binary_changed="$(jq -r '.changed' <<<"$cliproxy_state")"
 claudex_binary_changed="$(jq -r '.changed' <<<"$claudex_state")"
+headroom_models_file="$WORKFLOW_DATA_ROOT/headroom/config/models.json"
 
 desired_cliproxy_config="$installer_temp/cliproxy.yaml"
 
@@ -446,6 +482,8 @@ cliproxy_config_changed="$(file_change_state \
 cliproxy_service_changed="$(file_change_state "$desired_service_file" "$service_file")"
 claudex_proxy_service_changed="$(file_change_state \
   "$claudex_proxy_desired_service_file" "$claudex_proxy_service_file")"
+headroom_models_changed="$(private_file_change_state \
+  "$desired_headroom_models" "$headroom_models_file" 600)"
 claudex_proxy_port_changed=false
 if [[ "$CLAUDEX_PROXY_LISTEN_PORT" != "$PRIOR_CLAUDEX_PROXY_PORT" ]]; then
   claudex_proxy_port_changed=true
@@ -491,9 +529,12 @@ snapshot_path "$WORKFLOW_DATA_ROOT/bin/claudex" "$snapshot_dir" claudex-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/cliproxy.yaml" "$snapshot_dir" cliproxy-config
 snapshot_path "$service_file" "$snapshot_dir" cliproxy-service
 snapshot_path "$headroom_service_file" "$snapshot_dir" headroom-service
+snapshot_path "$headroom_models_file" "$snapshot_dir" headroom-models
 snapshot_path "$claudex_proxy_service_file" \
   "$snapshot_dir" claudex-proxy-service
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
+snapshot_path "$USER_BIN_DIR/claudex-models" \
+  "$snapshot_dir" claudex-models-launcher
 if [[ "$legacy_headroom_service_owned" == true ]]; then
   snapshot_path "$legacy_headroom_service_file" \
     "$snapshot_dir" legacy-headroom-service
@@ -504,6 +545,7 @@ headroom_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
+claudex_models_launcher_mutated=false
 legacy_headroom_stopped=false
 headroom_health_is_ready() {
   local expected_version="$1"
@@ -539,6 +581,10 @@ restore_headroom_service() {
     systemctl --user stop claudex-headroom.service >/dev/null 2>&1 || true
   fi
 
+  restore_snapshot "$headroom_models_file" \
+    "$snapshot_dir" headroom-models || recovery_ready=false
+  snapshot_path_matches "$headroom_models_file" \
+    "$snapshot_dir" headroom-models || recovery_ready=false
   restore_snapshot "$headroom_service_file" \
     "$snapshot_dir" headroom-service || recovery_ready=false
   snapshot_path_matches "$headroom_service_file" \
@@ -734,6 +780,13 @@ rollback_install_transaction() {
     endpoint_lock_owned=false
   fi
 
+  if [[ "${claudex_models_launcher_mutated:-false}" == true ]]; then
+    restore_snapshot "$USER_BIN_DIR/claudex-models" \
+      "$snapshot_dir" claudex-models-launcher || rollback_ready=false
+    snapshot_path_matches "$USER_BIN_DIR/claudex-models" \
+      "$snapshot_dir" claudex-models-launcher || rollback_ready=false
+  fi
+
   [[ "$rollback_ready" == true ]]
 }
 
@@ -817,8 +870,12 @@ headroom_is_ready() {
 
 preflight_headroom_binary() (
   local preflight_port preflight_pid= preflight_ready=false
+  local preflight_root="$installer_temp/headroom-preflight"
   preflight_port="$(next_available_port \
     "$HEADROOM_PORT" "$CLIPROXY_PORT")" || return 1
+  install -d -m 0700 "$preflight_root/config" "$preflight_root/state"
+  install -m 0600 "$desired_headroom_models" \
+    "$preflight_root/config/models.json"
   cleanup_preflight() {
     if [[ -n "$preflight_pid" ]] && kill -0 "$preflight_pid" 2>/dev/null; then
       kill "$preflight_pid" 2>/dev/null || true
@@ -829,8 +886,8 @@ preflight_headroom_binary() (
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  HEADROOM_CONFIG_DIR="$WORKFLOW_DATA_ROOT/headroom/config" \
-  HEADROOM_WORKSPACE_DIR="$WORKFLOW_DATA_ROOT/headroom/state" \
+  HEADROOM_CONFIG_DIR="$preflight_root/config" \
+  HEADROOM_WORKSPACE_DIR="$preflight_root/state" \
   SSL_CERT_FILE="$headroom_ca_bundle" \
   HEADROOM_CACHE_ENABLED=0 \
   HEADROOM_MEMORY_ENABLED=0 \
@@ -929,11 +986,19 @@ if [[ "$legacy_headroom_service_owned" == true ]]; then
   headroom_health_ok=false
 fi
 reconcile_headroom_transaction "$headroom_version_changed" \
-  "$headroom_service_changed" "$headroom_health_ok"
+  "$headroom_service_changed" "$headroom_health_ok" \
+  "$headroom_models_changed"
 
 if [[ "$headroom_restart_required" == true ]]; then
   preflight_headroom_binary || workflow_die \
     "private Headroom failed isolated preflight; the existing service was left running"
+  if [[ "$headroom_models_changed" == changed ]]; then
+    activate_private_file_atomic \
+      "$desired_headroom_models" "$headroom_models_file" 0600
+    [[ "$(private_file_change_state \
+      "$desired_headroom_models" "$headroom_models_file" 600)" == unchanged ]] || \
+      workflow_die "Headroom model metadata was not activated safely"
+  fi
   printf 'WARNING: restarting a changed or unhealthy service may interrupt active Claudex sessions.\n' >&2
   if [[ "$headroom_service_changed" == changed ]]; then
     activate_staged_file "$headroom_desired_service_file" \
@@ -1021,7 +1086,10 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     "CLIProxyAPI failed readiness checks; previous service will be restored"
 fi
 
-for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-doctor claudex-context claudex-plugin; do
+for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-models claudex-doctor claudex-context claudex-plugin; do
+  if [[ "$launcher" == claudex-models ]]; then
+    claudex_models_launcher_mutated=true
+  fi
   ln -sfn "$WORKFLOW_ROOT/bin/$launcher" "$USER_BIN_DIR/$launcher"
 done
 
@@ -1041,7 +1109,7 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
      [[ "$model_discovery_status" -eq \
         "$MODEL_DISCOVERY_LOGIN_INCOMPLETE" ]]; then
     printf 'NOTICE: persistent Claudex proxy is pending-provider-login.\n' >&2
-    printf 'Next: claudex-login codex; claudex-login claude; %s/install.sh\n' \
+    printf 'Next: claudex-login <installed-oauth-provider>; %s/install.sh\n' \
       "$WORKFLOW_ROOT" >&2
   elif [[ -n "$prior_model_generation" ]] && \
        [[ "$ports_changed" == false ]] && \
@@ -1200,7 +1268,7 @@ print_install_summary \
   "$claudex_proxy_service_file" "$CLAUDEX_PROXY_LISTEN_PORT" \
   "$claudex_proxy_action"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
-  printf 'Next: claudex-login codex; claudex-login claude; %s/install.sh\n' \
+  printf 'Next: claudex-login <installed-oauth-provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"
 else
   printf 'Next: claudex-doctor\n'

@@ -6,6 +6,7 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
+ROUTING_FILE="$WORKFLOW_ROOT/controller/model-routing.json"
 
 failures=0
 doctor_fixture=""
@@ -158,6 +159,32 @@ else
   check_fail 'project context configuration is structurally invalid'
 fi
 
+if (
+  cd "$WORKFLOW_ROOT"
+  python3 -B - "$ROUTING_FILE" <<'PY'
+import sys
+from pathlib import Path
+from integrations.common.model_routing import load_routing
+
+load_routing(Path(sys.argv[1]))
+PY
+) >/dev/null 2>&1; then
+  check_ok 'model routing schema is strictly valid'
+else
+  check_fail 'model routing schema is invalid'
+fi
+
+if (
+  cd "$WORKFLOW_ROOT"
+  python3 -B -m integrations.common.project_context context \
+    --config "$WORKFLOW_ROOT/controller/project-context.json" \
+    --routing-config "$ROUTING_FILE" list
+) >/dev/null 2>&1; then
+  check_ok 'every project context model stack reference is valid'
+else
+  check_fail 'a project context model stack reference is invalid'
+fi
+
 frontend_root="$WORKFLOW_ROOT/controller/plugin/skills/frontend-design"
 if [[ "$(sha256_file "$frontend_root/SKILL.md" 2>/dev/null || true)" == \
       "1608ea77fbb6fc30d13a97d12cfa8ebf31358d40f0dd97beed24829d6b3f45dd" ]] && \
@@ -221,15 +248,47 @@ jq -n '{
   nodes: [{id: "claudex-audit", label: "claudex-audit"}], links: []
 }' >"$fixture_project/graphify-out/graph.json"
 install -d -m 0755 "$fixture_workflow/integrations/common"
+fixture_plugin="$fixture_workflow/controller-plugin"
+install -d -m 0755 "$fixture_plugin" "$fixture_plugin/agents"
+install -m 0644 "$WORKFLOW_ROOT/controller/plugin/agents/"*.md \
+  "$fixture_plugin/agents/"
 install -m 0644 \
   "$WORKFLOW_ROOT/integrations/__init__.py" \
   "$fixture_workflow/integrations/__init__.py"
 install -m 0644 \
   "$WORKFLOW_ROOT/integrations/common/__init__.py" \
   "$WORKFLOW_ROOT/integrations/common/context_population.py" \
+  "$WORKFLOW_ROOT/integrations/common/model_routing.py" \
   "$WORKFLOW_ROOT/integrations/common/project_context.py" \
   "$WORKFLOW_ROOT/integrations/common/session_config.py" \
   "$fixture_workflow/integrations/common/"
+jq -n '{
+  schemaVersion: 1,
+  defaultStack: "fixture",
+  stacks: {
+    fixture: {
+      controller: "provider/controller",
+      agents: {
+        "repository-explorer": ["provider/explorer"],
+        "repository-verifier": ["provider/verifier"],
+        "correctness-critic": ["provider/critic"],
+        "architecture-advisor": ["provider/architect"],
+        "implementation-worker": ["provider/worker"]
+      }
+    }
+  }
+}' >"$doctor_fixture/model-routing.json"
+jq -n '{
+  object: "list",
+  data: [
+    {id: "provider/controller"},
+    {id: "provider/explorer"},
+    {id: "provider/verifier"},
+    {id: "provider/critic"},
+    {id: "provider/architect"},
+    {id: "provider/worker"}
+  ]
+}' >"$doctor_fixture/models.json"
 jq -n \
   --arg palace "$fixture_palace" \
   --arg root "$fixture_project" \
@@ -243,7 +302,10 @@ if fixture_session_json="$({
     --workflow-root "$fixture_workflow" \
     --data-root "$fixture_data" \
     --launch-dir "$fixture_project" \
-    --config "$doctor_fixture/project-context.json"
+    --config "$doctor_fixture/project-context.json" \
+    --routing-config "$doctor_fixture/model-routing.json" \
+    --models-file "$doctor_fixture/models.json" \
+    --plugin-source "$fixture_plugin"
 } 2>/dev/null)" && \
    fixture_mcp="$(jq -er '.mcpFile' <<<"$fixture_session_json" 2>/dev/null)" && \
    [[ "$fixture_mcp" == "$fixture_data/state/sessions/"run.*/mcp.json ]] && \
@@ -299,7 +361,7 @@ for binary in cli-proxy-api claudex; do
     check_fail "executable: $binary"
   fi
 done
-for binary in claudex-gpt claude-headroom claudex-login; do
+for binary in claudex-gpt claude-headroom claudex-login claudex-models; do
   if [[ -x "$WORKFLOW_ROOT/bin/$binary" ]]; then
     check_ok "executable: $binary"
   else
@@ -343,11 +405,11 @@ controller_files=(
   "$plugin_root/workflows/review.js"
   "$plugin_root/skills/heavy-orchestration/SKILL.md"
   "$plugin_root/hooks/hooks.json"
-  "$plugin_root/agents/terra-explorer.md"
-  "$plugin_root/agents/terra-verifier.md"
-  "$plugin_root/agents/sonnet-critic.md"
-  "$plugin_root/agents/opus-architect.md"
-  "$plugin_root/agents/sol-builder.md"
+  "$plugin_root/agents/repository-explorer.md"
+  "$plugin_root/agents/repository-verifier.md"
+  "$plugin_root/agents/correctness-critic.md"
+  "$plugin_root/agents/architecture-advisor.md"
+  "$plugin_root/agents/implementation-worker.md"
 )
 controller_files_ok=true
 for controller_file in "${controller_files[@]}"; do
@@ -361,17 +423,23 @@ else
 fi
 
 agent_contracts_ok=true
+workflow_role_surface_is_exact "$WORKFLOW_ROOT" "$plugin_root" || \
+  agent_contracts_ok=false
 for agent_name in \
-  terra-explorer terra-verifier sonnet-critic \
-  opus-architect sol-builder
+  repository-explorer repository-verifier correctness-critic \
+  architecture-advisor implementation-worker
 do
-  rg -q '^effort: high$' "$plugin_root/agents/$agent_name.md" || agent_contracts_ok=false
+  agent_file="$plugin_root/agents/$agent_name.md"
+  rg -q "^name: $agent_name$" "$agent_file" || agent_contracts_ok=false
+  rg -q '^model: inherit$' "$agent_file" || agent_contracts_ok=false
+  rg -q '^effort: high$' "$agent_file" || agent_contracts_ok=false
 done
-rg -q '^maxTurns: 9$' "$plugin_root/agents/sonnet-critic.md" || agent_contracts_ok=false
+rg -q '^maxTurns: 9$' \
+  "$plugin_root/agents/correctness-critic.md" || agent_contracts_ok=false
 if [[ "$agent_contracts_ok" == true ]]; then
-  check_ok 'all controller agents enforce high effort and bounded specialist contracts'
+  check_ok 'workflow source roles and executable guard behavior are consistent'
 else
-  check_fail 'controller agent effort or turn-bound contracts are invalid'
+  check_fail 'workflow source roles or executable guard behavior are inconsistent'
 fi
 
 if [[ -n "${CLAUDE_BIN:-}" ]] && \
@@ -445,6 +513,32 @@ else
   check_fail 'Headroom effective optimization policy has drifted'
 fi
 
+installed_cliproxy_help="$(
+  (
+    cd "$WORKFLOW_DATA_ROOT/bin"
+    ./cli-proxy-api --help 2>&1
+  )
+)" || installed_cliproxy_help=""
+installed_cliproxy_version="$(
+  extract_semver "$installed_cliproxy_help" 2>/dev/null || true
+)"
+headroom_models_file="$WORKFLOW_DATA_ROOT/headroom/config/models.json"
+if [[ -n "$installed_cliproxy_version" ]] && \
+   [[ -f "$headroom_models_file" && ! -L "$headroom_models_file" ]] && \
+   [[ "$(file_mode "$headroom_models_file")" == 600 ]] && \
+   (
+     cd "$WORKFLOW_ROOT"
+     PYTHONDONTWRITEBYTECODE=1 python3 -B \
+       -m integrations.common.headroom_models validate \
+       --catalog "$headroom_models_file" \
+       --expected-repository router-for-me/CLIProxyAPI \
+       --expected-version "$installed_cliproxy_version"
+   ); then
+  check_ok "Headroom model metadata matches CLIProxyAPI $installed_cliproxy_version"
+else
+  check_fail "Headroom model metadata is missing, unsafe, or version-drifted"
+fi
+
 headroom_audit_payload='{"model":"claudex-audit-model-does-not-exist","max_tokens":0,"messages":[]}'
 direct_audit_response="$(curl -sS --connect-timeout 1 --max-time 8 \
   -H 'content-type: application/json' \
@@ -470,19 +564,33 @@ else
 fi
 
 if curl --fail --silent --show-error \
+    --connect-timeout 1 --max-time 4 \
     "http://127.0.0.1:$CLIPROXY_PORT/v1/models" >"$models_response"; then
-  model_count="$(jq '[.data[]? | select(.id | startswith("gpt-"))] | length' "$models_response")"
-  claude_model_count="$(jq '[.data[]? | select(.id | startswith("claude-"))] | length' "$models_response")"
-  if [[ "$model_count" -gt 0 ]]; then
-    check_ok "CLIProxyAPI exposes $model_count GPT model(s)"
+  model_count="$(
+    cd "$WORKFLOW_ROOT"
+    python3 -B - "$models_response" 2>/dev/null <<'PY'
+import sys
+from pathlib import Path
+from integrations.common.model_routing import load_catalog
+
+print(len(load_catalog(Path(sys.argv[1]))))
+PY
+  )" || model_count=""
+  if [[ "$model_count" =~ ^[1-9][0-9]*$ ]]; then
+    check_ok "CLIProxyAPI exposes $model_count client-visible model(s)"
   else
-    check_fail 'CLIProxyAPI is running but Codex OAuth/model discovery is incomplete'
+    check_fail 'CLIProxyAPI returned an invalid or empty model catalogue'
   fi
-  if [[ "$claude_model_count" -gt 0 ]] && \
-     jq -e '.data[]? | select(.id == "claude-opus-4-8")' "$models_response" >/dev/null; then
-    check_ok "CLIProxyAPI exposes $claude_model_count Claude model(s), including claude-opus-4-8"
+  default_stack="$(jq -er '.defaultStack' "$ROUTING_FILE" 2>/dev/null || true)"
+  if [[ -n "$default_stack" ]] && (
+    cd "$WORKFLOW_ROOT"
+    python3 -B -m integrations.common.model_routing validate \
+      --routing-config "$ROUTING_FILE" \
+      --models-file "$models_response"
+  ) >/dev/null 2>&1; then
+    check_ok "default model stack $default_stack resolves against the live catalogue"
   else
-    check_fail 'CLIProxyAPI is running but Claude OAuth or claude-opus-4-8 discovery is incomplete'
+    check_fail 'default model stack does not resolve against the live catalogue'
   fi
 else
   check_fail 'CLIProxyAPI /v1/models is unavailable'
@@ -499,12 +607,98 @@ auth_permissions_ok=true
 while IFS= read -r auth_file; do
   [[ "$(file_mode "$auth_file")" == "600" ]] || auth_permissions_ok=false
 done < <(find "$WORKFLOW_DATA_ROOT/auth" -type f -maxdepth 1 2>/dev/null)
-if [[ "$auth_count" -ge 2 && "$auth_permissions_ok" == true ]]; then
+if [[ "$auth_count" -gt 0 && "$auth_permissions_ok" == true ]]; then
   check_ok "$auth_count OAuth credential files exist with mode 0600 (content not inspected)"
-elif [[ "$auth_count" -gt 0 ]]; then
-  check_fail 'OAuth provider count is incomplete or credential permissions are not 0600'
+elif [[ "$auth_permissions_ok" == true ]]; then
+  check_ok 'no OAuth credential files exist yet'
 else
-  check_fail 'no OAuth credential files'
+  check_fail 'an OAuth credential file does not have mode 0600'
+fi
+
+latest_session_status=0
+latest_session="$(
+  python3 - "$WORKFLOW_DATA_ROOT/state/sessions" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+sessions = Path(sys.argv[1])
+owned = []
+try:
+    entries = list(os.scandir(sessions))
+except OSError:
+    raise SystemExit(1)
+for entry in entries:
+    if not entry.name.startswith("run.") or entry.is_symlink():
+        continue
+    try:
+        observed = entry.stat(follow_symlinks=False)
+    except OSError:
+        continue
+    if (
+        stat.S_ISDIR(observed.st_mode)
+        and observed.st_uid == os.getuid()
+    ):
+        completion = sessions / entry.name / ".complete"
+        try:
+            completed = os.lstat(completion)
+        except OSError:
+            continue
+        if (
+            stat.S_ISREG(completed.st_mode)
+            and not stat.S_ISLNK(completed.st_mode)
+            and completed.st_uid == os.getuid()
+            and stat.S_IMODE(completed.st_mode) == 0o600
+        ):
+            owned.append((completed.st_mtime_ns, entry.name))
+if owned:
+    print(sessions / max(owned)[1])
+PY
+)" || latest_session_status=$?
+if [[ "$latest_session_status" -ne 0 ]]; then
+  check_fail 'latest owned session could not be identified'
+elif [[ -z "$latest_session" ]]; then
+  check_ok 'no prior effective session to inspect'
+else
+  context_digest="$(sha256_file "$latest_session/context.json" 2>/dev/null || true)"
+  effective_digest="$(
+    sha256_file "$latest_session/effective-models.json" 2>/dev/null || true
+  )"
+  if [[ -n "$context_digest" && -n "$effective_digest" ]] && \
+     assert_owned_session \
+       "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$latest_session" \
+       "$context_digest" "$effective_digest" >/dev/null 2>&1; then
+    check_ok 'latest session effective mapping is internally consistent'
+    headroom_model_coverage="$(
+      cd "$WORKFLOW_ROOT"
+      PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+        "$headroom_models_file" \
+        "$latest_session/effective-models.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from integrations.common.headroom_models import validate_catalog
+
+catalog = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+effective = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+limits = validate_catalog(catalog)
+selected = {effective["controller"], *effective["agents"].values()}
+print(f"{len(selected & limits.keys())}\t{len(selected)}")
+PY
+    )" || headroom_model_coverage=""
+    if IFS=$'\t' read -r covered_models selected_models \
+        <<<"$headroom_model_coverage" && \
+       [[ "$covered_models" =~ ^[0-9]+$ ]] && \
+       [[ "$selected_models" =~ ^[1-9][0-9]*$ ]]; then
+      check_ok "Headroom has exact-release context limits for $covered_models/$selected_models effective model(s); uncovered models use Headroom fallback"
+    else
+      check_fail 'Headroom effective model coverage could not be inspected'
+    fi
+  else
+    check_fail 'latest session effective mapping is internally inconsistent'
+  fi
 fi
 
 if [[ "$failures" -gt 0 ]]; then

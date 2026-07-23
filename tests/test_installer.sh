@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 for script in \
   install.sh doctor.sh rollback.sh smoke-test.sh discover-models.sh \
-  bin/claudex-gpt bin/claudex-login bin/claudex-doctor bin/claude-headroom \
+  bin/claudex-gpt bin/claudex-login bin/claudex-models \
+  bin/claudex-doctor bin/claude-headroom \
   bin/claudex-headroom bin/claudex-context bin/claudex-plugin \
   tests/test_install_transaction.sh tests/test_claudex_proxy.sh \
   controller/plugin/scripts/check-local-services.sh \
@@ -30,6 +31,49 @@ trap 'rm -rf -- "$fixture"' EXIT
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
 data_root="$fixture/data with % and \$"
+
+headroom_atomic_root="$fixture/headroom-atomic"
+install -d -m 0700 "$headroom_atomic_root"
+printf 'new metadata\n' >"$headroom_atomic_root/staged"
+printf 'symlink target\n' >"$headroom_atomic_root/symlink-target"
+for destination_state in absent regular symlink; do
+  destination="$headroom_atomic_root/models-$destination_state.json"
+  case "$destination_state" in
+    absent) ;;
+    regular)
+      printf 'old metadata\n' >"$destination"
+      chmod 0600 "$destination"
+      ;;
+    symlink)
+      ln -s "$headroom_atomic_root/symlink-target" "$destination"
+      ;;
+  esac
+  activate_private_file_atomic \
+    "$headroom_atomic_root/staged" "$destination" 0600
+  [[ -f "$destination" && ! -L "$destination" ]]
+  [[ "$(cat "$destination")" == 'new metadata' ]]
+  [[ "$(path_mode "$destination")" == 600 ]]
+done
+[[ "$(cat "$headroom_atomic_root/symlink-target")" == 'symlink target' ]]
+python3 - "$ROOT/lib/workflow.sh" "$ROOT/install.sh" <<'PY'
+import sys
+
+workflow = open(sys.argv[1], encoding="utf-8").read()
+installer = open(sys.argv[2], encoding="utf-8").read()
+start = workflow.index("activate_private_file_atomic()")
+end = workflow.index("\n}\n", start)
+helper = workflow[start:end]
+for proof in ("os.O_EXCL", "os.fsync", "os.replace"):
+    if proof not in helper:
+        raise SystemExit(f"private activation lacks {proof}")
+if helper.index("os.fsync") > helper.index("os.replace"):
+    raise SystemExit("private activation does not fsync content before rename")
+cutover = installer[installer.index('if [[ "$headroom_restart_required" == true ]]'):]
+if 'rm -f -- "$headroom_models_file"' in cutover:
+    raise SystemExit("Headroom model cutover still has a deletion window")
+if 'activate_private_file_atomic' not in cutover:
+    raise SystemExit("Headroom model cutover is not crash-atomic")
+PY
 
 headroom_cli_root="$fixture/headroom-cli"
 install -d "$headroom_cli_root/headroom/bin"
@@ -301,6 +345,20 @@ printf 'different\n' >"$fixture/desired"
 [[ "$(file_change_state "$fixture/desired" "$fixture/current")" == changed ]]
 [[ "$(file_change_state "$fixture/desired" "$fixture/absent")" == changed ]]
 
+printf 'same\n' >"$fixture/private-desired"
+cp "$fixture/private-desired" "$fixture/private-current"
+chmod 0600 "$fixture/private-current"
+[[ "$(private_file_change_state \
+  "$fixture/private-desired" "$fixture/private-current" 600)" == unchanged ]]
+chmod 0644 "$fixture/private-current"
+[[ "$(private_file_change_state \
+  "$fixture/private-desired" "$fixture/private-current" 600)" == changed ]]
+cp "$fixture/private-desired" "$fixture/private-target"
+rm -f "$fixture/private-current"
+ln -s "$fixture/private-target" "$fixture/private-current"
+[[ "$(private_file_change_state \
+  "$fixture/private-desired" "$fixture/private-current" 600)" == changed ]]
+
 if service_restart_required false unchanged true; then
   printf 'unchanged healthy service was selected for restart\n' >&2
   exit 1
@@ -319,9 +377,10 @@ do
 done
 
 for restart_case in \
-  'true unchanged true' \
-  'false changed true' \
-  'false unchanged false'
+  'true unchanged true unchanged' \
+  'false changed true unchanged' \
+  'false unchanged false unchanged' \
+  'false unchanged true changed'
 do
   headroom_transaction_active=false
   # shellcheck disable=SC2086
@@ -330,7 +389,7 @@ do
   [[ "$headroom_transaction_active" == true ]]
 done
 headroom_transaction_active=true
-reconcile_headroom_transaction false unchanged true
+reconcile_headroom_transaction false unchanged true unchanged
 [[ "$headroom_restart_required" == false ]]
 [[ "$headroom_transaction_active" == false ]]
 
@@ -437,7 +496,7 @@ run_headroom_transaction_case() {
       WORKFLOW_ROLLBACK_HANDLER=transaction_recovery
       headroom_transaction_active=false
       upgrade_headroom_distribution
-      reconcile_headroom_transaction false unchanged true
+      reconcile_headroom_transaction false unchanged true unchanged
       [[ "$headroom_transaction_active" == false ]]
       exit "$later_status"
     ' _ "$ROOT/lib/workflow.sh" "$case_root" "$later_status"
@@ -490,7 +549,7 @@ HEADROOM_UV_BEHAVIOR=success \
     headroom_transaction_active=false
     upgrade_headroom_distribution
     printf "version-read\n" >>"$case_root/markers"
-    reconcile_headroom_transaction false unchanged true
+    reconcile_headroom_transaction false unchanged true unchanged
     printf "headroom-reconciled\n" >>"$case_root/markers"
     [[ "$headroom_transaction_active" == false ]]
     printf "cliproxy-activation\n" >>"$case_root/markers"
@@ -851,6 +910,7 @@ stage_state="$(PATH="$fixture/mock-bin:$PATH" \
   stage_latest_github_binary router-for-me/CLIProxyAPI CLIProxyAPI_ \
     _linux_amd64.tar.gz cli-proxy-api "$cliproxy_destination" "$fixture/staging")"
 [[ "$(jq -r .version <<<"$stage_state")" == 1.2.3 ]]
+[[ "$(jq -r .tag <<<"$stage_state")" == v1.2.3 ]]
 [[ "$(jq -r .changed <<<"$stage_state")" == true ]]
 staged_binary="$(jq -r .staged_path <<<"$stage_state")"
 [[ ! -e "$cliproxy_destination" && -x "$staged_binary" ]]
@@ -861,6 +921,7 @@ unchanged_state="$(PATH="$fixture/mock-bin:$PATH" \
   stage_latest_github_binary router-for-me/CLIProxyAPI CLIProxyAPI_ \
     _linux_amd64.tar.gz cli-proxy-api "$cliproxy_destination" "$fixture/staging-2")"
 [[ "$(jq -r .changed <<<"$unchanged_state")" == false ]]
+[[ "$(jq -r .tag <<<"$unchanged_state")" == v1.2.3 ]]
 [[ "$(jq -r .staged_path <<<"$unchanged_state")" == null ]]
 
 printf '#!/usr/bin/env bash\nprintf "cli-proxy-api 11.2.30\\n"\n' \
@@ -1341,7 +1402,13 @@ if rg -q 'headroom install apply' "$ROOT/install.sh"; then
   exit 1
 fi
 rg -q 'snapshot_path .*headroom-service' "$ROOT/install.sh"
+rg -q 'snapshot_path .*headroom-models' "$ROOT/install.sh"
 rg -Fq 'snapshot_path_matches "$headroom_service_file"' "$ROOT/install.sh"
+rg -Fq 'snapshot_path_matches "$headroom_models_file"' "$ROOT/install.sh"
+rg -Fq 'HEADROOM_CONFIG_DIR="$preflight_root/config"' "$ROOT/install.sh"
+rg -Fq '"$desired_headroom_models" "$headroom_models_file" 0600' \
+  "$ROOT/install.sh"
+rg -Fq -- '--expected-version "$installed_cliproxy_version"' "$ROOT/doctor.sh"
 rg -Fq 'uv tool install --upgrade mempalace' "$ROOT/install.sh"
 rg -Fq -- '--require-tool mempalace_get_taxonomy' "$ROOT/install.sh"
 rg -Fq -- '--require-tool mempalace_checkpoint' "$ROOT/install.sh"
@@ -1374,12 +1441,36 @@ fi
 health_hook_fixture="$fixture/session-health-hook"
 health_hook_data="$health_hook_fixture/data"
 health_hook_tools="$health_hook_fixture/tools"
-install -d -m 0700 "$health_hook_data" "$health_hook_tools"
+health_hook_run="$health_hook_data/state/sessions/run.provider-neutral"
+install -d -m 0700 \
+  "$health_hook_data" "$health_hook_tools" \
+  "$health_hook_data/state" "$health_hook_data/state/sessions" \
+  "$health_hook_run"
 write_service_ports "$health_hook_data" 18317 18787 13457
 printf '%s\n' \
   '[model]' \
-  'default_model = "gpt-5.6-sol"' \
+  'default_model = "provider/controller"' \
   >"$health_hook_data/claudex.toml"
+jq -n '{
+  schemaVersion: 1,
+  stack: "provider-neutral",
+  controller: "provider/controller",
+  configuredCandidates: {
+    "repository-explorer": ["provider/explorer"],
+    "repository-verifier": ["provider/verifier"],
+    "correctness-critic": ["provider/critic"],
+    "architecture-advisor": ["provider/architect"],
+    "implementation-worker": ["provider/worker"]
+  },
+  agents: {
+    "repository-explorer": "provider/explorer",
+    "repository-verifier": "provider/verifier",
+    "correctness-critic": "provider/critic",
+    "architecture-advisor": "provider/architect",
+    "implementation-worker": "provider/worker"
+  }
+}' >"$health_hook_run/effective-models.json"
+chmod 0600 "$health_hook_run/effective-models.json"
 cat >"$health_hook_tools/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1391,12 +1482,16 @@ case "$url" in
     ;;
   http://127.0.0.1:18317/v1/models)
     marker=cliproxy
-    printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"claude-opus-4-8"}]}'
+    if [[ "${HOOK_CATALOG_MODE:-ready}" == ready ]]; then
+      printf '%s\n' '{"data":[{"id":"provider/controller"},{"id":"provider/explorer"},{"id":"provider/verifier"},{"id":"provider/critic"},{"id":"provider/architect"},{"id":"provider/worker"}]}'
+    else
+      printf '%s\n' '{"data":[{"id":"provider/controller"}]}'
+    fi
     ;;
   http://127.0.0.1:13457/v1/models)
     marker=claudex
     if [[ "${HOOK_CLAUDEX_MODE:-ready}" == ready ]]; then
-      printf '%s\n' '{"object":"list","data":[{"id":"gpt-5.6-sol"}]}'
+      printf '%s\n' '{"object":"list","data":[{"id":"provider/controller"}]}'
     else
       printf '%s\n' '{"object":"list","data":[]}'
     fi
@@ -1420,6 +1515,8 @@ install -d -m 0700 "$health_hook_barrier"
 health_hook_output="$(
   CLAUDEX_DATA_DIR="$health_hook_data" \
   CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  CLAUDEX_RUN_DIR="$health_hook_run" \
+  CLAUDEX_EFFECTIVE_MODELS_FILE="$health_hook_run/effective-models.json" \
   HOOK_REQUIRE_CONCURRENCY=1 \
   HOOK_BARRIER_DIR="$health_hook_barrier" \
   PATH="$health_hook_tools:$PATH" \
@@ -1429,6 +1526,21 @@ health_hook_output="$(
 health_hook_output="$(
   CLAUDEX_DATA_DIR="$health_hook_data" \
   CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  CLAUDEX_RUN_DIR="$health_hook_run" \
+  CLAUDEX_EFFECTIVE_MODELS_FILE="$health_hook_run/effective-models.json" \
+  HOOK_CATALOG_MODE=missing \
+  PATH="$health_hook_tools:$PATH" \
+    "$ROOT/controller/plugin/scripts/check-local-services.sh"
+)"
+jq -e '
+  (.systemMessage | type == "string") and
+  (.systemMessage | contains("required effective model"))
+' <<<"$health_hook_output" >/dev/null
+health_hook_output="$(
+  CLAUDEX_DATA_DIR="$health_hook_data" \
+  CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  CLAUDEX_RUN_DIR="$health_hook_run" \
+  CLAUDEX_EFFECTIVE_MODELS_FILE="$health_hook_run/effective-models.json" \
   HOOK_CLAUDEX_MODE=missing \
   PATH="$health_hook_tools:$PATH" \
     "$ROOT/controller/plugin/scripts/check-local-services.sh"
@@ -1447,16 +1559,34 @@ doctor_proxy_tools="$doctor_proxy_fixture/tools"
 doctor_proxy_service="$doctor_proxy_xdg/systemd/user/claudex-translation-proxy.service"
 install -d -m 0700 \
   "$doctor_proxy_home" "$doctor_proxy_data" "$doctor_proxy_tools" \
-  "$doctor_proxy_data/state/sessions"
+  "$doctor_proxy_data/auth" "$doctor_proxy_data/state/sessions"
 install -d -m 0755 "$doctor_proxy_data/bin" "$(dirname "$doctor_proxy_service")"
 write_service_ports "$doctor_proxy_data" 18317 18787 13457
 printf '%s\n' 'default_model = "gpt-5.6-sol"' \
   >"$doctor_proxy_data/claudex.toml"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
   >"$doctor_proxy_data/bin/claudex"
-cp "$doctor_proxy_data/bin/claudex" "$doctor_proxy_data/bin/cli-proxy-api"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "${1:-}" == --help ]]; then' \
+  '  printf "%s\n" "CLIProxyAPI Version: 1.0.0"' \
+  'fi' \
+  >"$doctor_proxy_data/bin/cli-proxy-api"
 chmod 0755 "$doctor_proxy_data/bin/claudex" \
   "$doctor_proxy_data/bin/cli-proxy-api"
+install -d -m 0700 "$doctor_proxy_data/headroom/config"
+jq -n '{
+  schemaVersion: 1,
+  source: {
+    repository: "router-for-me/CLIProxyAPI",
+    tag: "v1.0.0",
+    version: "1.0.0",
+    registrySha256:
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  anthropic: {context_limits: {"gpt-5.6-sol": 200000}}
+}' >"$doctor_proxy_data/headroom/config/models.json"
+chmod 0600 "$doctor_proxy_data/headroom/config/models.json"
 HOME="$doctor_proxy_home" render_claudex_proxy_systemd_user_unit \
   "$doctor_proxy_service" "$doctor_proxy_data" 13457
 cat >"$doctor_proxy_tools/uname" <<'EOF'
@@ -1508,7 +1638,12 @@ case "$url" in
   *) exit 22 ;;
 esac
 EOF
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' \
+  >"$doctor_proxy_tools/mempalace-mcp"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' \
+  >"$doctor_proxy_tools/graphify-mcp"
 chmod 0755 "$doctor_proxy_tools"/*
+ln -s "$(command -v python3)" "$doctor_proxy_tools/python3"
 
 run_proxy_doctor_case() {
   local case_name="$1"
@@ -1530,6 +1665,15 @@ rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
   "$doctor_proxy_fixture/healthy.output"
 rg -Fxq 'OK   Claudex proxy exposes the configured controller model' \
   "$doctor_proxy_fixture/healthy.output"
+rg -Fxq 'OK   Headroom model metadata matches CLIProxyAPI 1.0.0' \
+  "$doctor_proxy_fixture/healthy.output"
+if ! rg -Fxq \
+    'OK   disposable strict MCP generation exposes only supported integrations' \
+    "$doctor_proxy_fixture/healthy.output"; then
+  rg 'disposable strict|MCP generation' \
+    "$doctor_proxy_fixture/healthy.output" >&2 || true
+  exit 1
+fi
 
 run_proxy_doctor_case definition-failure DOCTOR_TARGET_STATE=not-found
 rg -Fxq 'FAIL Claudex proxy definition is workflow-owned' \
@@ -1554,6 +1698,26 @@ rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
   "$doctor_proxy_fixture/model-failure.output"
 rg -Fxq 'FAIL Claudex proxy exposes the configured controller model' \
   "$doctor_proxy_fixture/model-failure.output"
+
+install -d -m 0700 \
+  "$doctor_proxy_data/state/sessions/run.partial-newest"
+run_proxy_doctor_case partial-newest-session
+rg -Fxq 'OK   no prior effective session to inspect' \
+  "$doctor_proxy_fixture/partial-newest-session.output"
+install -d -m 0755 \
+  "$doctor_proxy_data/state/sessions/run.unsafe-completed"
+printf '{}\n' \
+  >"$doctor_proxy_data/state/sessions/run.unsafe-completed/.complete"
+chmod 0600 \
+  "$doctor_proxy_data/state/sessions/run.unsafe-completed/.complete"
+run_proxy_doctor_case unsafe-completed-session
+rg -Fxq 'FAIL latest session effective mapping is internally inconsistent' \
+  "$doctor_proxy_fixture/unsafe-completed-session.output"
+if rg -Fxq 'OK   no prior effective session to inspect' \
+    "$doctor_proxy_fixture/unsafe-completed-session.output"; then
+  printf 'doctor skipped the newest completed session with an unsafe mode\n' >&2
+  exit 1
+fi
 rg -Fq 'UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/headroom/tools"' "$ROOT/install.sh"
 rg -Fq 'UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/headroom/bin"' "$ROOT/install.sh"
 rg -Fq 'com.user.claudex-headroom' "$ROOT/install.sh"
@@ -1608,8 +1772,16 @@ rg -Fq 'claudex_proxy_service_changed' "$ROOT/install.sh"
 rg -Fq 'claudex_proxy_port_changed' "$ROOT/install.sh"
 rg -Fq 'claudex_proxy_config_changed' "$ROOT/install.sh"
 rg -Fq 'claudex_proxy_readiness_drifted' "$ROOT/install.sh"
-rg -Fq 'claudex-login codex; claudex-login claude; %s/install.sh' \
-  "$ROOT/install.sh" "$ROOT/bin/claudex-login"
+rg -Fq 'claudex-login <installed-oauth-provider>; %s/install.sh' \
+  "$ROOT/install.sh"
+rg -Fq 'claudex-models' "$ROOT/install.sh" "$ROOT/doctor.sh"
+rg -Fq 'load_routing' "$ROOT/install.sh" "$ROOT/doctor.sh"
+rg -Fq 'snapshot_path "$USER_BIN_DIR/claudex-models"' "$ROOT/install.sh"
+rg -Fq 'restore_snapshot "$USER_BIN_DIR/claudex-models"' "$ROOT/install.sh"
+rg -Fq 'default model stack' "$ROOT/doctor.sh"
+rg -Fq 'latest session effective mapping is internally consistent' \
+  "$ROOT/doctor.sh"
+! rg -q 'GPT model|Claude model|claude-opus-4-8 discovery' "$ROOT/doctor.sh"
 for readme_contract in \
   'one persistent Claudex translation proxy' \
   'CLAUDEX_PROXY_PORT=13457' \
@@ -1829,6 +2001,63 @@ import sys
 
 readme = open(sys.argv[1], encoding="utf-8").read()
 normalized_readme = " ".join(readme.split())
+required_readme_text = [
+    "Provider-agnostic model stacks",
+    "controller/model-routing.json",
+    "claudex-models list",
+    "claudex-models validate",
+    "claudex-login kimi",
+    "claudex-login antigravity",
+    "claudex-context update",
+    "--model-stack",
+    "repository-explorer",
+    "implementation-worker",
+    "effective-models.json",
+    "headroom/config/models.json",
+    "exact CLIProxyAPI release",
+    "approximate token accounting",
+    "The controller does not fall back",
+    "iproute2",
+    "`ss`",
+]
+for phrase in required_readme_text:
+    if phrase not in normalized_readme:
+        raise SystemExit(f"README is missing provider-agnostic routing detail: {phrase}")
+
+expected_daily_driver_flow = """```mermaid
+flowchart LR
+    A["claudex-gpt"] --> B["Resolve project context"]
+    B --> C["Choose project modelStack or global defaultStack"]
+    C --> D["Read live CLIProxyAPI model catalogue"]
+    D --> E["Resolve controller and ordered agent candidates"]
+    E --> F["Create private run directory"]
+    F --> G["Write context.json, mcp.json, effective-models.json"]
+    G --> H["Generate session-private controller plugin"]
+    H --> I["Launch Claudex with selected controller"]
+    I --> J["Claude Code dispatches fixed role agents"]
+    J --> K["Anthropic wire request"]
+    K --> L["Headroom uses generated context limit"]
+    L --> M["CLIProxyAPI translates to selected provider"]
+```"""
+if expected_daily_driver_flow not in readme:
+    raise SystemExit("README is missing the exact daily-driver routing flow")
+
+expected_plain_text_flow = """claudex-gpt
+  -> resolve project context
+  -> choose project modelStack or global defaultStack
+  -> read live CLIProxyAPI model catalogue
+  -> resolve controller and ordered agent candidates
+  -> create private run directory
+  -> write context.json, mcp.json, effective-models.json
+  -> generate session-private controller plugin
+  -> launch Claudex with selected controller
+  -> Claude Code dispatches fixed role agents
+  -> Anthropic wire request
+  -> Headroom uses generated context limit
+  -> CLIProxyAPI translates to selected provider"""
+if expected_plain_text_flow not in readme:
+    raise SystemExit("README plain-text flow does not mirror the routing diagram")
+
 required_headings = [
     "Why use it",
     "How a request flows",
@@ -1857,7 +2086,6 @@ required_copy = [
     "Terra",
     "Sonnet",
     "Opus",
-    "sol-builder",
     "CLIProxyAPI",
     "Headroom",
     "--lossless",
@@ -1886,8 +2114,7 @@ required_copy = [
     "graphify-out/graph.json",
     "CLAUDEX_DATA_DIR",
     "claudex-doctor",
-    "./smoke-test.sh gpt",
-    "./smoke-test.sh claude",
+    "./smoke-test.sh provider",
     "./smoke-test.sh controller",
     "./rollback.sh",
     "gpt-5.6-sol",
@@ -1918,17 +2145,9 @@ for phrase in required_copy:
 
 flow_section = readme.split("## How a request flows", 1)[1]
 flow_block = flow_section.split("```text", 1)[1].split("```", 1)[0]
-expected_flow = """many claudex-gpt sessions
-  -> one persistent Claudex translation proxy
-  -> selected model: Sol | Terra | Sonnet | Opus
-  -> Headroom
-  -> CLIProxyAPI
-     -> Codex OAuth (GPT)
-     -> Claude OAuth (Claude)"""
-if expected_flow not in flow_block:
+if expected_plain_text_flow not in flow_block:
     raise SystemExit(
-        "README request flow must connect selected model calls through "
-        "Headroom and CLIProxyAPI before provider routing"
+        "README plain-text request flow must mirror the provider-neutral diagram"
     )
 PY
 for documented_runtime_detail in \

@@ -273,6 +273,7 @@ class ProjectContextTests(unittest.TestCase):
                     "id": "complion",
                     "contextRootReal": str(self.complion),
                     "dockerProfile": "realtime",
+                    "modelStack": None,
                     "memoryWing": "complion",
                     "memoryAvailable": True,
                     "memoryFailureCode": None,
@@ -280,6 +281,21 @@ class ProjectContextTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_legacy_context_without_model_stack_inherits_default(self):
+        config = load_config(self.config_path, home=self.root)
+        self.assertIsNone(config["contexts"][0]["modelStack"])
+
+    def test_resolved_route_carries_explicit_model_stack(self):
+        document = json.loads(self.config_path.read_text(encoding="utf-8"))
+        document["contexts"][0]["modelStack"] = "xebia"
+        self.config_path.write_text(json.dumps(document), encoding="utf-8")
+
+        route = resolve_context(
+            load_config(self.config_path, home=self.root), self.xebia_repo
+        )["route"]
+
+        self.assertEqual(route["modelStack"], "xebia")
 
     def test_configuration_schema_is_closed_and_paths_are_strict(self):
         invalid_payloads = []
@@ -350,18 +366,21 @@ class ProjectContextTests(unittest.TestCase):
                     {
                         "root": "~/xebia",
                         "dockerProfile": "xebia",
+                        "modelStack": None,
                         "memoryPalace": "~/.mempalace/palaces/xebia",
                         "memoryWing": "xebia",
                     },
                     {
                         "root": "~/complion",
                         "dockerProfile": "realtime",
+                        "modelStack": None,
                         "memoryPalace": "~/.mempalace/palaces/complion",
                         "memoryWing": "complion",
                     },
                     {
                         "root": "~/claudex-workflow",
                         "dockerProfile": None,
+                        "modelStack": None,
                         "memoryPalace": "~/.mempalace/palaces/claudex-workflow",
                         "memoryWing": "claudex-workflow",
                     },
@@ -463,6 +482,39 @@ raise SystemExit(0)
         self.config_path = self.root / "project-context.json"
         self.config_path.write_text('{\n  "contexts": []\n}\n', encoding="utf-8")
         os.chmod(self.config_path, 0o640)
+        self.routing_path = self.root / "model-routing.json"
+        self.routing_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "defaultStack": "balanced",
+                    "stacks": {
+                        "balanced": {
+                            "controller": "controller-balanced",
+                            "agents": {
+                                "repository-explorer": ["explorer-balanced"],
+                                "repository-verifier": ["verifier-balanced"],
+                                "correctness-critic": ["critic-balanced"],
+                                "architecture-advisor": ["advisor-balanced"],
+                                "implementation-worker": ["worker-balanced"],
+                            },
+                        },
+                        "xebia": {
+                            "controller": "controller-xebia",
+                            "agents": {
+                                "repository-explorer": ["explorer-xebia"],
+                                "repository-verifier": ["verifier-xebia"],
+                                "correctness-critic": ["critic-xebia"],
+                                "architecture-advisor": ["advisor-xebia"],
+                                "implementation-worker": ["worker-xebia"],
+                            },
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -487,6 +539,8 @@ raise SystemExit(0)
                 "context",
                 "--config",
                 str(self.config_path),
+                "--routing-config",
+                str(self.routing_path),
                 *arguments,
             ],
             cwd=REPO_ROOT,
@@ -533,6 +587,7 @@ raise SystemExit(0)
                 {
                     "root": str(self.workspace),
                     "dockerProfile": "docker-dev",
+                    "modelStack": None,
                     "memoryPalace": "~/.mempalace/palaces/workspace",
                     "memoryWing": "workspace",
                 }
@@ -559,6 +614,150 @@ raise SystemExit(0)
         self.assertEqual(updated.returncode, 0, updated.stderr)
         self.assertEqual(self.load_contexts()[0]["dockerProfile"], "docker-prod")
         self.assertEqual(self.load_contexts()[0]["memoryWing"], "prod")
+
+    def test_add_rejects_unknown_model_stack_without_population(self):
+        other_project = self.root / "other-project"
+        other_project.mkdir()
+
+        rejected = self.run_context(
+            "add",
+            str(other_project),
+            "--model-stack",
+            "missing",
+        )
+
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(self.load_contexts(), [])
+        self.assertEqual(self.read_tool_calls(), [])
+
+    def test_add_persists_explicit_model_stack_with_one_population(self):
+        added = self.run_context(
+            "add",
+            str(self.workspace),
+            "--model-stack",
+            "xebia",
+        )
+
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertEqual(self.load_contexts()[0]["modelStack"], "xebia")
+        mempalace_calls = [
+            call for call in self.read_tool_calls() if call["tool"] == "mempalace"
+        ]
+        self.assertEqual(len(mempalace_calls), 2)
+
+    def test_update_sets_and_inherits_model_stack_without_population(self):
+        self.write_contexts(
+            [
+                {
+                    "root": str(self.workspace),
+                    "dockerProfile": "dev",
+                    "memoryPalace": str(self.root / "palace"),
+                    "memoryWing": "workspace",
+                }
+            ]
+        )
+
+        explicit = self.run_context(
+            "update",
+            str(self.workspace),
+            "--model-stack",
+            "xebia",
+        )
+        self.assertEqual(explicit.returncode, 0, explicit.stderr)
+        self.assertEqual(self.load_contexts()[0]["modelStack"], "xebia")
+        self.assertEqual(self.read_tool_calls(), [])
+
+        inherited = self.run_context(
+            "update",
+            str(self.workspace),
+            "--inherit-model-stack",
+        )
+        self.assertEqual(inherited.returncode, 0, inherited.stderr)
+        self.assertIsNone(self.load_contexts()[0]["modelStack"])
+        self.assertEqual(self.read_tool_calls(), [])
+
+    def test_update_rejects_explicit_and_inherited_model_stack_together(self):
+        self.write_contexts(
+            [
+                {
+                    "root": str(self.workspace),
+                    "dockerProfile": "dev",
+                    "modelStack": None,
+                    "memoryPalace": str(self.root / "palace"),
+                    "memoryWing": "workspace",
+                }
+            ]
+        )
+        original = self.config_path.read_text(encoding="utf-8")
+
+        rejected = self.run_context(
+            "update",
+            str(self.workspace),
+            "--model-stack",
+            "xebia",
+            "--inherit-model-stack",
+        )
+
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.read_tool_calls(), [])
+
+    def test_validate_and_list_reject_persisted_undeclared_model_stack(self):
+        self.write_contexts(
+            [
+                {
+                    "root": str(self.workspace),
+                    "dockerProfile": "dev",
+                    "modelStack": "missing",
+                    "memoryPalace": str(self.root / "palace"),
+                    "memoryWing": "workspace",
+                }
+            ]
+        )
+        original = self.config_path.read_text(encoding="utf-8")
+
+        for command in ("validate", "list"):
+            with self.subTest(command=command):
+                rejected = self.run_context(command)
+                self.assertEqual(rejected.returncode, 1)
+                self.assertEqual(
+                    self.config_path.read_text(encoding="utf-8"), original
+                )
+                self.assertEqual(self.read_tool_calls(), [])
+
+    def test_mutation_candidate_cannot_preserve_undeclared_model_stack(self):
+        self.write_contexts(
+            [
+                {
+                    "root": str(self.workspace),
+                    "dockerProfile": "dev",
+                    "modelStack": "missing",
+                    "memoryPalace": str(self.root / "palace"),
+                    "memoryWing": "workspace",
+                }
+            ]
+        )
+        original = self.config_path.read_text(encoding="utf-8")
+
+        rejected = self.run_context(
+            "update",
+            str(self.workspace),
+            "--docker",
+            "next",
+        )
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.read_tool_calls(), [])
+
+        repaired = self.run_context(
+            "update",
+            str(self.workspace),
+            "--model-stack",
+            "xebia",
+        )
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(self.load_contexts()[0]["modelStack"], "xebia")
+        self.assertEqual(self.read_tool_calls(), [])
 
     def test_add_without_docker_omits_profile_and_renders_placeholder(self):
         added = self.run_context("add", str(self.workspace))
@@ -780,6 +979,8 @@ raise SystemExit(0)
                 [
                     "--config",
                     str(self.config_path),
+                    "--routing-config",
+                    str(self.routing_path),
                     "add",
                     str(self.workspace),
                     "--docker",
@@ -804,12 +1005,14 @@ raise SystemExit(0)
                 {
                     "root": "~/xebia",
                     "dockerProfile": "xebia",
+                    "modelStack": None,
                     "memoryPalace": "~/.mempalace/palaces/xebia",
                     "memoryWing": "xebia",
                 },
                 {
                     "root": "~/complion/a-much-longer-project-root",
                     "dockerProfile": "realtime-production",
+                    "modelStack": "xebia",
                     "memoryPalace": "~/.mempalace/palaces/complion",
                     "memoryWing": "complion",
                 },
@@ -821,9 +1024,12 @@ raise SystemExit(0)
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertNotIn("ROOT\tDOCKER\tPALACE\tWING", listed.stdout)
         self.assertIn("| PROJECT ROOT", listed.stdout)
+        self.assertIn("| MODEL STACK", listed.stdout)
         self.assertIn("| MCP_DOCKER PROFILE", listed.stdout)
         self.assertIn("| MEMPALACE PATH", listed.stdout)
         self.assertIn("| MEMPALACE WING |", listed.stdout)
+        self.assertIn("balanced (global)", listed.stdout)
+        self.assertIn("xebia", listed.stdout)
         self.assertIn("~/complion/a-much-longer-project-root", listed.stdout)
         self.assertIn("realtime-production", listed.stdout)
         lines = listed.stdout.splitlines()
@@ -837,7 +1043,7 @@ raise SystemExit(0)
         listed = self.run_context("list")
 
         self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertIn("| PROJECT ROOT | MCP_DOCKER PROFILE", listed.stdout)
+        self.assertIn("| PROJECT ROOT | MODEL STACK | MCP_DOCKER PROFILE", listed.stdout)
         self.assertEqual(len(listed.stdout.splitlines()), 4)
 
     def test_add_and_update_reject_unsafe_or_conflicting_candidates_without_writing(self):
@@ -989,6 +1195,8 @@ raise SystemExit(0)
                 [
                     "--config",
                     str(self.config_path),
+                    "--routing-config",
+                    str(self.routing_path),
                     "add",
                     str(self.workspace),
                     "--docker",

@@ -993,6 +993,19 @@ file_change_state() {
   fi
 }
 
+private_file_change_state() {
+  local desired_path="$1"
+  local current_path="$2"
+  local expected_mode="$3"
+  if [[ -f "$current_path" && ! -L "$current_path" ]] && \
+     [[ "$(path_mode "$current_path")" == "$expected_mode" ]] && \
+     cmp -s "$desired_path" "$current_path"; then
+    printf '%s' unchanged
+  else
+    printf '%s' changed
+  fi
+}
+
 service_restart_required() {
   local version_changed="$1"
   local service_change_state="$2"
@@ -1018,9 +1031,11 @@ reconcile_headroom_transaction() {
   local version_changed="$1"
   local service_change_state="$2"
   local health_ok="$3"
+  local metadata_change_state="$4"
   headroom_restart_required=false
   if service_restart_required "$version_changed" \
-    "$service_change_state" "$health_ok"; then
+    "$service_change_state" "$health_ok" || \
+     [[ "$metadata_change_state" == changed ]]; then
     headroom_restart_required=true
     headroom_transaction_active=true
   else
@@ -1517,13 +1532,15 @@ assert_owned_session() {
   local data_root="$2"
   local run_dir="$3"
   local context_sha256="$4"
+  local effective_models_sha256="$5"
   (
     cd "$workflow_root" || exit 1
     python3 -m integrations.common.session_config verify \
       --workflow-root "$workflow_root" \
       --data-root "$data_root" \
       --run-dir "$run_dir" \
-      --context-sha256 "$context_sha256"
+      --context-sha256 "$context_sha256" \
+      --effective-models-sha256 "$effective_models_sha256"
   )
 }
 
@@ -1671,38 +1688,141 @@ select_required_model() {
 }
 
 login_flag_for_provider() {
-  case "$1" in
-    codex) printf '%s' '--codex-login' ;;
-    claude) printf '%s' '--claude-login' ;;
-    *) workflow_die "login provider must be 'codex' or 'claude'" ;;
-  esac
+  local proxy_binary="$1"
+  local provider="$2"
+  local candidate help_text supported_names supported
+  [[ "$provider" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || {
+    workflow_die "login provider name is unsafe"
+    return 1
+  }
+  [[ -x "$proxy_binary" ]] || {
+    workflow_die "CLIProxyAPI executable is unavailable"
+    return 1
+  }
+  candidate="-${provider}-login"
+  help_text="$("$proxy_binary" --help 2>&1)" || {
+    workflow_die "CLIProxyAPI login capabilities could not be read"
+    return 1
+  }
+  supported_names="$(printf '%s\n' "$help_text" |
+    rg -o -- '-{1,2}[a-z0-9][a-z0-9-]*-login' |
+    sed -e 's/^-*//' -e 's/-login$//' |
+    sort -u)"
+  supported="$(printf '%s\n' "$supported_names" |
+    sort -u |
+    awk 'BEGIN { separator="" } { printf "%s%s", separator, $0; separator=", " }')"
+  printf '%s\n' "$supported_names" | rg -Fxq -- "$provider" || {
+    workflow_die "installed CLIProxyAPI does not support provider '$provider'; supported OAuth providers: ${supported:-none}"
+    return 1
+  }
+  printf '%s' "$candidate"
 }
 
+workflow_role_surface_is_exact() (
+  local workflow_root="$1"
+  local plugin_root="$2"
+  local guard="$plugin_root/scripts/guard-orchestration.sh"
+  local declared_roles role
+
+  cd "$workflow_root" || exit 1
+  declared_roles="$(python3 -B - "$plugin_root" <<'PY'
+import sys
+from pathlib import Path
+from integrations.common.model_routing import ROLES
+
+plugin = Path(sys.argv[1])
+agents = plugin / "agents"
+try:
+    agent_entries = [
+        entry for entry in agents.iterdir() if entry.suffix == ".md"
+    ]
+except OSError:
+    raise SystemExit(1)
+if any(entry.is_symlink() or not entry.is_file() for entry in agent_entries):
+    raise SystemExit(1)
+declared = set(ROLES)
+source_roles = {entry.stem for entry in agent_entries}
+if source_roles != declared:
+    raise SystemExit(1)
+print("\n".join(ROLES))
+PY
+  )" || exit 1
+
+  [[ -f "$guard" && ! -L "$guard" && -x "$guard" ]] || exit 1
+
+  workflow_invoke_agent_guard() {
+    local agent_type="$1"
+    local isolation="${2:-}"
+    local guard_input
+    guard_input="$(jq -cn \
+      --arg agent_type "$agent_type" \
+      --arg isolation "$isolation" \
+      '{
+        tool_name: "Agent",
+        tool_input: (
+          {subagent_type: $agent_type} +
+          (if $isolation == "" then {} else {isolation: $isolation} end)
+        )
+      }'
+    )" || return 1
+    CLAUDE_PLUGIN_ROOT="$plugin_root" "$guard" <<<"$guard_input"
+  }
+
+  workflow_guard_permits() {
+    local output
+    output="$(workflow_invoke_agent_guard "$@" 2>/dev/null)" || return 1
+    [[ -z "$output" ]]
+  }
+
+  workflow_guard_denies() {
+    local output
+    output="$(workflow_invoke_agent_guard "$@" 2>/dev/null)" || return 1
+    jq -e '
+      type == "object" and
+      .hookSpecificOutput.hookEventName == "PreToolUse" and
+      .hookSpecificOutput.permissionDecision == "deny"
+    ' >/dev/null 2>&1 <<<"$output"
+  }
+
+  while IFS= read -r role; do
+    if [[ "$role" == "implementation-worker" ]]; then
+      workflow_guard_permits "claudex-controller:$role" worktree || exit 1
+      workflow_guard_denies "claudex-controller:$role" || exit 1
+    else
+      workflow_guard_permits "claudex-controller:$role" || exit 1
+      workflow_guard_denies "claudex-controller:$role" worktree || exit 1
+    fi
+  done <<<"$declared_roles"
+
+  workflow_guard_denies Explore || exit 1
+  workflow_guard_denies claudex-controller:unknown-role || exit 1
+)
+
 render_discovered_claudex_config() {
-  local models_json="$1"
+  local effective_models_json="$1"
   local output_file="$2"
   local cliproxy_port="${3:-8317}"
   local headroom_port="${4:-8787}"
   local claudex_proxy_port="${5:-13456}"
-  local model_ids gpt_models claude_models
+  local controller_model
   local fast_model balanced_model powerful_model
   local haiku_model sonnet_model opus_model
 
-  model_ids="$(jq -r '.data[]?.id // empty' "$models_json")" || return 1
-  gpt_models="$(printf '%s\n' "$model_ids" | rg '^gpt-' | rg -v '^gpt-image-' || true)"
-  claude_models="$(printf '%s\n' "$model_ids" | rg '^claude-' || true)"
-
-  fast_model="$(select_required_model "$gpt_models" gpt-5.6-luna)" || return 1
-  balanced_model="$(select_required_model "$gpt_models" gpt-5.6-terra)" || return 1
-  powerful_model="$(select_required_model "$gpt_models" gpt-5.6-sol)" || return 1
-  haiku_model="$(select_required_model "$claude_models" \
-    claude-haiku-4-5-20251001 claude-haiku-4-5)" || return 1
-  sonnet_model="$(select_required_model "$claude_models" \
-    claude-sonnet-5 claude-sonnet-4-6 claude-sonnet-4-5)" || return 1
-  opus_model="$(select_required_model "$claude_models" claude-opus-4-8)" || return 1
+  controller_model="$(jq -er '.controller | strings | select(length > 0)' \
+    "$effective_models_json")" || return 1
+  fast_model="$(jq -er '.agents["repository-explorer"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
+  balanced_model="$(jq -er '.agents["repository-verifier"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
+  powerful_model="$controller_model"
+  haiku_model="$fast_model"
+  sonnet_model="$(jq -er '.agents["correctness-critic"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
+  opus_model="$(jq -er '.agents["architecture-advisor"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
 
   render_claudex_config "$output_file" \
-    "$powerful_model" "$fast_model" "$balanced_model" "$powerful_model" \
+    "$controller_model" "$fast_model" "$balanced_model" "$powerful_model" \
     "$haiku_model" "$sonnet_model" "$opus_model" "" \
     "$cliproxy_port" "$headroom_port" "$claudex_proxy_port"
 }
@@ -1794,7 +1914,7 @@ stage_latest_github_binary() {
   local archive_binary="$4"
   local destination="$5"
   local staging_dir="$6"
-  local metadata archive row url digest asset version actual_sha staged_binary
+  local metadata archive row url digest asset tag version actual_sha staged_binary
 
   install -d -m 0700 "$staging_dir"
   metadata="$staging_dir/release.json"
@@ -1808,15 +1928,18 @@ stage_latest_github_binary() {
     [.browser_download_url, .digest, .name] | @tsv
   ' "$metadata")"
   IFS=$'\t' read -r url digest asset <<<"$row"
+  tag="$(jq -er '.tag_name' "$metadata")"
   version="$(jq -er '.tag_name | sub("^v"; "")' "$metadata")"
+  [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
+    workflow_die "GitHub release tag is unsafe"
   if [[ "$digest" != sha256:* ]]; then
     workflow_die "GitHub did not publish a SHA-256 digest for $asset"
     return 1
   fi
 
   if [[ -x "$destination" ]] && binary_reports_semver "$destination" "$version"; then
-    jq -cn --arg version "$version" \
-      '{version: $version, changed: false, staged_path: null}'
+    jq -cn --arg version "$version" --arg tag "$tag" \
+      '{version: $version, tag: $tag, changed: false, staged_path: null}'
     return 0
   fi
 
@@ -1832,8 +1955,9 @@ stage_latest_github_binary() {
     workflow_die "staged $asset did not report version $version"
     return 1
   fi
-  jq -cn --arg version "$version" --arg staged_path "$staged_binary" \
-    '{version: $version, changed: true, staged_path: $staged_path}'
+  jq -cn --arg version "$version" --arg tag "$tag" \
+    --arg staged_path "$staged_binary" \
+    '{version: $version, tag: $tag, changed: true, staged_path: $staged_path}'
 }
 
 activate_staged_file() {
@@ -1841,6 +1965,120 @@ activate_staged_file() {
   local destination="$2"
   local mode="$3"
   install -m "$mode" "$staged_path" "$destination"
+}
+
+activate_private_file_atomic() {
+  local staged_path="$1"
+  local destination="$2"
+  local mode="$3"
+  python3 - "$staged_path" "$destination" "$mode" <<'PY'
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+mode = int(sys.argv[3], 8)
+parent = destination.parent
+parent_stat = os.lstat(parent)
+if (
+    stat.S_ISLNK(parent_stat.st_mode)
+    or not stat.S_ISDIR(parent_stat.st_mode)
+    or parent_stat.st_uid != os.getuid()
+    or stat.S_IMODE(parent_stat.st_mode) != 0o700
+):
+    raise SystemExit("private destination directory is unsafe")
+source_stat = os.lstat(source)
+if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+    raise SystemExit("staged private file is unsafe")
+try:
+    destination_stat = os.lstat(destination)
+except FileNotFoundError:
+    destination_stat = None
+if destination_stat is not None and not (
+    stat.S_ISREG(destination_stat.st_mode)
+    or stat.S_ISLNK(destination_stat.st_mode)
+):
+    raise SystemExit("private destination is neither regular, symlink, nor absent")
+
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+no_follow = getattr(os, "O_NOFOLLOW", 0)
+directory_fd = os.open(parent, directory_flags | no_follow)
+source_fd = None
+temporary_fd = None
+temporary_name = f".{destination.name}.{secrets.token_hex(12)}"
+replaced = False
+try:
+    directory_stat = os.fstat(directory_fd)
+    if (directory_stat.st_dev, directory_stat.st_ino) != (
+        parent_stat.st_dev,
+        parent_stat.st_ino,
+    ):
+        raise OSError("private destination directory changed")
+    source_fd = os.open(source, os.O_RDONLY | no_follow)
+    if (os.fstat(source_fd).st_dev, os.fstat(source_fd).st_ino) != (
+        source_stat.st_dev,
+        source_stat.st_ino,
+    ):
+        raise OSError("staged private file changed")
+    temporary_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
+        mode,
+        dir_fd=directory_fd,
+    )
+    os.fchmod(temporary_fd, mode)
+    while True:
+        block = os.read(source_fd, 65536)
+        if not block:
+            break
+        offset = 0
+        while offset < len(block):
+            offset += os.write(temporary_fd, block[offset:])
+    os.fsync(temporary_fd)
+    temporary_stat = os.fstat(temporary_fd)
+    os.close(temporary_fd)
+    temporary_fd = None
+    os.replace(
+        temporary_name,
+        destination.name,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+    )
+    replaced = True
+    os.fsync(directory_fd)
+    final_stat = os.stat(
+        destination.name,
+        dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+    parent_after = os.lstat(parent)
+    if (
+        not stat.S_ISREG(final_stat.st_mode)
+        or final_stat.st_uid != os.getuid()
+        or stat.S_IMODE(final_stat.st_mode) != mode
+        or (final_stat.st_dev, final_stat.st_ino)
+        != (temporary_stat.st_dev, temporary_stat.st_ino)
+        or (parent_after.st_dev, parent_after.st_ino)
+        != (directory_stat.st_dev, directory_stat.st_ino)
+        or parent_after.st_uid != os.getuid()
+        or stat.S_IMODE(parent_after.st_mode) != 0o700
+    ):
+        raise OSError("private destination validation failed")
+finally:
+    if source_fd is not None:
+        os.close(source_fd)
+    if temporary_fd is not None:
+        os.close(temporary_fd)
+    if not replaced:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+    os.close(directory_fd)
+PY
 }
 
 backup_path() {

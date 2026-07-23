@@ -1,8 +1,8 @@
 ---
-name: sol-builder
+name: implementation-worker
 description: Isolated implementation worker for a written plan with an exact disjoint ownership boundary.
 tools: Read, Glob, Grep, Edit, Write, Bash
-model: gpt-5.6-sol
+model: inherit
 maxTurns: 16
 effort: high
 isolation: worktree

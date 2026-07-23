@@ -14,28 +14,41 @@ fixture_workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_data_root="${CLAUDEX_DATA_DIR:-$fixture_workflow_root/runtime}"
 expanded_review_path="$fixture_workflow_root/controller/plugin/workflows/review.js"
 controller_session_id='11111111-1111-4111-8111-111111111111'
+mkdir -p "$fixture_data_root/state/sessions"
+session_dir="$(mktemp -d "$fixture_data_root/state/sessions/run.XXXXXX")"
+chmod 0700 "$session_dir"
+jq -n '{
+  schemaVersion: 1,
+  stack: "fixture",
+  controller: "provider/controller-model",
+  agents: {
+    "repository-explorer": "provider/exploration-model",
+    "repository-verifier": "provider/shared-review-model",
+    "correctness-critic": "provider/shared-review-model",
+    "architecture-advisor": "provider/architecture-model",
+    "implementation-worker": "provider/worker-model"
+  }
+}' >"$session_dir/effective-models.json"
+chmod 0600 "$session_dir/effective-models.json"
 
 printf 'warning: offline fixture diagnostic\n' >&2
 if [[ " $* " != *" --output-format stream-json "* ]]; then
-  if [[ " $* " == *" --model opus "* ]]; then
-    provider_reply=CLAUDEX_CLAUDE_OK
-    provider_model=claude-opus-4-8
-  else
-    provider_reply=CLAUDEX_GPT_OK
-    provider_model=gpt-5.6-sol
-  fi
+  provider_reply=CLAUDEX_ROUTED_PROVIDER_OK
+  provider_model=provider/controller-model
+  [[ "${SMOKE_PROVIDER_SUBSTITUTE:-0}" == 1 ]] && \
+    provider_model=provider/unrelated-model
   provider_tokens=7
   [[ "${SMOKE_PROVIDER_ZERO:-0}" == 1 ]] && provider_tokens=0
   jq -cn \
     --arg reply "$provider_reply" \
     --arg model "$provider_model" \
     --argjson output_tokens "$provider_tokens" \
-    '{type:"result",subtype:"success",is_error:false,result:$reply,modelUsage:{"claude-haiku-4-5-20251001":{outputTokens:3},($model):{outputTokens:$output_tokens}}}'
+    '{type:"result",subtype:"success",is_error:false,result:$reply,modelUsage:{"provider/auxiliary-model":{outputTokens:3},($model):{outputTokens:$output_tokens}}}'
   exit 0
 fi
 
 case "${SMOKE_SCENARIO:-expanded}" in
-  expanded|degraded|duplicate-record)
+  expanded|degraded|duplicate-record|unrelated-positive-substitute)
     jq -cn --arg path "$expanded_review_path" '{type:"assistant",message:{content:[{type:"tool_use",name:"Workflow",input:{scriptPath:$path,args:{subject:"controller",scope:"eight surfaces",highRisk:false}}}]}}'
     ;;
   duplicate-workflow)
@@ -69,7 +82,7 @@ workflow_status=complete
 workflow_missing='[]'
 if [[ "${SMOKE_SCENARIO:-expanded}" == degraded ]]; then
   workflow_status=degraded
-  workflow_missing='[{"label":"critique","agentType":"claudex-controller:sonnet-critic","reason":"missing-structured-result"}]'
+  workflow_missing='[{"label":"critique","agentType":"claudex-controller:correctness-critic","reason":"missing-structured-result"}]'
 fi
 workflow_record_dir="$fixture_data_root/claude-config/projects/-fixture/$controller_session_id/workflows"
 mkdir -p "$workflow_record_dir"
@@ -84,13 +97,16 @@ fi
 
 case "${SMOKE_SCENARIO:-expanded}" in
   zero-usage)
-    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"gpt-5.6-sol":{outputTokens:12},"gpt-5.6-terra":{outputTokens:0},"claude-sonnet-5":{outputTokens:8}}}'
+    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"provider/controller-model":{outputTokens:12},"provider/shared-review-model":{outputTokens:0}}}'
     ;;
   empty-usage)
-    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"gpt-5.6-sol":{},"gpt-5.6-terra":{},"claude-sonnet-5":{}}}'
+    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"provider/controller-model":{},"provider/shared-review-model":{}}}'
+    ;;
+  unrelated-positive-substitute)
+    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"provider/controller-model":{outputTokens:12},"provider/unrelated-model-a":{outputTokens:10},"provider/unrelated-model-b":{outputTokens:8}}}'
     ;;
   *)
-    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"gpt-5.6-sol":{outputTokens:12},"gpt-5.6-terra":{outputTokens:10},"claude-sonnet-5":{outputTokens:8}}}'
+    jq -cn --arg session_id "$controller_session_id" '{type:"result",subtype:"success",is_error:false,session_id:$session_id,modelUsage:{"provider/controller-model":{outputTokens:12},"provider/shared-review-model":{outputTokens:10}}}'
     ;;
 esac
 EOF
@@ -123,16 +139,29 @@ assert_fails inline
 assert_fails high-risk
 assert_fails zero-usage
 assert_fails empty-usage
+assert_fails unrelated-positive-substitute
 assert_fails degraded
 assert_fails duplicate-workflow
 assert_fails duplicate-record
 
-gpt_output="$(bash "$fixture_root/smoke-test.sh" gpt)"
-[[ "$gpt_output" == 'PASS: Claude Code completed through Claudex on gpt-5.6-sol' ]]
-claude_output="$(bash "$fixture_root/smoke-test.sh" claude)"
-[[ "$claude_output" == 'PASS: Claude Code completed through Claudex on claude-opus-4-8' ]]
-if SMOKE_PROVIDER_ZERO=1 bash "$fixture_root/smoke-test.sh" gpt >/dev/null 2>&1; then
-  printf 'provider smoke accepted zero output usage for the expected model\n' >&2
+provider_output="$(bash "$fixture_root/smoke-test.sh" provider)"
+[[ "$provider_output" == 'PASS: routed controller completed through Claudex with positive output usage' ]]
+if bash "$fixture_root/smoke-test.sh" gpt >/dev/null 2>&1; then
+  printf 'provider smoke still accepted the misleading gpt mode\n' >&2
+  exit 1
+fi
+if bash "$fixture_root/smoke-test.sh" claude >/dev/null 2>&1; then
+  printf 'provider smoke still accepted the misleading claude mode\n' >&2
+  exit 1
+fi
+if SMOKE_PROVIDER_ZERO=1 \
+    bash "$fixture_root/smoke-test.sh" provider >/dev/null 2>&1; then
+  printf 'provider smoke accepted zero output usage\n' >&2
+  exit 1
+fi
+if SMOKE_PROVIDER_SUBSTITUTE=1 \
+    bash "$fixture_root/smoke-test.sh" provider >/dev/null 2>&1; then
+  printf 'provider smoke accepted unrelated positive usage\n' >&2
   exit 1
 fi
 
