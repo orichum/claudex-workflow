@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 for script in \
   install.sh doctor.sh rollback.sh smoke-test.sh discover-models.sh \
-  bin/claudex-gpt bin/claudex-login bin/claudex-models \
+  bin/claudex-gpt bin/claudex-login bin/claudex-models bin/claudex-provider \
   bin/claudex-doctor bin/claude-headroom \
   bin/claudex-headroom bin/claudex-context bin/claudex-plugin \
   tests/test_install_transaction.sh tests/test_claudex_proxy.sh \
@@ -1775,9 +1775,12 @@ rg -Fq 'claudex_proxy_readiness_drifted' "$ROOT/install.sh"
 rg -Fq 'claudex-login <installed-oauth-provider>; %s/install.sh' \
   "$ROOT/install.sh"
 rg -Fq 'claudex-models' "$ROOT/install.sh" "$ROOT/doctor.sh"
+rg -Fq 'claudex-provider' "$ROOT/install.sh"
 rg -Fq 'load_routing' "$ROOT/install.sh" "$ROOT/doctor.sh"
 rg -Fq 'snapshot_path "$USER_BIN_DIR/claudex-models"' "$ROOT/install.sh"
 rg -Fq 'restore_snapshot "$USER_BIN_DIR/claudex-models"' "$ROOT/install.sh"
+rg -Fq 'snapshot_path "$USER_BIN_DIR/claudex-provider"' "$ROOT/install.sh"
+rg -Fq 'restore_snapshot "$USER_BIN_DIR/claudex-provider"' "$ROOT/install.sh"
 rg -Fq 'default model stack' "$ROOT/doctor.sh"
 rg -Fq 'latest session effective mapping is internally consistent' \
   "$ROOT/doctor.sh"
@@ -2008,6 +2011,9 @@ required_readme_text = [
     "claudex-models validate",
     "claudex-login kimi",
     "claudex-login antigravity",
+    "claudex-provider defaults",
+    "claudex-provider list",
+    "automatic Claude failover",
     "claudex-context update",
     "--model-stack",
     "repository-explorer",

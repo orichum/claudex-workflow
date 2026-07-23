@@ -69,6 +69,83 @@ chmod 0755 "$fake_proxy_double"
 [[ "$(login_flag_for_provider "$fake_proxy_double" antigravity)" == \
   "-antigravity-login" ]]
 
+login_data="$fixture/login-data"
+login_tools="$fixture/login-tools"
+login_trace="$fixture/login-trace"
+real_python="$(command -v python3)"
+install -d -m 0700 "$login_data/bin" "$login_data/auth"
+install -d "$login_tools"
+cat >"$login_data/bin/cli-proxy-api" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\n' '-antigravity-login'
+  exit 0
+fi
+printf 'oauth\n' >>"$CLAUDEX_TEST_LOGIN_TRACE"
+if [[ "${CLAUDEX_TEST_LOGIN_FAIL:-0}" == 1 ]]; then
+  exit 7
+fi
+exit 0
+EOF
+cat >"$login_tools/python3" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"integrations.common.provider_credentials"* ]]; then
+  printf 'priority:%s\n' "$*" >>"$CLAUDEX_TEST_LOGIN_TRACE"
+fi
+exec "$CLAUDEX_TEST_REAL_PYTHON" "$@"
+EOF
+chmod 0755 "$login_data/bin/cli-proxy-api"
+chmod 0755 "$login_tools/python3"
+printf '%s\n' \
+  '{"type":"antigravity","email":"login@example.com","access_token":"SECRET"}' \
+  >"$login_data/auth/antigravity-login.json"
+chmod 0600 "$login_data/auth/antigravity-login.json"
+: >"$login_trace"
+if PATH="$login_tools:$PATH" CLAUDEX_DATA_DIR="$login_data" \
+    CLAUDEX_TEST_LOGIN_FAIL=1 CLAUDEX_TEST_LOGIN_TRACE="$login_trace" \
+    CLAUDEX_TEST_REAL_PYTHON="$real_python" \
+    "$ROOT/bin/claudex-login" antigravity \
+    >"$fixture/login-failed.stdout" 2>"$fixture/login-failed.stderr"; then
+  printf 'failed provider login reported success\n' >&2
+  exit 1
+fi
+jq -e 'has("priority") | not' \
+  "$login_data/auth/antigravity-login.json" >/dev/null
+[[ "$(cat "$login_trace")" == 'oauth' ]]
+: >"$login_trace"
+PATH="$login_tools:$PATH" CLAUDEX_DATA_DIR="$login_data" \
+  CLAUDEX_TEST_LOGIN_TRACE="$login_trace" \
+  CLAUDEX_TEST_REAL_PYTHON="$real_python" \
+  "$ROOT/bin/claudex-login" antigravity \
+  >"$fixture/login-success.stdout" 2>"$fixture/login-success.stderr"
+[[ "$(jq -r '.priority' \
+  "$login_data/auth/antigravity-login.json")" == 50 ]]
+[[ "$(sed -n '1p' "$login_trace")" == oauth ]]
+[[ "$(sed -n '2p' "$login_trace")" == \
+  *'default-for antigravity' ]]
+[[ "$(wc -l <"$login_trace" | tr -d ' ')" == 2 ]]
+rg -q 'Applied default priority for antigravity; changed 1 credential' \
+  "$fixture/login-success.stdout"
+rg -q 'Authentication complete' "$fixture/login-success.stdout"
+printf '{"type":"antigravity","access_token":"SECRET"\n' \
+  >"$login_data/auth/antigravity-login.json"
+chmod 0600 "$login_data/auth/antigravity-login.json"
+: >"$login_trace"
+if PATH="$login_tools:$PATH" CLAUDEX_DATA_DIR="$login_data" \
+    CLAUDEX_TEST_LOGIN_TRACE="$login_trace" \
+    CLAUDEX_TEST_REAL_PYTHON="$real_python" \
+    "$ROOT/bin/claudex-login" antigravity \
+    >"$fixture/login-priority-failed.stdout" \
+    2>"$fixture/login-priority-failed.stderr"; then
+  printf 'failed priority reconciliation reported success\n' >&2
+  exit 1
+fi
+rg -q 'authentication succeeded, but the provider routing priority was not applied' \
+  "$fixture/login-priority-failed.stderr"
+! rg -q 'Authentication complete|SECRET' \
+  "$fixture/login-priority-failed.stdout" \
+  "$fixture/login-priority-failed.stderr"
+
 launcher_data="$(cd "$fixture" && pwd -P)/launcher-data"
 launcher_xdg="$fixture/launcher-xdg"
 launcher_tools="$fixture/launcher-tools"
@@ -251,6 +328,11 @@ rg -q '^balanced = "gpt-5.6-terra"$' "$fixture/claudex.toml"
 
 render_cliproxy_config "$fixture/cliproxy.yaml" /portable/auth 18317
 rg -q '^port: 18317$' "$fixture/cliproxy.yaml"
+rg -Uq $'^quota-exceeded:\n  antigravity-credits: true$' \
+  "$fixture/cliproxy.yaml"
+rg -Uq $'^routing:\n  strategy: "fill-first"\n  session-affinity: true$' \
+  "$fixture/cliproxy.yaml"
+rg -q '^max-retry-credentials: 0$' "$fixture/cliproxy.yaml"
 
 jq -n '{
   schemaVersion: 1,

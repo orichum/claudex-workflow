@@ -436,6 +436,7 @@ PY
   cp "$headroom_models" "$headroom_symlink_target"
   rm -f "$headroom_models"
   ln -s "$headroom_symlink_target" "$headroom_models"
+  rm -f -- "$daily_home/user-bin/claudex-provider"
   headroom_before_rollback="$(readlink "$headroom_models")"
   if invoke_install "$daily_home" full \
       "$fixture/$platform_name-headroom-rollback.log" "$platform" 2 0 1; then
@@ -444,6 +445,8 @@ PY
   fi
   [[ -L "$headroom_models" ]]
   [[ "$(readlink "$headroom_models")" == "$headroom_before_rollback" ]]
+  [[ ! -e "$daily_home/user-bin/claudex-provider" && \
+     ! -L "$daily_home/user-bin/claudex-provider" ]]
   [[ -f "$daily_home/service-state/proxy.loaded" ]]
   rm -f "$daily_home/service-state/post-start.failed"
   rm -f "$headroom_models"
@@ -514,6 +517,9 @@ PY
   rm -f -- "$daily_home/user-bin/claudex-models"
   printf 'prior user launcher\n' >"$daily_home/user-bin/claudex-models"
   chmod 0700 "$daily_home/user-bin/claudex-models"
+  rm -f -- "$daily_home/user-bin/claudex-provider"
+  printf 'prior provider launcher\n' >"$daily_home/user-bin/claudex-provider"
+  chmod 0700 "$daily_home/user-bin/claudex-provider"
   prior_proxy_port="$(jq -r .claudexProxyPort "$daily_home/data/service-ports.json")"
   rollback_proxy_port="$(python3 - "$prior_proxy_port" \
     "$(jq -r .cliproxyPort "$daily_home/data/service-ports.json")" \
@@ -548,11 +554,19 @@ PY
   [[ ! -L "$daily_home/user-bin/claudex-models" ]]
   [[ "$(cat "$daily_home/user-bin/claudex-models")" == \
      'prior user launcher' ]]
+  [[ ! -L "$daily_home/user-bin/claudex-provider" ]]
+  [[ "$(cat "$daily_home/user-bin/claudex-provider")" == \
+     'prior provider launcher' ]]
   restored_launcher_mode="$(
     stat -f '%Lp' "$daily_home/user-bin/claudex-models" 2>/dev/null || \
       stat -c '%a' "$daily_home/user-bin/claudex-models"
   )"
   [[ "$restored_launcher_mode" == 700 ]]
+  restored_provider_mode="$(
+    stat -f '%Lp' "$daily_home/user-bin/claudex-provider" 2>/dev/null || \
+      stat -c '%a' "$daily_home/user-bin/claudex-provider"
+  )"
+  [[ "$restored_provider_mode" == 700 ]]
   [[ -f "$daily_home/service-state/proxy.loaded" ]]
   [[ ! -f "$daily_home/service-state/proxy.unready" ]]
   python3 - "$daily_home/events.log" "$rollback_event_start" <<'PY'

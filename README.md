@@ -238,6 +238,36 @@ when the chosen stack is ready; if that stack cannot resolve, the catalogue is
 still listed with an `unresolved` status and warning. Credentials and provider
 tokens never belong in Git.
 
+### Automatic Claude failover
+
+CLIProxyAPI keeps direct Claude OAuth as the preferred route for Claude models
+and automatically uses Antigravity when that credential is quota-exhausted,
+cooling down, or unavailable. Headroom and Claudex continue using the same
+model ID, so the switch does not require a different stack or a restarted
+session.
+
+New successful `claudex-login claude` and `claudex-login antigravity` runs apply
+the managed priorities automatically. On an existing installation, apply them
+once and verify the safe metadata table:
+
+```bash
+claudex-provider defaults
+claudex-provider list
+```
+
+The defaults are direct Claude `100` and Antigravity `50`. To override a
+provider explicitly:
+
+```bash
+claudex-provider priority claude 100
+claudex-provider priority antigravity 50
+```
+
+The command changes only the private credential's `priority` field and never
+prints OAuth tokens. A running session stays on the credential selected after
+failover for stability; later sessions prefer direct Claude again after it
+recovers.
+
 Select a stack for one registered workspace root:
 
 ```bash
