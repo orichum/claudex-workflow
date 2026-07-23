@@ -30,6 +30,8 @@ source "$ROOT/lib/workflow.sh"
 # shellcheck source=../discover-models.sh
 source "$ROOT/discover-models.sh"
 
+[[ "$(rg -F -c 'tag: $tag, changed:' "$ROOT/lib/workflow.sh")" == 2 ]]
+
 fake_proxy="$fixture/cli-proxy-api"
 cat >"$fake_proxy" <<'EOF'
 #!/usr/bin/env bash

@@ -43,6 +43,12 @@ printf '%s\n' \
   '  if [[ "$(cat "$FAKE_CLAUDEX_BUILD_STATE")" == 2 ]]; then version=1.0.1; else version=1.0.0; fi' \
   '  if [[ "$FAKE_UNAME_S" == Darwin ]]; then asset="claudex-v${version}-aarch64-apple-darwin.tar.gz"; else asset="claudex-v${version}-aarch64-unknown-linux-gnu.tar.gz"; fi' \
   '  printf '\''{"tag_name":"v%s","assets":[{"name":"%s","browser_download_url":"https://fixture/claudex.tar.gz","digest":"sha256:%s"}]}\n'\'' "$version" "$asset" "$FAKE_ARCHIVE_DIGEST" >"$output"' \
+  'elif [[ "$url" == *raw.githubusercontent.com/router-for-me/CLIProxyAPI/v1.0.0/internal/registry/models/models.json* ]]; then' \
+  '  case "$(cat "$FAKE_HEADROOM_REGISTRY_STATE")" in' \
+  '    changed) printf '\''{"kimi":[{"id":"kimi-k2.7-code","context_length":131072},{"id":"shared-model","context_length":200000}],"antigravity":[{"id":"gemini-3.1-pro-preview","inputTokenLimit":1048576},{"id":"shared-model","inputTokenLimit":114000},{"id":"no-upstream-limit"}]}\n'\'' >"$output" ;;' \
+  '    invalid) printf '\''{"provider":[{"id":"bad model","context_length":1000}]}\n'\'' >"$output" ;;' \
+  '    *) printf '\''{"kimi":[{"id":"kimi-k2.7-code","context_length":262144},{"id":"shared-model","context_length":200000}],"antigravity":[{"id":"gemini-3.1-pro-preview","inputTokenLimit":1048576},{"id":"shared-model","inputTokenLimit":114000},{"id":"no-upstream-limit"}]}\n'\'' >"$output" ;;' \
+  '  esac' \
   'elif [[ "$url" == https://fixture/* ]]; then' \
   '  printf archive >"$output"' \
   'elif [[ "$url" == */health ]]; then' \
@@ -93,7 +99,14 @@ printf '%s\n' \
   '  exit 0' \
   'fi' \
   'shift' \
-  'if [[ "${1:-}" == --version ]]; then printf "headroom 1.0.0\n"; else exec /bin/sleep 300; fi' \
+  'if [[ "${1:-}" == --version ]]; then printf "headroom 1.0.0\n"; else' \
+  '  [[ "$HEADROOM_CONFIG_DIR" == */headroom-preflight/config ]]' \
+  '  [[ -f "$HEADROOM_CONFIG_DIR/models.json" && ! -L "$HEADROOM_CONFIG_DIR/models.json" ]]' \
+  '  mode="$(stat -f "%Lp" "$HEADROOM_CONFIG_DIR/models.json" 2>/dev/null || stat -c "%a" "$HEADROOM_CONFIG_DIR/models.json")"' \
+  '  [[ "$mode" == 600 ]]' \
+  '  jq -e '\''.source.tag == "v1.0.0" and (.anthropic.context_limits | length > 0)'\'' "$HEADROOM_CONFIG_DIR/models.json" >/dev/null' \
+  '  exec /bin/sleep 300' \
+  'fi' \
   >"$fake_bin/headroom-python"
 
 printf '%s\n' \
@@ -208,6 +221,8 @@ invoke_install() {
   install -d "$home" "$home/service-state"
   printf '%s\n' "$models" >"$home/models.state"
   printf '%s\n' "$build" >"$home/claudex-build.state"
+  [[ -f "$home/headroom-registry.state" ]] || \
+    printf '%s\n' default >"$home/headroom-registry.state"
   HOME="$home" \
   CLAUDEX_DATA_DIR="$home/data" \
   USER_BIN_DIR="$home/user-bin" \
@@ -217,6 +232,7 @@ invoke_install() {
   FAKE_UNAME_S="$platform" \
   FAKE_MODELS_STATE="$home/models.state" \
   FAKE_CLAUDEX_BUILD_STATE="$home/claudex-build.state" \
+  FAKE_HEADROOM_REGISTRY_STATE="$home/headroom-registry.state" \
   FAKE_HEADROOM_PYTHON="$fake_bin/headroom-python" \
   FAKE_CA_FILE="$ca_file" \
   FAKE_SERVICE_STATE="$home/service-state" \
@@ -242,6 +258,28 @@ run_install() {
 proxy_mutation_count() {
   awk '$0 == "cutover-start" || $0 == "cutover-stop" {count++} END {print count + 0}' \
     "$1"
+}
+
+headroom_start_count() {
+  local platform="$1" service_log="$2"
+  if [[ "$platform" == Darwin ]]; then
+    awk '/bootstrap/ && /claudex-headroom/ {count++} END {print count + 0}' \
+      "$service_log"
+  else
+    awk '/start claudex-headroom.service/ {count++} END {print count + 0}' \
+      "$service_log"
+  fi
+}
+
+headroom_mutation_count() {
+  local platform="$1" service_log="$2"
+  if [[ "$platform" == Darwin ]]; then
+    awk '/(bootstrap|bootout)/ && /claudex-headroom/ {count++} END {print count + 0}' \
+      "$service_log"
+  else
+    awk '/(start|stop|restart) claudex-headroom.service/ {count++} END {print count + 0}' \
+      "$service_log"
+  fi
 }
 
 assert_one_restart() {
@@ -295,6 +333,8 @@ exercise_platform() {
   fi
   [[ ! -e "$absent_launcher_home/user-bin/claudex-models" && \
      ! -L "$absent_launcher_home/user-bin/claudex-models" ]]
+  [[ ! -e "$absent_launcher_home/data/headroom/config/models.json" && \
+     ! -L "$absent_launcher_home/data/headroom/config/models.json" ]]
 
   run_install "$daily_home" empty "$fixture/$platform_name-pending.log" \
     "$platform" 1
@@ -315,6 +355,12 @@ exercise_platform() {
   [[ -f "$proxy_service" ]]
   [[ -f "$daily_home/service-state/proxy.loaded" ]]
   rg -Fq 'Claudex:     installed' "$fixture/$platform_name-activated.log"
+  headroom_models="$daily_home/data/headroom/config/models.json"
+  [[ "$(jq -r '.source.tag' "$headroom_models")" == v1.0.0 ]]
+  [[ "$(jq -r '.anthropic.context_limits["shared-model"]' \
+    "$headroom_models")" == 114000 ]]
+  [[ "$(stat -f '%Lp' "$headroom_models" 2>/dev/null || \
+    stat -c '%a' "$headroom_models")" == 600 ]]
   python3 - "$daily_home/events.log" <<'PY'
 import sys
 
@@ -327,10 +373,83 @@ if not publication < preflight < cutover:
 PY
 
   before="$(proxy_mutation_count "$daily_home/events.log")"
+  headroom_before="$(
+    headroom_mutation_count "$platform" "$daily_home/service.log"
+  )"
   run_install "$daily_home" full "$fixture/$platform_name-reused.log" \
     "$platform" 1
   [[ "$(proxy_mutation_count "$daily_home/events.log")" == "$before" ]]
+  [[ "$(headroom_mutation_count "$platform" "$daily_home/service.log")" == \
+     "$headroom_before" ]]
   rg -Fq 'Claudex:     reused' "$fixture/$platform_name-reused.log"
+
+  chmod 0644 "$headroom_models"
+  headroom_before="$(headroom_start_count "$platform" "$daily_home/service.log")"
+  run_install "$daily_home" full \
+    "$fixture/$platform_name-headroom-mode.log" "$platform" 1
+  [[ $(( $(headroom_start_count "$platform" "$daily_home/service.log") - \
+    headroom_before )) -eq 1 ]]
+  [[ -f "$headroom_models" && ! -L "$headroom_models" ]]
+  [[ "$(stat -f '%Lp' "$headroom_models" 2>/dev/null || \
+    stat -c '%a' "$headroom_models")" == 600 ]]
+
+  headroom_symlink_target="$daily_home/headroom-models-target.json"
+  cp "$headroom_models" "$headroom_symlink_target"
+  rm -f "$headroom_models"
+  ln -s "$headroom_symlink_target" "$headroom_models"
+  headroom_before="$(headroom_start_count "$platform" "$daily_home/service.log")"
+  run_install "$daily_home" full \
+    "$fixture/$platform_name-headroom-symlink.log" "$platform" 1
+  [[ $(( $(headroom_start_count "$platform" "$daily_home/service.log") - \
+    headroom_before )) -eq 1 ]]
+  [[ -f "$headroom_models" && ! -L "$headroom_models" ]]
+  [[ "$(stat -f '%Lp' "$headroom_models" 2>/dev/null || \
+    stat -c '%a' "$headroom_models")" == 600 ]]
+  cmp -s "$headroom_models" "$headroom_symlink_target"
+
+  printf '%s\n' changed >"$daily_home/headroom-registry.state"
+  old_headroom_mode="$(
+    stat -f '%Lp' "$headroom_models" 2>/dev/null || stat -c '%a' "$headroom_models"
+  )"
+  headroom_before="$(headroom_start_count "$platform" "$daily_home/service.log")"
+  run_install "$daily_home" full \
+    "$fixture/$platform_name-headroom-metadata.log" "$platform" 1
+  [[ $(( $(headroom_start_count "$platform" "$daily_home/service.log") - \
+    headroom_before )) -eq 1 ]]
+  [[ "$(jq -r '.anthropic.context_limits["kimi-k2.7-code"]' \
+    "$headroom_models")" == 131072 ]]
+
+  current_headroom_models="$(cat "$headroom_models")"
+  printf '%s\n' invalid >"$daily_home/headroom-registry.state"
+  headroom_before="$(
+    headroom_mutation_count "$platform" "$daily_home/service.log"
+  )"
+  if invoke_install "$daily_home" full \
+      "$fixture/$platform_name-headroom-invalid.log" "$platform" 1; then
+    printf 'invalid exact-release metadata was accepted on %s\n' "$platform" >&2
+    return 1
+  fi
+  [[ "$(cat "$headroom_models")" == "$current_headroom_models" ]]
+  [[ "$(headroom_mutation_count "$platform" "$daily_home/service.log")" == \
+     "$headroom_before" ]]
+  printf '%s\n' changed >"$daily_home/headroom-registry.state"
+  cp "$headroom_models" "$headroom_symlink_target"
+  rm -f "$headroom_models"
+  ln -s "$headroom_symlink_target" "$headroom_models"
+  headroom_before_rollback="$(readlink "$headroom_models")"
+  if invoke_install "$daily_home" full \
+      "$fixture/$platform_name-headroom-rollback.log" "$platform" 2 0 1; then
+    printf 'post-metadata failure reported success on %s\n' "$platform" >&2
+    return 1
+  fi
+  [[ -L "$headroom_models" ]]
+  [[ "$(readlink "$headroom_models")" == "$headroom_before_rollback" ]]
+  [[ -f "$daily_home/service-state/proxy.loaded" ]]
+  rm -f "$daily_home/service-state/post-start.failed"
+  rm -f "$headroom_models"
+  cp "$headroom_symlink_target" "$headroom_models"
+  chmod "$old_headroom_mode" "$headroom_models"
+  printf '%s\n' default >"$daily_home/headroom-registry.state"
 
   before="$(proxy_mutation_count "$daily_home/events.log")"
   run_install "$daily_home" full "$fixture/$platform_name-binary.log" \

@@ -993,6 +993,19 @@ file_change_state() {
   fi
 }
 
+private_file_change_state() {
+  local desired_path="$1"
+  local current_path="$2"
+  local expected_mode="$3"
+  if [[ -f "$current_path" && ! -L "$current_path" ]] && \
+     [[ "$(path_mode "$current_path")" == "$expected_mode" ]] && \
+     cmp -s "$desired_path" "$current_path"; then
+    printf '%s' unchanged
+  else
+    printf '%s' changed
+  fi
+}
+
 service_restart_required() {
   local version_changed="$1"
   local service_change_state="$2"
@@ -1018,9 +1031,11 @@ reconcile_headroom_transaction() {
   local version_changed="$1"
   local service_change_state="$2"
   local health_ok="$3"
+  local metadata_change_state="$4"
   headroom_restart_required=false
   if service_restart_required "$version_changed" \
-    "$service_change_state" "$health_ok"; then
+    "$service_change_state" "$health_ok" || \
+     [[ "$metadata_change_state" == changed ]]; then
     headroom_restart_required=true
     headroom_transaction_active=true
   else
@@ -1899,7 +1914,7 @@ stage_latest_github_binary() {
   local archive_binary="$4"
   local destination="$5"
   local staging_dir="$6"
-  local metadata archive row url digest asset version actual_sha staged_binary
+  local metadata archive row url digest asset tag version actual_sha staged_binary
 
   install -d -m 0700 "$staging_dir"
   metadata="$staging_dir/release.json"
@@ -1913,15 +1928,18 @@ stage_latest_github_binary() {
     [.browser_download_url, .digest, .name] | @tsv
   ' "$metadata")"
   IFS=$'\t' read -r url digest asset <<<"$row"
+  tag="$(jq -er '.tag_name' "$metadata")"
   version="$(jq -er '.tag_name | sub("^v"; "")' "$metadata")"
+  [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
+    workflow_die "GitHub release tag is unsafe"
   if [[ "$digest" != sha256:* ]]; then
     workflow_die "GitHub did not publish a SHA-256 digest for $asset"
     return 1
   fi
 
   if [[ -x "$destination" ]] && binary_reports_semver "$destination" "$version"; then
-    jq -cn --arg version "$version" \
-      '{version: $version, changed: false, staged_path: null}'
+    jq -cn --arg version "$version" --arg tag "$tag" \
+      '{version: $version, tag: $tag, changed: false, staged_path: null}'
     return 0
   fi
 
@@ -1937,8 +1955,9 @@ stage_latest_github_binary() {
     workflow_die "staged $asset did not report version $version"
     return 1
   fi
-  jq -cn --arg version "$version" --arg staged_path "$staged_binary" \
-    '{version: $version, changed: true, staged_path: $staged_path}'
+  jq -cn --arg version "$version" --arg tag "$tag" \
+    --arg staged_path "$staged_binary" \
+    '{version: $version, tag: $tag, changed: true, staged_path: $staged_path}'
 }
 
 activate_staged_file() {

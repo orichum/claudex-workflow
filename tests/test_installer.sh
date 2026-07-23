@@ -302,6 +302,20 @@ printf 'different\n' >"$fixture/desired"
 [[ "$(file_change_state "$fixture/desired" "$fixture/current")" == changed ]]
 [[ "$(file_change_state "$fixture/desired" "$fixture/absent")" == changed ]]
 
+printf 'same\n' >"$fixture/private-desired"
+cp "$fixture/private-desired" "$fixture/private-current"
+chmod 0600 "$fixture/private-current"
+[[ "$(private_file_change_state \
+  "$fixture/private-desired" "$fixture/private-current" 600)" == unchanged ]]
+chmod 0644 "$fixture/private-current"
+[[ "$(private_file_change_state \
+  "$fixture/private-desired" "$fixture/private-current" 600)" == changed ]]
+cp "$fixture/private-desired" "$fixture/private-target"
+rm -f "$fixture/private-current"
+ln -s "$fixture/private-target" "$fixture/private-current"
+[[ "$(private_file_change_state \
+  "$fixture/private-desired" "$fixture/private-current" 600)" == changed ]]
+
 if service_restart_required false unchanged true; then
   printf 'unchanged healthy service was selected for restart\n' >&2
   exit 1
@@ -320,9 +334,10 @@ do
 done
 
 for restart_case in \
-  'true unchanged true' \
-  'false changed true' \
-  'false unchanged false'
+  'true unchanged true unchanged' \
+  'false changed true unchanged' \
+  'false unchanged false unchanged' \
+  'false unchanged true changed'
 do
   headroom_transaction_active=false
   # shellcheck disable=SC2086
@@ -331,7 +346,7 @@ do
   [[ "$headroom_transaction_active" == true ]]
 done
 headroom_transaction_active=true
-reconcile_headroom_transaction false unchanged true
+reconcile_headroom_transaction false unchanged true unchanged
 [[ "$headroom_restart_required" == false ]]
 [[ "$headroom_transaction_active" == false ]]
 
@@ -438,7 +453,7 @@ run_headroom_transaction_case() {
       WORKFLOW_ROLLBACK_HANDLER=transaction_recovery
       headroom_transaction_active=false
       upgrade_headroom_distribution
-      reconcile_headroom_transaction false unchanged true
+      reconcile_headroom_transaction false unchanged true unchanged
       [[ "$headroom_transaction_active" == false ]]
       exit "$later_status"
     ' _ "$ROOT/lib/workflow.sh" "$case_root" "$later_status"
@@ -491,7 +506,7 @@ HEADROOM_UV_BEHAVIOR=success \
     headroom_transaction_active=false
     upgrade_headroom_distribution
     printf "version-read\n" >>"$case_root/markers"
-    reconcile_headroom_transaction false unchanged true
+    reconcile_headroom_transaction false unchanged true unchanged
     printf "headroom-reconciled\n" >>"$case_root/markers"
     [[ "$headroom_transaction_active" == false ]]
     printf "cliproxy-activation\n" >>"$case_root/markers"
@@ -852,6 +867,7 @@ stage_state="$(PATH="$fixture/mock-bin:$PATH" \
   stage_latest_github_binary router-for-me/CLIProxyAPI CLIProxyAPI_ \
     _linux_amd64.tar.gz cli-proxy-api "$cliproxy_destination" "$fixture/staging")"
 [[ "$(jq -r .version <<<"$stage_state")" == 1.2.3 ]]
+[[ "$(jq -r .tag <<<"$stage_state")" == v1.2.3 ]]
 [[ "$(jq -r .changed <<<"$stage_state")" == true ]]
 staged_binary="$(jq -r .staged_path <<<"$stage_state")"
 [[ ! -e "$cliproxy_destination" && -x "$staged_binary" ]]
@@ -862,6 +878,7 @@ unchanged_state="$(PATH="$fixture/mock-bin:$PATH" \
   stage_latest_github_binary router-for-me/CLIProxyAPI CLIProxyAPI_ \
     _linux_amd64.tar.gz cli-proxy-api "$cliproxy_destination" "$fixture/staging-2")"
 [[ "$(jq -r .changed <<<"$unchanged_state")" == false ]]
+[[ "$(jq -r .tag <<<"$unchanged_state")" == v1.2.3 ]]
 [[ "$(jq -r .staged_path <<<"$unchanged_state")" == null ]]
 
 printf '#!/usr/bin/env bash\nprintf "cli-proxy-api 11.2.30\\n"\n' \
@@ -1342,7 +1359,13 @@ if rg -q 'headroom install apply' "$ROOT/install.sh"; then
   exit 1
 fi
 rg -q 'snapshot_path .*headroom-service' "$ROOT/install.sh"
+rg -q 'snapshot_path .*headroom-models' "$ROOT/install.sh"
 rg -Fq 'snapshot_path_matches "$headroom_service_file"' "$ROOT/install.sh"
+rg -Fq 'snapshot_path_matches "$headroom_models_file"' "$ROOT/install.sh"
+rg -Fq 'HEADROOM_CONFIG_DIR="$preflight_root/config"' "$ROOT/install.sh"
+rg -Fq '"$desired_headroom_models" "$headroom_models_file" 0600' \
+  "$ROOT/install.sh"
+rg -Fq -- '--expected-version "$installed_cliproxy_version"' "$ROOT/doctor.sh"
 rg -Fq 'uv tool install --upgrade mempalace' "$ROOT/install.sh"
 rg -Fq -- '--require-tool mempalace_get_taxonomy' "$ROOT/install.sh"
 rg -Fq -- '--require-tool mempalace_checkpoint' "$ROOT/install.sh"
@@ -1455,9 +1478,27 @@ printf '%s\n' 'default_model = "gpt-5.6-sol"' \
   >"$doctor_proxy_data/claudex.toml"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
   >"$doctor_proxy_data/bin/claudex"
-cp "$doctor_proxy_data/bin/claudex" "$doctor_proxy_data/bin/cli-proxy-api"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "${1:-}" == --help ]]; then' \
+  '  printf "%s\n" "CLIProxyAPI Version: 1.0.0"' \
+  'fi' \
+  >"$doctor_proxy_data/bin/cli-proxy-api"
 chmod 0755 "$doctor_proxy_data/bin/claudex" \
   "$doctor_proxy_data/bin/cli-proxy-api"
+install -d -m 0700 "$doctor_proxy_data/headroom/config"
+jq -n '{
+  schemaVersion: 1,
+  source: {
+    repository: "router-for-me/CLIProxyAPI",
+    tag: "v1.0.0",
+    version: "1.0.0",
+    registrySha256:
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  anthropic: {context_limits: {"gpt-5.6-sol": 200000}}
+}' >"$doctor_proxy_data/headroom/config/models.json"
+chmod 0600 "$doctor_proxy_data/headroom/config/models.json"
 HOME="$doctor_proxy_home" render_claudex_proxy_systemd_user_unit \
   "$doctor_proxy_service" "$doctor_proxy_data" 13457
 cat >"$doctor_proxy_tools/uname" <<'EOF'
@@ -1530,6 +1571,8 @@ rg -Fxq 'OK   Claudex proxy definition is workflow-owned' \
 rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
   "$doctor_proxy_fixture/healthy.output"
 rg -Fxq 'OK   Claudex proxy exposes the configured controller model' \
+  "$doctor_proxy_fixture/healthy.output"
+rg -Fxq 'OK   Headroom model metadata matches CLIProxyAPI 1.0.0' \
   "$doctor_proxy_fixture/healthy.output"
 
 run_proxy_doctor_case definition-failure DOCTOR_TARGET_STATE=not-found

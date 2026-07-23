@@ -478,6 +478,32 @@ else
   check_fail 'Headroom effective optimization policy has drifted'
 fi
 
+installed_cliproxy_help="$(
+  (
+    cd "$WORKFLOW_DATA_ROOT/bin"
+    ./cli-proxy-api --help 2>&1
+  )
+)" || installed_cliproxy_help=""
+installed_cliproxy_version="$(
+  extract_semver "$installed_cliproxy_help" 2>/dev/null || true
+)"
+headroom_models_file="$WORKFLOW_DATA_ROOT/headroom/config/models.json"
+if [[ -n "$installed_cliproxy_version" ]] && \
+   [[ -f "$headroom_models_file" && ! -L "$headroom_models_file" ]] && \
+   [[ "$(file_mode "$headroom_models_file")" == 600 ]] && \
+   (
+     cd "$WORKFLOW_ROOT"
+     PYTHONDONTWRITEBYTECODE=1 python3 -B \
+       -m integrations.common.headroom_models validate \
+       --catalog "$headroom_models_file" \
+       --expected-repository router-for-me/CLIProxyAPI \
+       --expected-version "$installed_cliproxy_version"
+   ); then
+  check_ok "Headroom model metadata matches CLIProxyAPI $installed_cliproxy_version"
+else
+  check_fail "Headroom model metadata is missing, unsafe, or version-drifted"
+fi
+
 headroom_audit_payload='{"model":"claudex-audit-model-does-not-exist","max_tokens":0,"messages":[]}'
 direct_audit_response="$(curl -sS --connect-timeout 1 --max-time 8 \
   -H 'content-type: application/json' \
@@ -598,6 +624,32 @@ else
        "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$latest_session" \
        "$context_digest" "$effective_digest" >/dev/null 2>&1; then
     check_ok 'latest session effective mapping is internally consistent'
+    headroom_model_coverage="$(
+      cd "$WORKFLOW_ROOT"
+      PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+        "$headroom_models_file" \
+        "$latest_session/effective-models.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from integrations.common.headroom_models import validate_catalog
+
+catalog = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+effective = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+limits = validate_catalog(catalog)
+selected = {effective["controller"], *effective["agents"].values()}
+print(f"{len(selected & limits.keys())}\t{len(selected)}")
+PY
+    )" || headroom_model_coverage=""
+    if IFS=$'\t' read -r covered_models selected_models \
+        <<<"$headroom_model_coverage" && \
+       [[ "$covered_models" =~ ^[0-9]+$ ]] && \
+       [[ "$selected_models" =~ ^[1-9][0-9]*$ ]]; then
+      check_ok "Headroom has exact-release context limits for $covered_models/$selected_models effective model(s); uncovered models use Headroom fallback"
+    else
+      check_fail 'Headroom effective model coverage could not be inspected'
+    fi
   else
     check_fail 'latest session effective mapping is internally inconsistent'
   fi
