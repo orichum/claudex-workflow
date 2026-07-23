@@ -3,6 +3,11 @@
   "disableBundledSkills": true,
   "workflowKeywordTriggerEnabled": false,
   "effortLevel": "high",
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
   "worktree": {
     "baseRef": "head"
   }

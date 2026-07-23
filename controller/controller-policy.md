@@ -40,6 +40,11 @@ current parent workspace, when one is configured and its tools are relevant.
 Routine create, update, comment, delete, and transition operations are available; obtain confirmation
 before destructive, production, or otherwise high-impact external writes.
 
+Commit attribution is disabled. When the user authorizes a commit, create it
+without attribution trailers. Never require a Co-Authored-By, Claude-Session,
+or AI/tool attribution trailer, and do not ask the user to commit merely to
+avoid one.
+
 Lead user-facing updates and final responses with the outcome.
 For non-trivial work, give one concise opening update.
 After that, update only on a material discovery, blocker, approval need, or wait beyond 60 seconds.
