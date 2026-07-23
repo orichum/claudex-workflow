@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "defaultStack": "balanced",
+  "stacks": {
+    "balanced": {
+      "controller": "gpt-5.6-sol",
+      "agents": {
+        "repository-explorer": ["gpt-5.6-terra"],
+        "repository-verifier": ["gpt-5.6-terra"],
+        "correctness-critic": ["claude-sonnet-5"],
+        "architecture-advisor": ["claude-opus-4-8"],
+        "implementation-worker": ["gpt-5.6-sol"]
+      }
+    }
+  }
+}
