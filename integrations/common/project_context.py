@@ -18,10 +18,43 @@ from .context_population import (
     populate_context,
     render_population_result,
 )
+from .model_routing import RoutingError, load_routing, validate_stack_name
 
 
 class ContextError(RuntimeError):
     pass
+
+
+_CONTEXT_REQUIRED_KEYS = {
+    "root", "dockerProfile", "memoryPalace", "memoryWing"
+}
+_CONTEXT_OPTIONAL_KEYS = {"modelStack"}
+
+
+def _context_object(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise ContextError(f"{label} must be an object")
+    keys = set(value)
+    if (
+        not _CONTEXT_REQUIRED_KEYS.issubset(keys)
+        or keys - _CONTEXT_REQUIRED_KEYS - _CONTEXT_OPTIONAL_KEYS
+    ):
+        raise ContextError(f"{label} has invalid fields")
+    return value
+
+
+def _model_stack(
+    value: object, stacks: Optional[dict] = None
+) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        name = validate_stack_name(value, "modelStack")
+    except RoutingError as error:
+        raise ContextError("modelStack is invalid") from error
+    if stacks is not None and name not in stacks:
+        raise ContextError("modelStack is not configured")
+    return name
 
 
 def _expand(value: str, home: Path) -> Path:
@@ -145,7 +178,9 @@ def _structural_existing_ancestor_path(
     return canonical
 
 
-def _validate_config_value(raw: object, home: Path) -> None:
+def _validate_config_value(
+    raw: object, home: Path, stacks: Optional[dict] = None
+) -> None:
     config = _require_exact_keys(raw, {"contexts"}, "configuration")
     raw_contexts = config["contexts"]
     if not isinstance(raw_contexts, list):
@@ -155,14 +190,11 @@ def _validate_config_value(raw: object, home: Path) -> None:
     lexical_palaces = set()
     memory_wings = set()
     for index, raw_context in enumerate(raw_contexts):
-        context = _require_exact_keys(
-            raw_context,
-            {"root", "dockerProfile", "memoryPalace", "memoryWing"},
-            f"context {index}",
-        )
+        context = _context_object(raw_context, f"context {index}")
         root = _structural_path(context["root"], home, "root")
         palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
         _require_optional_non_blank(context["dockerProfile"], "dockerProfile")
+        _model_stack(context.get("modelStack"), stacks)
         memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
         if any(_contains(existing_root, root) or _contains(root, existing_root)
                for existing_root in lexical_roots):
@@ -216,11 +248,7 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
     canonical_palaces = set()
     memory_wings = set()
     for index, raw_context in enumerate(raw_contexts):
-        context = _require_exact_keys(
-            raw_context,
-            {"root", "dockerProfile", "memoryPalace", "memoryWing"},
-            f"context {index}",
-        )
+        context = _context_object(raw_context, f"context {index}")
         root_path = _expand(context["root"], home)
         if not root_path.is_absolute():
             raise ContextError("configured root must expand to an absolute path")
@@ -244,6 +272,7 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
         docker_profile = _require_optional_non_blank(
             context["dockerProfile"], "dockerProfile"
         )
+        model_stack = _model_stack(context.get("modelStack"))
         memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
         if any(_contains(existing_root, root_real) or _contains(root_real, existing_root)
                for existing_root in canonical_roots):
@@ -260,6 +289,7 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
             {
                 "root": root_real,
                 "dockerProfile": docker_profile,
+                "modelStack": model_stack,
                 "memoryPalace": palace_path,
                 "memoryWing": memory_wing,
             }
@@ -291,6 +321,7 @@ def resolve_context(config: dict, launch_dir: Path) -> dict:
             "id": selected["memoryWing"],
             "contextRootReal": str(selected["root"]),
             "dockerProfile": selected["dockerProfile"],
+            "modelStack": selected["modelStack"],
             "memoryWing": selected["memoryWing"],
             "memoryAvailable": failure_code is None,
             "memoryFailureCode": failure_code,
@@ -336,13 +367,15 @@ def _descriptor_is_open(file_descriptor: int) -> bool:
         return False
 
 
-def _read_context_document(config_path: Path, home: Path) -> dict:
+def _read_context_document(
+    config_path: Path, home: Path, stacks: Optional[dict] = None
+) -> dict:
     try:
         with Path(config_path).open(encoding="utf-8") as handle:
             document = json.load(handle)
     except (json.JSONDecodeError, UnicodeError, OSError) as error:
         raise ContextError("configuration could not be parsed") from error
-    _validate_config_value(document, home)
+    _validate_config_value(document, home, stacks)
     return document
 
 
@@ -431,8 +464,10 @@ def _prepare_palace(palace: Path) -> None:
         raise ContextError("memoryPalace is unsafe")
 
 
-def _validate_context_candidate(document: dict, home: Path) -> None:
-    _validate_config_value(document, home)
+def _validate_context_candidate(
+    document: dict, home: Path, stacks: Optional[dict] = None
+) -> None:
+    _validate_config_value(document, home, stacks)
     canonical_roots = []
     canonical_palaces = set()
     for context in document["contexts"]:
@@ -479,6 +514,7 @@ def _build_add_candidate(
     context = {
         "root": str(root),
         "dockerProfile": parsed.docker,
+        "modelStack": parsed.model_stack,
         "memoryPalace": palace_value if parsed.palace is None else str(palace),
         "memoryWing": parsed.wing or root.name,
     }
@@ -486,15 +522,23 @@ def _build_add_candidate(
     return candidate, context, root, palace
 
 
-def _render_context_table(contexts: list[dict]) -> str:
+def _render_context_table(contexts: list[dict], default_stack: str) -> str:
     columns = (
         ("PROJECT ROOT", "root"),
+        ("MODEL STACK", "modelStack"),
         ("MCP_DOCKER PROFILE", "dockerProfile"),
         ("MEMPALACE PATH", "memoryPalace"),
         ("MEMPALACE WING", "memoryWing"),
     )
+
+    def render_value(context: dict, key: str) -> str:
+        value = context.get(key) if key == "modelStack" else context[key]
+        if key == "modelStack" and value is None:
+            return f"{default_stack} (global)"
+        return "—" if value is None else value
+
     rows = [
-        tuple("—" if context[key] is None else context[key] for _, key in columns)
+        tuple(render_value(context, key) for _, key in columns)
         for context in contexts
     ]
     widths = [
@@ -520,6 +564,7 @@ def _print_population_progress(message: str) -> None:
 def context_main(arguments: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="claudex-context")
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--routing-config", required=True, type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
     add = commands.add_parser("add")
@@ -527,6 +572,7 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     add.add_argument("--docker")
     add.add_argument("--palace")
     add.add_argument("--wing")
+    add.add_argument("--model-stack")
     populate = commands.add_parser("populate")
     populate.add_argument("root")
     update = commands.add_parser("update")
@@ -534,6 +580,8 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     update.add_argument("--docker")
     update.add_argument("--palace")
     update.add_argument("--wing")
+    update.add_argument("--model-stack")
+    update.add_argument("--inherit-model-stack", action="store_true")
     remove = commands.add_parser("remove")
     remove.add_argument("root")
     remove.add_argument("--yes", action="store_true")
@@ -542,13 +590,30 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     home = Path.home()
 
     try:
+        routing = load_routing(parsed.routing_config)
+        routing_stacks = routing["stacks"]
+        requested_stack = getattr(parsed, "model_stack", None)
+        if requested_stack is not None:
+            requested_stack = _model_stack(requested_stack, routing_stacks)
+            parsed.model_stack = requested_stack
+        if (
+            parsed.command == "update"
+            and parsed.model_stack is not None
+            and parsed.inherit_model_stack
+        ):
+            raise ContextError(
+                "modelStack cannot be explicit and inherited"
+            )
+
         if parsed.command == "add":
             with _context_lock(parsed.config):
                 document = _read_context_document(parsed.config, home)
                 candidate, context, root, palace = _build_add_candidate(
                     document, parsed, home
                 )
-                _validate_context_candidate(candidate, home)
+                _validate_context_candidate(
+                    candidate, home, routing_stacks
+                )
 
             _prepare_palace(palace)
             result = populate_context(
@@ -563,7 +628,9 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                 final_candidate = {
                     "contexts": [*current["contexts"], context]
                 }
-                _validate_context_candidate(final_candidate, home)
+                _validate_context_candidate(
+                    final_candidate, home, routing_stacks
+                )
                 _write_context_document(parsed.config, final_candidate)
 
             print(render_population_result(result), end="")
@@ -571,7 +638,9 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
 
         if parsed.command == "populate":
             with _context_lock(parsed.config):
-                document = _read_context_document(parsed.config, home)
+                document = _read_context_document(
+                    parsed.config, home, routing_stacks
+                )
                 root = _context_root(parsed.root, home, must_exist=True)
                 index = _find_canonical_context_index(
                     document["contexts"], root, home
@@ -598,13 +667,26 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             else contextlib.nullcontext()
         )
         with lock:
-            document = _read_context_document(parsed.config, home)
+            document = _read_context_document(
+                parsed.config,
+                home,
+                routing_stacks
+                if parsed.command in ("list", "validate")
+                else None,
+            )
             contexts = document["contexts"]
             if parsed.command == "validate":
-                _validate_context_candidate(document, home)
+                _validate_context_candidate(
+                    document, home, routing_stacks
+                )
                 return 0
             if parsed.command == "list":
-                print(_render_context_table(contexts), end="")
+                print(
+                    _render_context_table(
+                        contexts, str(routing["defaultStack"])
+                    ),
+                    end="",
+                )
                 return 0
             try:
                 root = _context_root(parsed.root, home, must_exist=False)
@@ -614,7 +696,18 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     raise
                 index = _find_exact_context_index(contexts, parsed.root)
             if parsed.command == "update":
-                if all(value is None for value in (parsed.docker, parsed.palace, parsed.wing)):
+                if (
+                    all(
+                        value is None
+                        for value in (
+                            parsed.docker,
+                            parsed.palace,
+                            parsed.wing,
+                            parsed.model_stack,
+                        )
+                    )
+                    and not parsed.inherit_model_stack
+                ):
                     raise ContextError("update requires a replacement field")
                 replacement = dict(contexts[index])
                 if parsed.docker is not None:
@@ -626,9 +719,15 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     palace = None
                 if parsed.wing is not None:
                     replacement["memoryWing"] = parsed.wing
+                if parsed.model_stack is not None:
+                    replacement["modelStack"] = parsed.model_stack
+                elif parsed.inherit_model_stack:
+                    replacement["modelStack"] = None
                 candidate = {"contexts": list(contexts)}
                 candidate["contexts"][index] = replacement
-                _validate_context_candidate(candidate, home)
+                _validate_context_candidate(
+                    candidate, home, routing_stacks
+                )
                 if palace is not None:
                     _prepare_palace(palace)
                 _write_context_document(parsed.config, candidate)
@@ -645,10 +744,10 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     raise ContextError("remove requires confirmation")
             candidate = {"contexts": list(contexts)}
             del candidate["contexts"][index]
-            _validate_config_value(candidate, home)
+            _validate_config_value(candidate, home, routing_stacks)
             _write_context_document(parsed.config, candidate)
             return 0
-    except (ContextError, PopulationError) as error:
+    except (ContextError, PopulationError, RoutingError) as error:
         print("ERROR: project context operation rejected", file=sys.stderr)
         if isinstance(error, PopulationError):
             print(str(error), file=sys.stderr)

@@ -10,4 +10,6 @@ done
 WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 cd "$WORKFLOW_ROOT"
 exec python3 -B -m integrations.common.project_context context \
-  --config "$WORKFLOW_ROOT/controller/project-context.json" "$@"
+  --config "$WORKFLOW_ROOT/controller/project-context.json" \
+  --routing-config "$WORKFLOW_ROOT/controller/model-routing.json" \
+  "$@"

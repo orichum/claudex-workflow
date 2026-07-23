@@ -3,18 +3,21 @@
     {
       "root": "~/xebia",
       "dockerProfile": "xebia",
+      "modelStack": null,
       "memoryPalace": "~/.mempalace/palaces/xebia",
       "memoryWing": "xebia"
     },
     {
       "root": "~/complion",
       "dockerProfile": "realtime",
+      "modelStack": null,
       "memoryPalace": "~/.mempalace/palaces/complion",
       "memoryWing": "complion"
     },
     {
       "root": "~/claudex-workflow",
       "dockerProfile": null,
+      "modelStack": null,
       "memoryPalace": "~/.mempalace/palaces/claudex-workflow",
       "memoryWing": "claudex-workflow"
     }
