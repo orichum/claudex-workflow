@@ -1673,38 +1673,141 @@ select_required_model() {
 }
 
 login_flag_for_provider() {
-  case "$1" in
-    codex) printf '%s' '--codex-login' ;;
-    claude) printf '%s' '--claude-login' ;;
-    *) workflow_die "login provider must be 'codex' or 'claude'" ;;
-  esac
+  local proxy_binary="$1"
+  local provider="$2"
+  local candidate help_text supported_names supported
+  [[ "$provider" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || {
+    workflow_die "login provider name is unsafe"
+    return 1
+  }
+  [[ -x "$proxy_binary" ]] || {
+    workflow_die "CLIProxyAPI executable is unavailable"
+    return 1
+  }
+  candidate="-${provider}-login"
+  help_text="$("$proxy_binary" --help 2>&1)" || {
+    workflow_die "CLIProxyAPI login capabilities could not be read"
+    return 1
+  }
+  supported_names="$(printf '%s\n' "$help_text" |
+    rg -o -- '-{1,2}[a-z0-9][a-z0-9-]*-login' |
+    sed -e 's/^-*//' -e 's/-login$//' |
+    sort -u)"
+  supported="$(printf '%s\n' "$supported_names" |
+    sort -u |
+    awk 'BEGIN { separator="" } { printf "%s%s", separator, $0; separator=", " }')"
+  printf '%s\n' "$supported_names" | rg -Fxq -- "$provider" || {
+    workflow_die "installed CLIProxyAPI does not support provider '$provider'; supported OAuth providers: ${supported:-none}"
+    return 1
+  }
+  printf '%s' "$candidate"
 }
 
+workflow_role_surface_is_exact() (
+  local workflow_root="$1"
+  local plugin_root="$2"
+  local guard="$plugin_root/scripts/guard-orchestration.sh"
+  local declared_roles role
+
+  cd "$workflow_root" || exit 1
+  declared_roles="$(python3 -B - "$plugin_root" <<'PY'
+import sys
+from pathlib import Path
+from integrations.common.model_routing import ROLES
+
+plugin = Path(sys.argv[1])
+agents = plugin / "agents"
+try:
+    agent_entries = [
+        entry for entry in agents.iterdir() if entry.suffix == ".md"
+    ]
+except OSError:
+    raise SystemExit(1)
+if any(entry.is_symlink() or not entry.is_file() for entry in agent_entries):
+    raise SystemExit(1)
+declared = set(ROLES)
+source_roles = {entry.stem for entry in agent_entries}
+if source_roles != declared:
+    raise SystemExit(1)
+print("\n".join(ROLES))
+PY
+  )" || exit 1
+
+  [[ -f "$guard" && ! -L "$guard" && -x "$guard" ]] || exit 1
+
+  workflow_invoke_agent_guard() {
+    local agent_type="$1"
+    local isolation="${2:-}"
+    local guard_input
+    guard_input="$(jq -cn \
+      --arg agent_type "$agent_type" \
+      --arg isolation "$isolation" \
+      '{
+        tool_name: "Agent",
+        tool_input: (
+          {subagent_type: $agent_type} +
+          (if $isolation == "" then {} else {isolation: $isolation} end)
+        )
+      }'
+    )" || return 1
+    CLAUDE_PLUGIN_ROOT="$plugin_root" "$guard" <<<"$guard_input"
+  }
+
+  workflow_guard_permits() {
+    local output
+    output="$(workflow_invoke_agent_guard "$@" 2>/dev/null)" || return 1
+    [[ -z "$output" ]]
+  }
+
+  workflow_guard_denies() {
+    local output
+    output="$(workflow_invoke_agent_guard "$@" 2>/dev/null)" || return 1
+    jq -e '
+      type == "object" and
+      .hookSpecificOutput.hookEventName == "PreToolUse" and
+      .hookSpecificOutput.permissionDecision == "deny"
+    ' >/dev/null 2>&1 <<<"$output"
+  }
+
+  while IFS= read -r role; do
+    if [[ "$role" == "implementation-worker" ]]; then
+      workflow_guard_permits "claudex-controller:$role" worktree || exit 1
+      workflow_guard_denies "claudex-controller:$role" || exit 1
+    else
+      workflow_guard_permits "claudex-controller:$role" || exit 1
+      workflow_guard_denies "claudex-controller:$role" worktree || exit 1
+    fi
+  done <<<"$declared_roles"
+
+  workflow_guard_denies Explore || exit 1
+  workflow_guard_denies claudex-controller:unknown-role || exit 1
+)
+
 render_discovered_claudex_config() {
-  local models_json="$1"
+  local effective_models_json="$1"
   local output_file="$2"
   local cliproxy_port="${3:-8317}"
   local headroom_port="${4:-8787}"
   local claudex_proxy_port="${5:-13456}"
-  local model_ids gpt_models claude_models
+  local controller_model
   local fast_model balanced_model powerful_model
   local haiku_model sonnet_model opus_model
 
-  model_ids="$(jq -r '.data[]?.id // empty' "$models_json")" || return 1
-  gpt_models="$(printf '%s\n' "$model_ids" | rg '^gpt-' | rg -v '^gpt-image-' || true)"
-  claude_models="$(printf '%s\n' "$model_ids" | rg '^claude-' || true)"
-
-  fast_model="$(select_required_model "$gpt_models" gpt-5.6-luna)" || return 1
-  balanced_model="$(select_required_model "$gpt_models" gpt-5.6-terra)" || return 1
-  powerful_model="$(select_required_model "$gpt_models" gpt-5.6-sol)" || return 1
-  haiku_model="$(select_required_model "$claude_models" \
-    claude-haiku-4-5-20251001 claude-haiku-4-5)" || return 1
-  sonnet_model="$(select_required_model "$claude_models" \
-    claude-sonnet-5 claude-sonnet-4-6 claude-sonnet-4-5)" || return 1
-  opus_model="$(select_required_model "$claude_models" claude-opus-4-8)" || return 1
+  controller_model="$(jq -er '.controller | strings | select(length > 0)' \
+    "$effective_models_json")" || return 1
+  fast_model="$(jq -er '.agents["repository-explorer"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
+  balanced_model="$(jq -er '.agents["repository-verifier"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
+  powerful_model="$controller_model"
+  haiku_model="$fast_model"
+  sonnet_model="$(jq -er '.agents["correctness-critic"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
+  opus_model="$(jq -er '.agents["architecture-advisor"] |
+    strings | select(length > 0)' "$effective_models_json")" || return 1
 
   render_claudex_config "$output_file" \
-    "$powerful_model" "$fast_model" "$balanced_model" "$powerful_model" \
+    "$controller_model" "$fast_model" "$balanced_model" "$powerful_model" \
     "$haiku_model" "$sonnet_model" "$opus_model" "" \
     "$cliproxy_port" "$headroom_port" "$claudex_proxy_port"
 }

@@ -255,6 +255,8 @@ exercise_platform() {
   local platform="$1" platform_name="$2"
   local daily_home="$fixture/$platform_name-daily"
   local unknown_home="$fixture/$platform_name-unknown"
+  local absent_launcher_home="$fixture/$platform_name-launcher-absent"
+  local directory_launcher_home="$fixture/$platform_name-launcher-directory"
   local proxy_service before
 
   install -d "$unknown_home/service-state"
@@ -269,10 +271,35 @@ exercise_platform() {
   [[ ! -e "$unknown_home/data/service-ports.json" ]]
   [[ ! -s "$unknown_home/events.log" ]]
 
+  install -d \
+    "$directory_launcher_home/user-bin/claudex-models"
+  printf 'owned marker\n' \
+    >"$directory_launcher_home/user-bin/claudex-models/marker"
+  if invoke_install "$directory_launcher_home" full \
+      "$fixture/$platform_name-launcher-directory.log" \
+      "$platform" 1; then
+    printf 'real %s launcher directory was accepted\n' "$platform" >&2
+    return 1
+  fi
+  [[ "$(cat "$directory_launcher_home/user-bin/claudex-models/marker")" == \
+     'owned marker' ]]
+  [[ ! -e "$directory_launcher_home/data" ]]
+  [[ ! -s "$directory_launcher_home/events.log" ]]
+
+  if invoke_install "$absent_launcher_home" full \
+      "$fixture/$platform_name-launcher-absent.log" \
+      "$platform" 1 1; then
+    printf 'injected %s launcher rollback failure reported success\n' \
+      "$platform" >&2
+    return 1
+  fi
+  [[ ! -e "$absent_launcher_home/user-bin/claudex-models" && \
+     ! -L "$absent_launcher_home/user-bin/claudex-models" ]]
+
   run_install "$daily_home" empty "$fixture/$platform_name-pending.log" \
     "$platform" 1
   rg -Fq pending-provider-login "$fixture/$platform_name-pending.log"
-  rg -Fq "Next: claudex-login codex; claudex-login claude; $ROOT/install.sh" \
+  rg -Fq "Next: claudex-login <installed-oauth-provider>; $ROOT/install.sh" \
     "$fixture/$platform_name-pending.log"
   [[ ! -e "$daily_home/service-state/proxy.loaded" ]]
   if [[ "$platform" == Darwin ]]; then
@@ -365,6 +392,9 @@ PY
   prior_generation="$(readlink "$daily_home/data/model-config/current")"
   prior_model_content="$(cat "$daily_home/data/model-config/current/claudex.toml")"
   prior_binary_digest="$(shasum -a 256 "$daily_home/data/bin/claudex" | awk '{print $1}')"
+  rm -f -- "$daily_home/user-bin/claudex-models"
+  printf 'prior user launcher\n' >"$daily_home/user-bin/claudex-models"
+  chmod 0700 "$daily_home/user-bin/claudex-models"
   prior_proxy_port="$(jq -r .claudexProxyPort "$daily_home/data/service-ports.json")"
   rollback_proxy_port="$(python3 - "$prior_proxy_port" \
     "$(jq -r .cliproxyPort "$daily_home/data/service-ports.json")" \
@@ -396,6 +426,14 @@ PY
   [[ "$(cat "$daily_home/data/model-config/current/claudex.toml")" == "$prior_model_content" ]]
   [[ "$(shasum -a 256 "$daily_home/data/bin/claudex" | awk '{print $1}')" == \
      "$prior_binary_digest" ]]
+  [[ ! -L "$daily_home/user-bin/claudex-models" ]]
+  [[ "$(cat "$daily_home/user-bin/claudex-models")" == \
+     'prior user launcher' ]]
+  restored_launcher_mode="$(
+    stat -f '%Lp' "$daily_home/user-bin/claudex-models" 2>/dev/null || \
+      stat -c '%a' "$daily_home/user-bin/claudex-models"
+  )"
+  [[ "$restored_launcher_mode" == 700 ]]
   [[ -f "$daily_home/service-state/proxy.loaded" ]]
   [[ ! -f "$daily_home/service-state/proxy.unready" ]]
   python3 - "$daily_home/events.log" "$rollback_event_start" <<'PY'

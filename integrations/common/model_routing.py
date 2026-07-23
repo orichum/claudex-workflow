@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate and resolve portable provider-agnostic model stacks."""
 
+import argparse
 from dataclasses import dataclass
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import sys
 from typing import Mapping, Optional, Sequence
 
 
@@ -24,6 +26,10 @@ _AGENT_FILES = {role: f"agents/{role}.md" for role in ROLES}
 
 
 class RoutingError(RuntimeError):
+    pass
+
+
+class ModelAvailabilityError(RoutingError):
     pass
 
 
@@ -132,10 +138,9 @@ def load_catalog(path: Path) -> tuple[str, ...]:
         raise RoutingError("model catalogue has an invalid shape")
     result = []
     for item in raw["data"]:
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            result.append(validate_model_id(item["id"], "catalogue"))
-    if not result:
-        raise RoutingError("model catalogue is empty")
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise RoutingError("model catalogue contains an invalid entry")
+        result.append(validate_model_id(item["id"], "catalogue"))
     return tuple(dict.fromkeys(result))
 
 
@@ -154,7 +159,7 @@ def resolve_effective(
     available = set(catalogue)
     controller = str(stack["controller"])
     if controller not in available:
-        raise RoutingError(
+        raise ModelAvailabilityError(
             f"stack {name} controller {controller} is unavailable"
         )
     candidates = stack["agents"]
@@ -167,12 +172,108 @@ def resolve_effective(
             (model for model in role_candidates if model in available), None
         )
         if selected_model is None:
-            raise RoutingError(
+            raise ModelAvailabilityError(
                 f"stack {name} role {role} has no available candidate: "
                 + ", ".join(role_candidates)
             )
         selected[role] = selected_model
     return EffectiveStack(name, controller, candidates, selected)
+
+
+def _render_stack_table(
+    effective: EffectiveStack,
+    catalogue: Sequence[str],
+    scope: str,
+) -> str:
+    available = set(catalogue)
+    rows = [
+        (
+            effective.stack_name,
+            scope,
+            "controller",
+            f"{effective.controller} [available]",
+            effective.controller,
+            "ready",
+        )
+    ]
+    for role in ROLES:
+        candidates = " -> ".join(
+            f"{model} [{'available' if model in available else 'unavailable'}]"
+            for model in effective.candidates[role]
+        )
+        rows.append(
+            (
+                effective.stack_name,
+                scope,
+                role,
+                candidates,
+                effective.agents[role],
+                "ready",
+            )
+        )
+    headers = ("STACK", "SCOPE", "ROLE", "CANDIDATES", "SELECTED", "STATUS")
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    ]
+
+    def render(values: Sequence[str]) -> str:
+        return " | ".join(
+            value.ljust(width) for value, width in zip(values, widths)
+        ).rstrip()
+
+    return "\n".join(
+        (
+            render(headers),
+            "-+-".join("-" * width for width in widths),
+            *(render(row) for row in rows),
+        )
+    ) + "\n"
+
+
+def _write_effective(path: Path, effective: EffectiveStack) -> None:
+    payload = (
+        json.dumps(
+            effective.as_json(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    _write_private_file(Path(path), payload, 0o600)
+
+
+def _create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="claudex-models")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("list", "validate"):
+        subcommand = commands.add_parser(command)
+        subcommand.add_argument("--routing-config", required=True, type=Path)
+        subcommand.add_argument("--models-file", required=True, type=Path)
+        subcommand.add_argument("stack", nargs="?")
+        if command == "validate":
+            subcommand.add_argument("--effective-output", type=Path)
+    return parser
+
+
+def main(arguments: Optional[list[str]] = None) -> int:
+    parsed = _create_parser().parse_args(arguments)
+    try:
+        routing = load_routing(parsed.routing_config)
+        catalogue = load_catalog(parsed.models_file)
+        effective = resolve_effective(routing, catalogue, parsed.stack)
+        if parsed.command == "list":
+            scope = "selected" if parsed.stack is not None else "global"
+            print(_render_stack_table(effective, catalogue, scope), end="")
+        elif parsed.effective_output is not None:
+            _write_effective(parsed.effective_output, effective)
+    except ModelAvailabilityError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 42
+    except (OSError, RoutingError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _rewrite_agent_model(text: str, model: str, role: str) -> str:
@@ -447,3 +548,7 @@ def materialize_runtime_plugin(
             shutil.rmtree(destination)
         raise RoutingError("runtime plugin could not be created") from error
     return _canonical_directory(destination, 0o700)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

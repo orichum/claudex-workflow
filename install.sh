@@ -23,6 +23,13 @@ done
 command -v claude >/dev/null || workflow_die "Claude Code is not installed or not on PATH"
 python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || \
   workflow_die "Python 3.10 or newer is required"
+[[ -x "$WORKFLOW_ROOT/bin/claudex-models" ]] || \
+  workflow_die "required launcher is missing or not executable: claudex-models"
+if [[ -d "$USER_BIN_DIR/claudex-models" && \
+      ! -L "$USER_BIN_DIR/claudex-models" ]]; then
+  workflow_die \
+    "refusing to replace real launcher directory: $USER_BIN_DIR/claudex-models"
+fi
 
 install -d -m 0700 "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state"
 acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
@@ -66,6 +73,18 @@ if [[ "$platform" == darwin ]]; then
     command -v "$command_name" >/dev/null || workflow_die "missing required command: $command_name"
   done
 fi
+
+(
+  cd "$WORKFLOW_ROOT"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+    "$WORKFLOW_ROOT/controller/model-routing.json" <<'PY'
+import sys
+from pathlib import Path
+from integrations.common.model_routing import load_routing
+
+load_routing(Path(sys.argv[1]))
+PY
+) || workflow_die "controller/model-routing.json is invalid"
 
 (
   cd "$WORKFLOW_ROOT"
@@ -494,6 +513,8 @@ snapshot_path "$headroom_service_file" "$snapshot_dir" headroom-service
 snapshot_path "$claudex_proxy_service_file" \
   "$snapshot_dir" claudex-proxy-service
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
+snapshot_path "$USER_BIN_DIR/claudex-models" \
+  "$snapshot_dir" claudex-models-launcher
 if [[ "$legacy_headroom_service_owned" == true ]]; then
   snapshot_path "$legacy_headroom_service_file" \
     "$snapshot_dir" legacy-headroom-service
@@ -504,6 +525,7 @@ headroom_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
+claudex_models_launcher_mutated=false
 legacy_headroom_stopped=false
 headroom_health_is_ready() {
   local expected_version="$1"
@@ -732,6 +754,13 @@ rollback_install_transaction() {
     release_endpoint_config_lock \
       "$WORKFLOW_DATA_ROOT" "$endpoint_lock_token" || rollback_ready=false
     endpoint_lock_owned=false
+  fi
+
+  if [[ "${claudex_models_launcher_mutated:-false}" == true ]]; then
+    restore_snapshot "$USER_BIN_DIR/claudex-models" \
+      "$snapshot_dir" claudex-models-launcher || rollback_ready=false
+    snapshot_path_matches "$USER_BIN_DIR/claudex-models" \
+      "$snapshot_dir" claudex-models-launcher || rollback_ready=false
   fi
 
   [[ "$rollback_ready" == true ]]
@@ -1021,7 +1050,10 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     "CLIProxyAPI failed readiness checks; previous service will be restored"
 fi
 
-for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-doctor claudex-context claudex-plugin; do
+for launcher in claudex-gpt claude-headroom claudex-headroom claudex-login claudex-models claudex-doctor claudex-context claudex-plugin; do
+  if [[ "$launcher" == claudex-models ]]; then
+    claudex_models_launcher_mutated=true
+  fi
   ln -sfn "$WORKFLOW_ROOT/bin/$launcher" "$USER_BIN_DIR/$launcher"
 done
 
@@ -1041,7 +1073,7 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
      [[ "$model_discovery_status" -eq \
         "$MODEL_DISCOVERY_LOGIN_INCOMPLETE" ]]; then
     printf 'NOTICE: persistent Claudex proxy is pending-provider-login.\n' >&2
-    printf 'Next: claudex-login codex; claudex-login claude; %s/install.sh\n' \
+    printf 'Next: claudex-login <installed-oauth-provider>; %s/install.sh\n' \
       "$WORKFLOW_ROOT" >&2
   elif [[ -n "$prior_model_generation" ]] && \
        [[ "$ports_changed" == false ]] && \
@@ -1200,7 +1232,7 @@ print_install_summary \
   "$claudex_proxy_service_file" "$CLAUDEX_PROXY_LISTEN_PORT" \
   "$claudex_proxy_action"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
-  printf 'Next: claudex-login codex; claudex-login claude; %s/install.sh\n' \
+  printf 'Next: claudex-login <installed-oauth-provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"
 else
   printf 'Next: claudex-doctor\n'
