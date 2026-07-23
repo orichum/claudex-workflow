@@ -24,4 +24,8 @@ set +e
 "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" --config "$WORKFLOW_DATA_ROOT/cliproxy.yaml" "$login_flag" "$@"
 login_status=$?
 find "$WORKFLOW_DATA_ROOT/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
+if [[ "$login_status" -eq 0 ]]; then
+  printf 'Next: claudex-login codex; claudex-login claude; %s/install.sh\n' \
+    "$WORKFLOW_ROOT"
+fi
 exit "$login_status"

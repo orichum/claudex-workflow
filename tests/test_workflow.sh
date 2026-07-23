@@ -10,6 +10,8 @@ jq empty \
   "$ROOT/controller/project-context.json" \
   "$ROOT/controller/plugin/hooks/hooks.json" \
   "$ROOT/controller/plugin/.claude-plugin/plugin.json"
+jq -e '.attribution == {commit: "", pr: "", sessionUrl: false}' \
+  "$ROOT/controller/settings.json" >/dev/null
 
 rg -q -- '--effort high' "$launcher"
 rg -q -- '--strict-mcp-config' "$launcher"
@@ -29,17 +31,91 @@ source "$ROOT/lib/workflow.sh"
 source "$ROOT/discover-models.sh"
 
 launcher_data="$(cd "$fixture" && pwd -P)/launcher-data"
+launcher_xdg="$fixture/launcher-xdg"
+launcher_tools="$fixture/launcher-tools"
+launcher_service="$launcher_xdg/systemd/user/claudex-translation-proxy.service"
 install -d -m 0700 "$launcher_data"
-install -d "$launcher_data/bin" "$launcher_data/claude-config"
-printf 'placeholder\n' >"$launcher_data/claudex.toml"
+install -d "$launcher_data/bin" "$launcher_data/claude-config" \
+  "$launcher_xdg/systemd/user" "$launcher_tools"
+install -d -m 0700 "$launcher_data/state" "$launcher_data/state/sessions"
+render_claudex_config "$launcher_data/claudex.toml" \
+  gpt-5.6-sol gpt-5.6-luna gpt-5.6-terra gpt-5.6-sol \
+  claude-haiku-4-5-20251001 claude-sonnet-5 claude-opus-4-8 \
+  /portable/bin/claude 18317 18787 13457
+migrate_legacy_model_config "$launcher_data"
+write_service_ports "$launcher_data" 18317 18787 13457
+render_claudex_proxy_systemd_user_unit \
+  "$launcher_service" "$launcher_data" 13457
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\n" "$@"' >"$launcher_data/bin/claudex"
-chmod 0755 "$launcher_data/bin/claudex"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'case "${1:-}" in -s) printf "Linux\n" ;; -m) printf "aarch64\n" ;; *) printf "Linux\n" ;; esac' \
+  >"$launcher_tools/uname"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "$*" == *LoadState* ]]; then printf "%s\n" "${FAKE_TARGET_STATE:-loaded}"; elif [[ "$*" == *FragmentPath* ]]; then printf "%s\n" "${FAKE_SERVICE_PATH:?}"; elif [[ "$*" == *MainPID* ]]; then printf "%s\n" "${FAKE_MANAGER_PID:-4242}"; else exit 1; fi' \
+  >"$launcher_tools/systemctl"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf '\''LISTEN 0 128 127.0.0.1:13457 0.0.0.0:* users:(("claudex",pid=%s,fd=7))\n'\'' "${FAKE_LISTENER_PID:-4242}"' \
+  >"$launcher_tools/ss"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'case "${FAKE_MODELS_MODE:-healthy}" in healthy) printf '\''{"object":"list","data":[{"id":"gpt-5.6-sol"}]}\n'\'' ;; missing) printf '\''{"object":"list","data":[{"id":"gpt-5.6-terra"}]}\n'\'' ;; invalid) printf '\''not-json\n'\'' ;; *) exit 7 ;; esac' \
+  >"$launcher_tools/curl"
+chmod 0755 "$launcher_data/bin/claudex" "$launcher_tools"/*
+
+launcher_session_count() {
+  find "$launcher_data/state/sessions" -mindepth 1 -maxdepth 1 \
+    -type d -name 'run.*' 2>/dev/null | wc -l | tr -d ' '
+}
+
+assert_launcher_proxy_rejected() {
+  local case_name="$1"
+  shift
+  local before after status
+  before="$(launcher_session_count)"
+  set +e
+  (
+    cd "$ROOT"
+    CLAUDEX_DATA_DIR="$launcher_data" \
+    XDG_CONFIG_HOME="$launcher_xdg" \
+    FAKE_SERVICE_PATH="$launcher_service" \
+    PATH="$launcher_tools:$PATH" \
+    "$@" "$launcher" marker \
+      >"$fixture/launcher-$case_name.stdout" \
+      2>"$fixture/launcher-$case_name.stderr"
+  )
+  status=$?
+  set -e
+  [[ "$status" -ne 0 ]]
+  after="$(launcher_session_count)"
+  [[ "$after" == "$before" ]]
+  [[ "$(cat "$fixture/launcher-$case_name.stderr")" == \
+     'ERROR: persistent Claudex proxy is not ready at 127.0.0.1:13457; run claudex-doctor' ]]
+}
+
+mv "$launcher_service" "$launcher_service.saved"
+assert_launcher_proxy_rejected absent-definition env
+mv "$launcher_service.saved" "$launcher_service"
+assert_launcher_proxy_rejected foreign-listener \
+  env FAKE_LISTENER_PID=99
+assert_launcher_proxy_rejected wrong-pid \
+  env FAKE_MANAGER_PID=99
+assert_launcher_proxy_rejected invalid-json \
+  env FAKE_MODELS_MODE=invalid
+assert_launcher_proxy_rejected missing-model \
+  env FAKE_MODELS_MODE=missing
+
 if ! launcher_output="$(
   cd "$ROOT"
   CLAUDEX_CONFIG_FILE=/inherited/poison \
     CLAUDEX_DATA_DIR="$launcher_data" \
+    XDG_CONFIG_HOME="$launcher_xdg" \
+    FAKE_SERVICE_PATH="$launcher_service" \
+    PATH="$launcher_tools:$PATH" \
     "$launcher" marker 2>"$fixture/launcher.stderr"
 )"; then
   cat "$fixture/launcher.stderr" >&2
@@ -61,8 +137,9 @@ bash -c '
 render_claudex_config "$fixture/claudex.toml" \
   gpt-5.6-sol gpt-5.6-luna gpt-5.6-terra gpt-5.6-sol \
   claude-haiku-4-5-20251001 claude-sonnet-5 claude-opus-4-8 \
-  /portable/bin/claude 18317 18787
+  /portable/bin/claude 18317 18787 13457
 rg -q '^claude_binary = "/portable/bin/claude"$' "$fixture/claudex.toml"
+rg -q '^proxy_port = 13457$' "$fixture/claudex.toml"
 rg -q '^base_url = "http://127.0.0.1:18787"$' "$fixture/claudex.toml"
 rg -q '^X-Headroom-Base-Url = "http://127.0.0.1:18317"$' "$fixture/claudex.toml"
 rg -q '^sonnet = "claude-sonnet-5"$' "$fixture/claudex.toml"
@@ -78,8 +155,9 @@ jq -n '{data:[
   {id:"claude-opus-4-8"}
 ]}' >"$fixture/models.json"
 render_discovered_claudex_config \
-  "$fixture/models.json" "$fixture/discovered.toml" 18317 18787
+  "$fixture/models.json" "$fixture/discovered.toml" 18317 18787 13457
 rg -q '^default_model = "gpt-5.6-sol"$' "$fixture/discovered.toml"
+rg -q '^proxy_port = 13457$' "$fixture/discovered.toml"
 rg -q '^opus = "claude-opus-4-8"$' "$fixture/discovered.toml"
 rg -q '^base_url = "http://127.0.0.1:18787"$' "$fixture/discovered.toml"
 rg -q '^X-Headroom-Base-Url = "http://127.0.0.1:18317"$' \
@@ -627,7 +705,7 @@ if CLAUDEX_DATA_DIR="$discovery_data" \
 fi
 [[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
 [[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
-rg -q 'claudex-login codex.*claudex-login claude.*discover-models.sh' \
+rg -q 'claudex-login codex.*claudex-login claude.*install.sh' \
   "$fixture/discovery-validation.stderr"
 
 printf '{"data":[]}\n' >"$fixture/discovery-empty.json"
@@ -640,7 +718,7 @@ if CLAUDEX_DATA_DIR="$discovery_data" \
 fi
 [[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
 [[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
-rg -q 'claudex-login codex.*claudex-login claude.*discover-models.sh' \
+rg -q 'claudex-login codex.*claudex-login claude.*install.sh' \
   "$fixture/discovery-generation.stderr"
 
 printf '%s\n' \
@@ -665,7 +743,7 @@ if CLAUDEX_DATA_DIR="$discovery_data" \
 fi
 [[ "$(cat "$discovery_data/models.json")" == 'old models' ]]
 [[ "$(cat "$discovery_data/claudex.toml")" == 'old mapping' ]]
-rg -q 'claudex-login codex.*claudex-login claude.*discover-models.sh' \
+rg -q 'claudex-login codex.*claudex-login claude.*install.sh' \
   "$fixture/discovery-activation.stderr"
 
 rg -q 'Graphify is present' "$ROOT/controller/controller-policy.md"
@@ -696,6 +774,11 @@ rg -q 'Give a next action only when the user must act' \
 rg -q 'Never omit blockers, uncertainty, validation, safety, rollback' \
   "$ROOT/controller/controller-policy.md"
 rg -q 'self-contained handoff' "$ROOT/controller/controller-policy.md"
+rg -q 'Commit attribution is disabled' "$ROOT/controller/controller-policy.md"
+rg -q 'without attribution trailers. Never require a Co-Authored-By, Claude-Session,' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'or AI/tool attribution trailer' \
+  "$ROOT/controller/controller-policy.md"
 test ! -d "$ROOT/integrations/docker"
 
 # Sol receives complete independent evidence directly; an extra mandatory

@@ -7,6 +7,7 @@ for script in \
   install.sh doctor.sh rollback.sh smoke-test.sh discover-models.sh \
   bin/claudex-gpt bin/claudex-login bin/claudex-doctor bin/claude-headroom \
   bin/claudex-headroom bin/claudex-context bin/claudex-plugin \
+  tests/test_install_transaction.sh tests/test_claudex_proxy.sh \
   controller/plugin/scripts/check-local-services.sh \
   controller/plugin/scripts/guard-orchestration.sh
 do
@@ -71,7 +72,7 @@ rg -q 'workflow Headroom is not installed' \
 for valid_port in 1024 8317 8787 65535; do
   valid_service_port "$valid_port"
 done
-for invalid_port in '' 0 1023 65536 abc '8317 '; do
+for invalid_port in '' 0 1023 65536 abc '8317 ' 013456; do
   if valid_service_port "$invalid_port"; then
     printf 'invalid service port was accepted: %q\n' "$invalid_port" >&2
     exit 1
@@ -79,18 +80,33 @@ for invalid_port in '' 0 1023 65536 abc '8317 '; do
 done
 
 ports_root="$fixture/ports"
-write_service_ports "$ports_root" 18317 18787
-[[ "$(read_service_ports "$ports_root")" == $'18317\t18787' ]]
+write_service_ports "$ports_root" 18317 18787 13457
+[[ "$(read_service_ports "$ports_root")" == $'18317\t18787\t13457' ]]
+[[ "$(jq -r 'keys | @tsv' "$(service_ports_file "$ports_root")")" == \
+   $'claudexProxyPort\tcliproxyPort\theadroomPort' ]]
 [[ "$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' \
   "$(service_ports_file "$ports_root")")" == 600 ]]
-[[ "$(read_service_ports "$fixture/no-ports-yet")" == $'8317\t8787' ]]
+[[ "$(read_service_ports "$fixture/no-ports-yet")" == $'8317\t8787\t13456' ]]
+printf '{"cliproxyPort": 18317, "headroomPort": 18787}\n' \
+  >"$(service_ports_file "$ports_root")"
+[[ "$(read_service_ports "$ports_root")" == $'18317\t18787\t13456' ]]
+printf '{"cliproxyPort": 13456, "headroomPort": 18787}\n' \
+  >"$(service_ports_file "$ports_root")"
+[[ "$(read_service_ports "$ports_root")" == $'13456\t18787\t13457' ]]
+printf '{"cliproxyPort": 18317, "headroomPort": 13456}\n' \
+  >"$(service_ports_file "$ports_root")"
+[[ "$(read_service_ports "$ports_root")" == $'18317\t13456\t13457' ]]
 printf '{"cliproxyPort": 8787, "headroomPort": 8787}\n' \
   >"$(service_ports_file "$ports_root")"
 if read_service_ports "$ports_root" >/dev/null 2>&1; then
   printf 'duplicate service ports were accepted\n' >&2
   exit 1
 fi
-write_service_ports "$ports_root" 18317 18787
+if write_service_ports "$ports_root" 18317 18787 18787; then
+  printf 'duplicate third service port was accepted\n' >&2
+  exit 1
+fi
+write_service_ports "$ports_root" 18317 18787 13457
 
 listener_port_file="$fixture/listener.port"
 python3 - "$listener_port_file" <<'PY' &
@@ -118,19 +134,52 @@ available_port="$(next_available_port "$occupied_port")"
 valid_service_port "$available_port"
 [[ "$available_port" -gt "$occupied_port" ]]
 port_is_available "$available_port"
+second_reserved_port="$(next_available_port "$occupied_port" "$available_port")"
+unreserved_port="$(next_available_port \
+  "$occupied_port" "$available_port" "$second_reserved_port")"
+valid_service_port "$unreserved_port"
+[[ "$unreserved_port" != "$available_port" ]]
+[[ "$unreserved_port" != "$second_reserved_port" ]]
+wrapped_port="$(next_available_port 65535 1024 1025)"
+valid_service_port "$wrapped_port"
+[[ "$wrapped_port" -lt 65535 && "$wrapped_port" != 1024 && "$wrapped_port" != 1025 ]]
+/bin/bash -c '
+  set -u
+  source "$1"
+  [[ "$(select_service_port CLIProxyAPI CLAUDEX_CLIPROXY_PORT \
+    "$2" true false)" == "$2" ]]
+' _ "$ROOT/lib/workflow.sh" "$available_port"
 [[ "$(select_service_port \
-  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" 0 true false)" == \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" true false)" == \
   "$occupied_port" ]]
-if select_service_port \
-    CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" 0 false false \
-    >"$fixture/noninteractive-port.stdout" 2>"$fixture/noninteractive-port.stderr"; then
-  printf 'non-interactive foreign port collision was accepted\n' >&2
+kill_marker="$fixture/select-service-port.kill"
+kill() {
+  printf 'called\n' >"$kill_marker"
+  return 99
+}
+selected_noninteractive="$(select_service_port \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" false false \
+  "$available_port" "$second_reserved_port" \
+  2>"$fixture/noninteractive-port.stderr")"
+unset -f kill
+[[ "$selected_noninteractive" == "$unreserved_port" ]]
+[[ ! -e "$kill_marker" ]]
+rg -Fq "port $occupied_port is occupied" "$fixture/noninteractive-port.stderr"
+rg -Fq "using $unreserved_port" "$fixture/noninteractive-port.stderr"
+[[ "$(select_service_port \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$available_port" false false \
+  "$available_port" "$second_reserved_port" \
+  2>"$fixture/implicit-reserved-port.stderr")" == "$unreserved_port" ]]
+rg -Fq "using $unreserved_port" "$fixture/implicit-reserved-port.stderr"
+if CLAUDEX_CLIPROXY_PORT="$occupied_port" select_service_port \
+    CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" false false \
+    >"$fixture/explicit-port.stdout" 2>"$fixture/explicit-port.stderr"; then
+  printf 'explicit occupied port override was silently rewritten\n' >&2
   exit 1
 fi
-rg -Fq "port $occupied_port is occupied" "$fixture/noninteractive-port.stderr"
-rg -Fq 'CLAUDEX_CLIPROXY_PORT' "$fixture/noninteractive-port.stderr"
+rg -Fq 'CLAUDEX_CLIPROXY_PORT' "$fixture/explicit-port.stderr"
 [[ "$(select_service_port \
-  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" 0 false true \
+  CLIProxyAPI CLAUDEX_CLIPROXY_PORT "$occupied_port" false true \
   2>"$fixture/interactive-port.stderr" <<<"$available_port")" == "$available_port" ]]
 rg -Fq "port $occupied_port is occupied" "$fixture/interactive-port.stderr"
 kill "$listener_pid"
@@ -189,14 +238,16 @@ summary="$(print_install_summary \
   /portable/data/bin/claudex /portable/data/bin/cli-proxy-api \
   /portable/data/headroom/bin/headroom /portable/user-bin/mempalace-mcp \
   /portable/user-bin/graphify-mcp /portable/cliproxy.service \
-  /portable/headroom.service 18317 18787 reused reconciled)"
+  /portable/headroom.service 18317 18787 reused reconciled \
+  /portable/claudex-proxy.service 13457 installed)"
 for summary_value in \
   '/portable/checkout' '/portable/data' '/portable/user-bin' \
   '/portable/data/bin/claudex' '/portable/data/bin/cli-proxy-api' \
   '/portable/data/headroom/bin/headroom' '/portable/user-bin/mempalace-mcp' \
   '/portable/user-bin/graphify-mcp' '/portable/cliproxy.service' \
   '/portable/headroom.service' '127.0.0.1:18317' '127.0.0.1:18787' \
-  'reused' 'reconciled'
+  '/portable/claudex-proxy.service' '127.0.0.1:13457' \
+  'reused' 'reconciled' 'installed'
 do
   grep -Fq "$summary_value" <<<"$summary"
 done
@@ -933,6 +984,255 @@ for repository_state_dir in runtime logs backups; do
   fi
 done
 
+proxy_port=13457
+HOME="$fixture/proxy-home" \
+  render_claudex_proxy_launch_agent \
+    "$fixture/claudex-proxy.plist" "$data_root" "$proxy_port"
+python3 - "$fixture/claudex-proxy.plist" "$data_root" "$proxy_port" \
+  "$fixture/proxy-home" <<'PY'
+import plistlib
+import sys
+
+path, data_root, port, home = sys.argv[1:]
+document = plistlib.load(open(path, "rb"))
+assert document["Label"] == "com.user.claudex-translation-proxy"
+assert document["ProgramArguments"] == [
+    f"{data_root}/bin/claudex",
+    "--config",
+    f"{data_root}/model-config/current/claudex.toml",
+    "proxy",
+    "start",
+    "--port",
+    port,
+]
+assert document["RunAtLoad"] is True
+assert document["KeepAlive"] is True
+assert document["EnvironmentVariables"] == {"HOME": home}
+assert document["StandardOutPath"] == f"{data_root}/logs/claudex-proxy.log"
+assert document["StandardErrorPath"] == f"{data_root}/logs/claudex-proxy.log"
+PY
+HOME="$fixture/proxy-home" claudex_proxy_service_is_owned \
+  "$fixture/claudex-proxy.plist" "$data_root"
+
+render_claudex_proxy_systemd_user_unit \
+  "$fixture/claudex-proxy.service" "$data_root" "$proxy_port"
+rg -q '^Description=Claudex translation proxy$' \
+  "$fixture/claudex-proxy.service"
+rg -q '^Wants=claudex-headroom.service claudex-cliproxy.service$' \
+  "$fixture/claudex-proxy.service"
+rg -q '^After=claudex-headroom.service claudex-cliproxy.service$' \
+  "$fixture/claudex-proxy.service"
+rg -q '^Type=exec$' "$fixture/claudex-proxy.service"
+rg -Fq "ExecStart=$(systemd_quote "$data_root/bin/claudex") --config $(systemd_quote "$data_root/model-config/current/claudex.toml") proxy start --port $proxy_port" \
+  "$fixture/claudex-proxy.service"
+rg -q '^Restart=always$' "$fixture/claudex-proxy.service"
+rg -q '^RestartSec=3$' "$fixture/claudex-proxy.service"
+rg -Fq "StandardOutput=$(systemd_quote "append:$data_root/logs/claudex-proxy.log")" \
+  "$fixture/claudex-proxy.service"
+claudex_proxy_service_is_owned \
+  "$fixture/claudex-proxy.service" "$data_root"
+
+printf '%s\n' \
+  '[Unit]' \
+  'Description=Claudex translation proxy' \
+  '[Service]' \
+  "# ExecStart=$(systemd_quote "$data_root/bin/claudex") --config $(systemd_quote "$data_root/model-config/current/claudex.toml") proxy start --port $proxy_port" \
+  'ExecStart=/foreign/claudex proxy start --port 13457' \
+  >"$fixture/claudex-proxy-spoof.service"
+if claudex_proxy_service_is_owned \
+    "$fixture/claudex-proxy-spoof.service" "$data_root"; then
+  printf 'comment-spoofed Claudex proxy service was accepted\n' >&2
+  exit 1
+fi
+
+special_proxy_root="$fixture/proxy data & < \"quoted\" \\slash % \$"
+HOME="$fixture/proxy home & < \"user\" \\ % \$" \
+  render_claudex_proxy_launch_agent \
+    "$fixture/claudex-proxy-special.plist" "$special_proxy_root" 13457
+python3 - "$fixture/claudex-proxy-special.plist" <<'PY'
+import plistlib
+import sys
+plistlib.load(open(sys.argv[1], "rb"))
+PY
+render_claudex_proxy_systemd_user_unit \
+  "$fixture/claudex-proxy-special.service" "$special_proxy_root" 13457
+rg -Fq "$(systemd_quote "$special_proxy_root/bin/claudex")" \
+  "$fixture/claudex-proxy-special.service"
+claudex_proxy_service_is_owned \
+  "$fixture/claudex-proxy-special.service" "$special_proxy_root"
+repeated_dollar_home="$fixture/home \$\$ literal"
+HOME="$repeated_dollar_home" render_claudex_proxy_systemd_user_unit \
+  "$fixture/claudex-proxy-dollar-home.service" "$data_root" 13457
+HOME="$repeated_dollar_home" claudex_proxy_service_is_owned \
+  "$fixture/claudex-proxy-dollar-home.service" "$data_root"
+python3 - "$fixture/claudex-proxy-special.service" \
+  "$fixture/claudex-proxy-noncanonical.service" <<'PY'
+import sys
+
+source, destination = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+open(destination, "w", encoding="utf-8").write(
+    text.replace("%%", "%").replace("$$", "$")
+)
+PY
+if claudex_proxy_service_is_owned \
+    "$fixture/claudex-proxy-noncanonical.service" "$special_proxy_root"; then
+  printf 'non-canonically escaped systemd service was accepted\n' >&2
+  exit 1
+fi
+if render_claudex_proxy_systemd_user_unit \
+    "$fixture/claudex-proxy-leading-zero.service" "$data_root" 013456; then
+  printf 'leading-zero proxy port was rendered\n' >&2
+  exit 1
+fi
+
+identity_home="$fixture/identity-home"
+IFS=$'\t' read -r identity_file identity_label identity_unit \
+  < <(HOME="$identity_home" claudex_proxy_service_identity darwin)
+[[ "$identity_file" == \
+  "$identity_home/Library/LaunchAgents/com.user.claudex-translation-proxy.plist" ]]
+[[ "$identity_label" == com.user.claudex-translation-proxy ]]
+[[ "$identity_unit" == - ]]
+IFS=$'\t' read -r identity_file identity_label identity_unit \
+  < <(HOME="$identity_home" XDG_CONFIG_HOME="$fixture/xdg-config" \
+    claudex_proxy_service_identity systemd)
+[[ "$identity_file" == \
+  "$fixture/xdg-config/systemd/user/claudex-translation-proxy.service" ]]
+[[ "$identity_label" == - ]]
+[[ "$identity_unit" == claudex-translation-proxy.service ]]
+if claudex_proxy_service_identity unsupported >/dev/null 2>&1; then
+  printf 'unsupported service platform was accepted\n' >&2
+  exit 1
+fi
+
+pid_tools="$fixture/pid-tools"
+install -d "$pid_tools"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  '[[ "${FAKE_TARGET_LOADED:-1}" == 1 ]] || exit "${FAKE_TARGET_STATUS:-113}"' \
+  'printf "service = {\\n  path = %s\\n  pid = %s\\n}\\n" "${FAKE_SERVICE_PATH:-/fixture/proxy.plist}" "${FAKE_SERVICE_PID:-0}"' \
+  >"$pid_tools/launchctl"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "$*" == *LoadState* ]]; then printf "%s\\n" "${FAKE_LOAD_STATE:-loaded}"; elif [[ "$*" == *FragmentPath* ]]; then printf "%s\\n" "${FAKE_SERVICE_PATH:-/fixture/proxy.service}"; else printf "%s\\n" "${FAKE_SERVICE_PID:-0}"; fi' \
+  >"$pid_tools/systemctl"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "%s\\n" "$FAKE_LISTENER_PID"' \
+  >"$pid_tools/lsof"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "%s\\n" "$FAKE_UNAME"' \
+  >"$pid_tools/uname"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "%s\\n" "$FAKE_SS_OUTPUT"' \
+  >"$pid_tools/ss"
+chmod 0755 "$pid_tools/launchctl" "$pid_tools/systemctl" \
+  "$pid_tools/lsof" "$pid_tools/uname" "$pid_tools/ss"
+
+[[ "$(FAKE_SERVICE_PID=4242 PATH="$pid_tools:$PATH" \
+  managed_service_main_pid darwin com.user.claudex-translation-proxy -)" == \
+  4242 ]]
+[[ "$(FAKE_SERVICE_PID=4343 PATH="$pid_tools:$PATH" \
+  managed_service_main_pid systemd - claudex-translation-proxy.service)" == \
+  4343 ]]
+FAKE_TARGET_LOADED=1 PATH="$pid_tools:$PATH" \
+  managed_service_target_is_loaded \
+    darwin com.user.claudex-translation-proxy -
+if FAKE_TARGET_LOADED=0 PATH="$pid_tools:$PATH" \
+    managed_service_target_is_loaded \
+      darwin com.user.claudex-translation-proxy -; then
+  printf 'absent launchd target was reported loaded\n' >&2
+  exit 1
+fi
+[[ "$(FAKE_TARGET_LOADED=0 FAKE_TARGET_STATUS=113 PATH="$pid_tools:$PATH" \
+  managed_service_target_state \
+    darwin com.user.claudex-translation-proxy -)" == absent ]]
+if FAKE_TARGET_LOADED=0 FAKE_TARGET_STATUS=70 PATH="$pid_tools:$PATH" \
+    managed_service_target_state \
+      darwin com.user.claudex-translation-proxy - >/dev/null 2>&1; then
+  printf 'launchd inspection error was reported absent\n' >&2
+  exit 1
+fi
+[[ "$(FAKE_LOAD_STATE=not-found PATH="$pid_tools:$PATH" \
+  managed_service_target_state \
+    systemd - claudex-translation-proxy.service)" == absent ]]
+if FAKE_LOAD_STATE=failed PATH="$pid_tools:$PATH" \
+    managed_service_target_state \
+      systemd - claudex-translation-proxy.service >/dev/null 2>&1; then
+  printf 'systemd inspection error was reported absent\n' >&2
+  exit 1
+fi
+[[ "$(FAKE_SERVICE_PID=0 PATH="$pid_tools:$PATH" \
+  managed_service_main_pid_value \
+    darwin com.user.claudex-translation-proxy -)" == 0 ]]
+[[ "$(FAKE_SERVICE_PID=0 PATH="$pid_tools:$PATH" \
+  managed_service_main_pid_value \
+    systemd - claudex-translation-proxy.service)" == 0 ]]
+FAKE_LOAD_STATE=loaded PATH="$pid_tools:$PATH" \
+  managed_service_target_is_loaded \
+    systemd - claudex-translation-proxy.service
+if FAKE_LOAD_STATE=not-found PATH="$pid_tools:$PATH" \
+    managed_service_target_is_loaded \
+      systemd - claudex-translation-proxy.service; then
+  printf 'absent systemd target was reported loaded\n' >&2
+  exit 1
+fi
+[[ "$(FAKE_SERVICE_PATH=/fixture/proxy.plist PATH="$pid_tools:$PATH" \
+  managed_service_definition_path \
+    darwin com.user.claudex-translation-proxy -)" == \
+  /fixture/proxy.plist ]]
+[[ "$(FAKE_SERVICE_PATH=/fixture/proxy.service PATH="$pid_tools:$PATH" \
+  managed_service_definition_path \
+    systemd - claudex-translation-proxy.service)" == \
+  /fixture/proxy.service ]]
+FAKE_UNAME=Darwin FAKE_LISTENER_PID=4242 PATH="$pid_tools:$PATH" \
+  pid_owns_loopback_listener 4242 13457
+if FAKE_UNAME=Darwin FAKE_LISTENER_PID=99 PATH="$pid_tools:$PATH" \
+    pid_owns_loopback_listener 4242 13457; then
+  printf 'listener owned by another Darwin PID was accepted\n' >&2
+  exit 1
+fi
+linux_listener='LISTEN 0 128 127.0.0.1:13457 0.0.0.0:* users:(("claudex",pid=4343,fd=7))'
+FAKE_UNAME=Linux FAKE_SS_OUTPUT="$linux_listener" PATH="$pid_tools:$PATH" \
+  pid_owns_loopback_listener 4343 13457
+if FAKE_UNAME=Linux \
+    FAKE_SS_OUTPUT='LISTEN 0 128 0.0.0.0:13457 0.0.0.0:* users:(("claudex",pid=4343,fd=7))' \
+    PATH="$pid_tools:$PATH" pid_owns_loopback_listener 4343 13457; then
+  printf 'wildcard listener was accepted as loopback-only\n' >&2
+  exit 1
+fi
+if FAKE_UNAME=Linux \
+    FAKE_SS_OUTPUT='LISTEN 0 128 127.0.0.1:13457 0.0.0.0:*' \
+    PATH="$pid_tools:$PATH" pid_owns_loopback_listener 4343 13457; then
+  printf 'listener without process metadata was accepted\n' >&2
+  exit 1
+fi
+if FAKE_UNAME=Darwin PATH="/usr/bin:/bin" \
+    pid_owns_loopback_listener 4242 13457; then
+  printf 'missing lsof was accepted\n' >&2
+  exit 1
+fi
+
+jq -n '{object:"list",data:[{id:"gpt-5.6-sol"}]}' \
+  >"$fixture/claudex-proxy-models.json"
+printf '%s\n' 'default_model = "gpt-5.6-sol"' \
+  >"$fixture/claudex-default-model.toml"
+[[ "$(claudex_config_default_model \
+  "$fixture/claudex-default-model.toml")" == gpt-5.6-sol ]]
+claudex_proxy_models_response_is_ready \
+  "$fixture/claudex-proxy-models.json" gpt-5.6-sol
+if claudex_proxy_models_response_is_ready \
+    "$fixture/claudex-proxy-models.json" gpt-5.6-terra; then
+  printf 'missing controller model was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'for command_name in launchctl plutil lsof' "$ROOT/install.sh"
+rg -Fq 'missing required command: ss' "$ROOT/install.sh"
+rg -Fq 'Claudex proxy PID/listener inspection requires lsof' "$ROOT/doctor.sh"
+rg -Fq 'Claudex proxy PID/listener inspection requires ss' "$ROOT/doctor.sh"
+
 resolved_data_root="$(HOME="$fixture/home" XDG_DATA_HOME="$fixture/xdg" \
   CLAUDEX_DATA_DIR= workflow_data_dir)"
 [[ "$resolved_data_root" == "$fixture/xdg/claudex-workflow" ]]
@@ -1055,6 +1355,205 @@ rg -Fq -- '--require-tool mempalace_get_taxonomy' "$ROOT/doctor.sh"
 rg -Fq -- '--require-tool mempalace_checkpoint' "$ROOT/doctor.sh"
 rg -Fq 'claudex-audit-model-does-not-exist' "$ROOT/doctor.sh"
 rg -Fq 'X-Headroom-Base-Url: http://127.0.0.1:$CLIPROXY_PORT' "$ROOT/doctor.sh"
+for claudex_proxy_doctor_check in \
+  'Claudex proxy definition is workflow-owned' \
+  'Claudex proxy service PID owns 127.0.0.1:$CLAUDEX_PROXY_PORT' \
+  'Claudex proxy exposes the configured controller model'
+do
+  rg -Fq "$claudex_proxy_doctor_check" "$ROOT/doctor.sh"
+done
+rg -Fq 'http://127.0.0.1:$CLAUDEX_PROXY_PORT/v1/models' \
+  "$ROOT/controller/plugin/scripts/check-local-services.sh"
+rg -Fq 'claudex_proxy_models_response_is_ready' \
+  "$ROOT/controller/plugin/scripts/check-local-services.sh"
+if rg -q -e 'launchctl|systemctl|service_(start|stop)|managed_service_(start|stop)' \
+  "$ROOT/controller/plugin/scripts/check-local-services.sh"; then
+  printf 'SessionStart health hook mutates service-manager state\n' >&2
+  exit 1
+fi
+health_hook_fixture="$fixture/session-health-hook"
+health_hook_data="$health_hook_fixture/data"
+health_hook_tools="$health_hook_fixture/tools"
+install -d -m 0700 "$health_hook_data" "$health_hook_tools"
+write_service_ports "$health_hook_data" 18317 18787 13457
+printf '%s\n' \
+  '[model]' \
+  'default_model = "gpt-5.6-sol"' \
+  >"$health_hook_data/claudex.toml"
+cat >"$health_hook_tools/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+url="${!#}"
+case "$url" in
+  http://127.0.0.1:18787/health)
+    marker=headroom
+    printf '%s\n' '{"service":"headroom-proxy","status":"healthy","ready":true}'
+    ;;
+  http://127.0.0.1:18317/v1/models)
+    marker=cliproxy
+    printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"claude-opus-4-8"}]}'
+    ;;
+  http://127.0.0.1:13457/v1/models)
+    marker=claudex
+    if [[ "${HOOK_CLAUDEX_MODE:-ready}" == ready ]]; then
+      printf '%s\n' '{"object":"list","data":[{"id":"gpt-5.6-sol"}]}'
+    else
+      printf '%s\n' '{"object":"list","data":[]}'
+    fi
+    ;;
+  *) exit 22 ;;
+esac
+if [[ "${HOOK_REQUIRE_CONCURRENCY:-0}" == 1 ]]; then
+  : >"$HOOK_BARRIER_DIR/$marker"
+  for _ in {1..50}; do
+    [[ -e "$HOOK_BARRIER_DIR/headroom" && \
+       -e "$HOOK_BARRIER_DIR/cliproxy" && \
+       -e "$HOOK_BARRIER_DIR/claudex" ]] && exit 0
+    /bin/sleep 0.02
+  done
+  exit 23
+fi
+EOF
+chmod 0755 "$health_hook_tools/curl"
+health_hook_barrier="$health_hook_fixture/barrier"
+install -d -m 0700 "$health_hook_barrier"
+health_hook_output="$(
+  CLAUDEX_DATA_DIR="$health_hook_data" \
+  CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  HOOK_REQUIRE_CONCURRENCY=1 \
+  HOOK_BARRIER_DIR="$health_hook_barrier" \
+  PATH="$health_hook_tools:$PATH" \
+    "$ROOT/controller/plugin/scripts/check-local-services.sh"
+)"
+[[ -z "$health_hook_output" ]]
+health_hook_output="$(
+  CLAUDEX_DATA_DIR="$health_hook_data" \
+  CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  HOOK_CLAUDEX_MODE=missing \
+  PATH="$health_hook_tools:$PATH" \
+    "$ROOT/controller/plugin/scripts/check-local-services.sh"
+)"
+[[ "$(wc -l <<<"$health_hook_output" | tr -d ' ')" == 1 ]]
+jq -e '
+  (.systemMessage | type == "string") and
+  (.systemMessage | contains("persistent Claudex proxy"))
+' <<<"$health_hook_output" >/dev/null
+
+doctor_proxy_fixture="$fixture/doctor-proxy"
+doctor_proxy_home="$doctor_proxy_fixture/home"
+doctor_proxy_data="$doctor_proxy_fixture/data"
+doctor_proxy_xdg="$doctor_proxy_fixture/xdg"
+doctor_proxy_tools="$doctor_proxy_fixture/tools"
+doctor_proxy_service="$doctor_proxy_xdg/systemd/user/claudex-translation-proxy.service"
+install -d -m 0700 \
+  "$doctor_proxy_home" "$doctor_proxy_data" "$doctor_proxy_tools" \
+  "$doctor_proxy_data/state/sessions"
+install -d -m 0755 "$doctor_proxy_data/bin" "$(dirname "$doctor_proxy_service")"
+write_service_ports "$doctor_proxy_data" 18317 18787 13457
+printf '%s\n' 'default_model = "gpt-5.6-sol"' \
+  >"$doctor_proxy_data/claudex.toml"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
+  >"$doctor_proxy_data/bin/claudex"
+cp "$doctor_proxy_data/bin/claudex" "$doctor_proxy_data/bin/cli-proxy-api"
+chmod 0755 "$doctor_proxy_data/bin/claudex" \
+  "$doctor_proxy_data/bin/cli-proxy-api"
+HOME="$doctor_proxy_home" render_claudex_proxy_systemd_user_unit \
+  "$doctor_proxy_service" "$doctor_proxy_data" 13457
+cat >"$doctor_proxy_tools/uname" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' Linux
+EOF
+cat >"$doctor_proxy_tools/systemctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *LoadState* ]]; then
+  printf '%s\n' "${DOCTOR_TARGET_STATE:-loaded}"
+elif [[ "$*" == *FragmentPath* ]]; then
+  printf '%s\n' "$DOCTOR_SERVICE_PATH"
+elif [[ "$*" == *MainPID* ]]; then
+  printf '%s\n' "${DOCTOR_MANAGER_PID:-4242}"
+else
+  exit 1
+fi
+EOF
+cat >"$doctor_proxy_tools/ss" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+pid="${DOCTOR_LISTENER_PID:-4242}"
+printf 'LISTEN 0 128 127.0.0.1:13457 0.0.0.0:* users:(("claudex",pid=%s,fd=7))\n' "$pid"
+printf 'LISTEN 0 128 127.0.0.1:18317 0.0.0.0:* users:(("cliproxy",pid=4343,fd=7))\n'
+printf 'LISTEN 0 128 127.0.0.1:18787 0.0.0.0:* users:(("headroom",pid=4444,fd=7))\n'
+EOF
+cat >"$doctor_proxy_tools/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+url="${!#}"
+case "$url" in
+  http://127.0.0.1:13457/v1/models)
+    if [[ "${DOCTOR_MODEL_MODE:-ready}" == ready ]]; then
+      printf '%s\n' '{"object":"list","data":[{"id":"gpt-5.6-sol"}]}'
+    else
+      printf '%s\n' '{"object":"list","data":[]}'
+    fi
+    ;;
+  http://127.0.0.1:18317/v1/models)
+    printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"claude-opus-4-8"}]}'
+    ;;
+  http://127.0.0.1:18787/health)
+    printf '%s\n' '{"version":"fixture","ready":true,"config":{"optimize":true,"cache":false,"memory":false,"code_graph":false,"runtime_env":{"HEADROOM_OUTPUT_SHAPER":"0","HEADROOM_VERBOSITY_AUTOTUNE":"0","HEADROOM_EFFORT_ROUTER":"0"}}}'
+    ;;
+  http://127.0.0.1:18317/v1/messages|http://127.0.0.1:18787/v1/messages)
+    printf '%s\n' '{"error":{"message":"unknown provider for model claudex-audit-model-does-not-exist"}}'
+    ;;
+  *) exit 22 ;;
+esac
+EOF
+chmod 0755 "$doctor_proxy_tools"/*
+
+run_proxy_doctor_case() {
+  local case_name="$1"
+  shift
+  env \
+    HOME="$doctor_proxy_home" \
+    CLAUDEX_DATA_DIR="$doctor_proxy_data" \
+    XDG_CONFIG_HOME="$doctor_proxy_xdg" \
+    DOCTOR_SERVICE_PATH="$doctor_proxy_service" \
+    PATH="$doctor_proxy_tools:/usr/bin:/bin:/opt/homebrew/bin" \
+    "$@" "$ROOT/doctor.sh" \
+      >"$doctor_proxy_fixture/$case_name.output" 2>&1 || :
+}
+
+run_proxy_doctor_case healthy
+rg -Fxq 'OK   Claudex proxy definition is workflow-owned' \
+  "$doctor_proxy_fixture/healthy.output"
+rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
+  "$doctor_proxy_fixture/healthy.output"
+rg -Fxq 'OK   Claudex proxy exposes the configured controller model' \
+  "$doctor_proxy_fixture/healthy.output"
+
+run_proxy_doctor_case definition-failure DOCTOR_TARGET_STATE=not-found
+rg -Fxq 'FAIL Claudex proxy definition is workflow-owned' \
+  "$doctor_proxy_fixture/definition-failure.output"
+rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
+  "$doctor_proxy_fixture/definition-failure.output"
+rg -Fxq 'OK   Claudex proxy exposes the configured controller model' \
+  "$doctor_proxy_fixture/definition-failure.output"
+
+run_proxy_doctor_case pid-failure DOCTOR_MANAGER_PID=99
+rg -Fxq 'OK   Claudex proxy definition is workflow-owned' \
+  "$doctor_proxy_fixture/pid-failure.output"
+rg -Fxq 'FAIL Claudex proxy service PID owns 127.0.0.1:13457' \
+  "$doctor_proxy_fixture/pid-failure.output"
+rg -Fxq 'OK   Claudex proxy exposes the configured controller model' \
+  "$doctor_proxy_fixture/pid-failure.output"
+
+run_proxy_doctor_case model-failure DOCTOR_MODEL_MODE=missing
+rg -Fxq 'OK   Claudex proxy definition is workflow-owned' \
+  "$doctor_proxy_fixture/model-failure.output"
+rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
+  "$doctor_proxy_fixture/model-failure.output"
+rg -Fxq 'FAIL Claudex proxy exposes the configured controller model' \
+  "$doctor_proxy_fixture/model-failure.output"
 rg -Fq 'UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/headroom/tools"' "$ROOT/install.sh"
 rg -Fq 'UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/headroom/bin"' "$ROOT/install.sh"
 rg -Fq 'com.user.claudex-headroom' "$ROOT/install.sh"
@@ -1072,6 +1571,140 @@ rg -Fq '"$legacy_headroom_service_file" "$WORKFLOW_DATA_ROOT" legacy' \
 rg -Fq 'upgrade_headroom_distribution' "$ROOT/install.sh"
 rg -Fq 'reconcile_headroom_transaction' "$ROOT/install.sh"
 rg -Fq 'preflight_headroom_binary' "$ROOT/install.sh"
+for proxy_install_contract in \
+  claudex_proxy_service_is_owned \
+  claudex_proxy_listener_owned \
+  claudex_proxy_transaction_active \
+  claudex_proxy_runtime_mutated \
+  preflight_claudex_proxy \
+  wait_for_claudex_proxy \
+  restore_claudex_proxy_service \
+  pending-provider-login \
+  'com.user.claudex-translation-proxy' \
+  'claudex-translation-proxy.service'
+do
+  rg -Fq "$proxy_install_contract" "$ROOT/install.sh"
+done
+rg -Fq 'MODEL_DISCOVERY_LOGIN_INCOMPLETE=42' "$ROOT/discover-models.sh"
+rg -Fq 'model discovery and publication are installer-owned' \
+  "$ROOT/discover-models.sh"
+if "$ROOT/discover-models.sh" \
+    >"$fixture/direct-discovery.stdout" \
+    2>"$fixture/direct-discovery.stderr"; then
+  printf 'direct model discovery bypassed the installer transaction\n' >&2
+  exit 1
+fi
+[[ ! -s "$fixture/direct-discovery.stdout" ]]
+rg -Fq 'run ' "$fixture/direct-discovery.stderr"
+rg -Fq '/install.sh' "$fixture/direct-discovery.stderr"
+rg -Fq '"$MODEL_DISCOVERY_LOGIN_INCOMPLETE"' \
+  "$ROOT/install.sh"
+rg -Fq 'refusing to stop ownership-drifted Claudex proxy runtime' \
+  "$ROOT/install.sh"
+rg -Fq 'refusing to replace loaded unknown Claudex proxy target' \
+  "$ROOT/install.sh"
+rg -Fq 'claudex_proxy_binary_changed' "$ROOT/install.sh"
+rg -Fq 'claudex_proxy_service_changed' "$ROOT/install.sh"
+rg -Fq 'claudex_proxy_port_changed' "$ROOT/install.sh"
+rg -Fq 'claudex_proxy_config_changed' "$ROOT/install.sh"
+rg -Fq 'claudex_proxy_readiness_drifted' "$ROOT/install.sh"
+rg -Fq 'claudex-login codex; claudex-login claude; %s/install.sh' \
+  "$ROOT/install.sh" "$ROOT/bin/claudex-login"
+for readme_contract in \
+  'one persistent Claudex translation proxy' \
+  'CLAUDEX_PROXY_PORT=13457' \
+  'com.user.claudex-translation-proxy' \
+  'claudex-translation-proxy.service' \
+  'may interrupt one in-flight request' \
+  'existing sessions do not own or terminate the proxy lifetime'
+do
+  rg -Fiq "$readme_contract" "$ROOT/README.md"
+done
+python3 - "$ROOT/install.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+snapshot = source.index('snapshot_path "$claudex_proxy_service_file"')
+port_write = source.index('write_service_ports "$WORKFLOW_DATA_ROOT"', snapshot)
+publication = source.index('"$discovery_entrypoint"', port_write)
+manager_guard = source.index('claudex_proxy_manager_target_state=')
+preflight = source.index('preflight_claudex_proxy ||', publication)
+cutover = source.index('activate_staged_file "$claudex_proxy_desired_service_file"', preflight)
+readiness = source.index('wait_for_claudex_proxy', cutover)
+release = source.index('release_endpoint_config_lock', readiness)
+disarm = source.index('claudex_proxy_transaction_active=false', release)
+if not manager_guard < port_write:
+    raise SystemExit("loaded proxy manager target is checked after publication")
+if not snapshot < port_write < publication < preflight < cutover < readiness < release < disarm:
+    raise SystemExit("persistent proxy transaction ordering is unsafe")
+PY
+python3 - "$ROOT/install.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+rollback = source.index("rollback_install_transaction()")
+restore_endpoint = source.index('restore_model_config_generation', rollback)
+restore_proxy = source.index('restore_claudex_proxy_service', restore_endpoint)
+release = source.index('release_endpoint_config_lock', restore_proxy)
+if not restore_endpoint < restore_proxy < release:
+    raise SystemExit("rollback releases endpoint lock before proxy recovery")
+
+activation = source.index('if [[ "$claudex_proxy_restart_required" == true ]]')
+enable = source.index('launchctl enable', activation)
+bootstrap = source.index('launchctl bootstrap', activation)
+if not enable < bootstrap:
+    raise SystemExit("launchd activation bootstraps a disabled job")
+
+recovery = source.index('restore_claudex_proxy_service()')
+enable = source.index('launchctl enable', recovery)
+bootstrap = source.index('launchctl bootstrap', recovery)
+if not enable < bootstrap:
+    raise SystemExit("launchd recovery bootstraps a disabled job")
+
+preflight = source.index('preflight_claudex_proxy ||', activation)
+safety = source.index('claudex_proxy_prior_runtime_safe_to_stop', preflight)
+arm = source.index('claudex_proxy_transaction_active=true', safety)
+runtime_mutation = source.index('claudex_proxy_runtime_mutated=true', arm)
+stop = source.index('launchctl bootout', runtime_mutation)
+if not preflight < safety < arm < runtime_mutation < stop:
+    raise SystemExit("proxy rollback is armed before ownership revalidation")
+
+rollback = source.index('rollback_install_transaction()')
+runtime_guard = source.index(
+    '${claudex_proxy_runtime_mutated:-false}', rollback
+)
+rollback_stop = source.index('launchctl bootout', runtime_guard)
+if not rollback < runtime_guard < rollback_stop:
+    raise SystemExit("rollback can stop a runtime this transaction did not mutate")
+
+safety_start = source.index('claudex_proxy_prior_runtime_safe_to_stop()')
+safety_end = source.index('cliproxy_listener_owned=false', safety_start)
+safety_body = source[safety_start:safety_end]
+target_check_start = source.index('claudex_proxy_loaded_target_is_expected()')
+target_check_end = source.index(
+    'claudex_proxy_prior_runtime_safe_to_stop()', target_check_start
+)
+target_check_body = source[target_check_start:target_check_end]
+if (
+    'claudex_proxy_loaded_target_is_expected' not in safety_body
+    or 'managed_service_definition_path' not in target_check_body
+    or 'managed_service_target_state' not in target_check_body
+    or 'managed_service_main_pid_value' not in safety_body
+):
+    raise SystemExit("proxy cutover does not revalidate the loaded definition")
+
+rollback_body = source[rollback:source.index('WORKFLOW_ROLLBACK_HANDLER', rollback)]
+if 'claudex_proxy_loaded_target_is_expected' not in rollback_body:
+    raise SystemExit("proxy rollback can stop a definition that drifted after cutover")
+
+systemd_recovery = source.index('systemctl --user daemon-reload', recovery)
+systemd_enable = source.index('systemctl --user enable', systemd_recovery)
+enable_gate = source.rfind('if [[ "$recovery_ready" == true ]]', systemd_recovery, systemd_enable)
+systemd_restart = source.index('systemctl --user restart', systemd_enable)
+restart_gate = source.rfind('if [[ "$recovery_ready" == true ]]', systemd_enable, systemd_restart)
+if enable_gate < systemd_recovery or restart_gate < systemd_enable:
+    raise SystemExit("systemd proxy recovery is not failure-gated")
+PY
 python3 - "$ROOT/install.sh" <<'PY'
 import sys
 
@@ -1150,14 +1783,22 @@ source = open(sys.argv[1], encoding="utf-8").read()
 snapshot = source.index('snapshot_path "$service_ports_path"')
 write = source.index('write_service_ports "$WORKFLOW_DATA_ROOT"')
 discovery = source.index(
-    'if ! CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint"; then', write
+    'CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint" ||', write
 )
 restore = source.index('restore_snapshot "$service_ports_path"')
 disarm = source.index('endpoint_transaction_active=false', discovery)
 if not snapshot < restore < write < discovery < disarm:
     raise SystemExit("endpoint publication is not rollback-safe")
-if '[[ "$ports_changed" == true && -n "$prior_model_generation" ]]' not in source[discovery:disarm]:
-    raise SystemExit("changed ports do not make model discovery failure fatal")
+failure_window = source[discovery:disarm]
+for required_guard in (
+    '[[ "$ports_changed" == false ]]',
+    '[[ "$claudex_binary_changed" == false ]]',
+    '[[ "$claudex_proxy_service_changed" == unchanged ]]',
+    '[[ "$claudex_proxy_listener_owned" == true ]]',
+    'model discovery failed while persistent proxy reconciliation was required',
+):
+    if required_guard not in failure_window:
+        raise SystemExit("model discovery fatality matrix is incomplete")
 if 'CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint"' not in source[write:disarm]:
     raise SystemExit("installer discovery can prune endpoint rollback state")
 if 'restore_model_config_generation' not in source[snapshot:write]:
@@ -1167,7 +1808,7 @@ if 'prior_model_generation_snapshot' not in source[snapshot:write]:
 acquire_endpoint = source.index('acquire_endpoint_config_lock', snapshot)
 capture_prior = source.index('prior_model_generation="$(readlink', acquire_endpoint)
 release_endpoint = source.index('release_endpoint_config_lock', discovery)
-if not acquire_endpoint < capture_prior < write < discovery < disarm < release_endpoint:
+if not acquire_endpoint < capture_prior < write < discovery < release_endpoint < disarm:
     raise SystemExit("endpoint model publication is not serialized through commit")
 overall_commit = source.index('WORKFLOW_TRANSACTION_ACTIVE=false', release_endpoint)
 if not release_endpoint < overall_commit:
@@ -1277,9 +1918,9 @@ for phrase in required_copy:
 
 flow_section = readme.split("## How a request flows", 1)[1]
 flow_block = flow_section.split("```text", 1)[1].split("```", 1)[0]
-expected_flow = """claudex-gpt
-  -> Sol routing decision
-  -> selected model call: Sol (gpt-5.6-sol) | Terra (gpt-5.6-terra) | Sonnet (claude-sonnet-5) | Opus (claude-opus-4-8)
+expected_flow = """many claudex-gpt sessions
+  -> one persistent Claudex translation proxy
+  -> selected model: Sol | Terra | Sonnet | Opus
   -> Headroom
   -> CLIProxyAPI
      -> Codex OAuth (GPT)

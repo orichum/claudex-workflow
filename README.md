@@ -13,28 +13,29 @@ A portable Claude Code daily driver that combines GPT and Claude models in one a
 
 ## How a request flows
 
-Every GPT and Claude model call passes through Headroom and CLIProxyAPI. Headroom runs with `--lossless` and `--code-aware`; `HEADROOM_OUTPUT_SHAPER=0`, `HEADROOM_VERBOSITY_AUTOTUNE=0`, and `HEADROOM_EFFORT_ROUTER=0` prevent it from lowering effort, reshaping output, or truncating workers.
+Every `claudex-gpt` process is a client of one workflow-owned Claudex translation proxy. The proxy outlives individual terminal sessions and forwards every GPT and Claude model call through Headroom and CLIProxyAPI. Headroom runs with `--lossless` and `--code-aware`; `HEADROOM_OUTPUT_SHAPER=0`, `HEADROOM_VERBOSITY_AUTOTUNE=0`, and `HEADROOM_EFFORT_ROUTER=0` prevent it from lowering effort, reshaping output, or truncating workers.
 
 ```mermaid
 flowchart LR
-    Start["claudex-gpt"] --> Controller["Sol routing decision"]
-    Controller --> Model{"Selected model call"}
+    SessionA["claudex-gpt session A"] --> Translation["One persistent Claudex proxy"]
+    SessionB["claudex-gpt session B"] --> Translation
+    Translation --> Model{"Selected model"}
     Model --> GPT["Sol or Terra"]
     Model --> Claude["Sonnet or Opus"]
     GPT --> Headroom["Headroom"]
     Claude --> Headroom
-    Headroom --> Proxy["CLIProxyAPI"]
-    Proxy --> Codex["Codex OAuth for GPT"]
-    Proxy --> ClaudeAuth["Claude OAuth for Claude"]
+    Headroom --> API["CLIProxyAPI"]
+    API --> Codex["Codex OAuth"]
+    API --> ClaudeAuth["Claude OAuth"]
 ```
 
 <details>
 <summary>Plain-text flow</summary>
 
 ```text
-claudex-gpt
-  -> Sol routing decision
-  -> selected model call: Sol (gpt-5.6-sol) | Terra (gpt-5.6-terra) | Sonnet (claude-sonnet-5) | Opus (claude-opus-4-8)
+many claudex-gpt sessions
+  -> one persistent Claudex translation proxy
+  -> selected model: Sol | Terra | Sonnet | Opus
   -> Headroom
   -> CLIProxyAPI
      -> Codex OAuth (GPT)
@@ -86,11 +87,13 @@ cd claudex-workflow
 ./install.sh
 claudex-login codex
 claudex-login claude
-./discover-models.sh
+./install.sh
 claudex-doctor
 ```
 
-The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, synchronizes declared Claude Code plugins, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. The installer does not patch any upstream package source or installed package file.
+The first installer run lays down verified binaries and provider-login commands. After both logins, the second run deliberately discovers the available models, publishes one coherent generated configuration, and reconciles the persistent translation proxy. Only the installer may publish that configuration or change workflow-owned services.
+
+The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, synchronizes declared Claude Code plugins, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. It does not patch upstream package source or installed package files.
 
 To update an existing checkout:
 
@@ -99,15 +102,24 @@ git pull --ff-only
 ./install.sh
 ```
 
-The installer is safe to rerun. An upgrade can restart a changed or unhealthy owned service and may interrupt active Claudex sessions, so finish those sessions first.
+The installer is safe to rerun. An upgrade can restart a changed or unhealthy owned proxy and may interrupt active Claudex sessions; specifically, it may interrupt one in-flight request. Finish active sessions first when practical.
 
-Defaults are CLIProxyAPI `8317` and Headroom `8787`. A healthy service is reused only when its service definition and workflow data paths prove that Claudex owns it. If an unrelated listener occupies a requested port, an interactive installation shows the collision and prompts with the next available port. Non-interactive installations fail with an explicit override:
+Defaults are CLIProxyAPI `8317`, Headroom `8787`, and the shared Claudex translation proxy `13456`. A healthy service is reused only when its service definition, manager PID, loopback listener, and workflow data paths prove that this workflow owns it. If an unrelated listener occupies a requested port, an interactive installation shows the collision and prompts with an available alternative. Without an explicit override, a non-interactive installation logs the collision and automatically selects an available port. An occupied explicit override fails rather than being silently rewritten:
 
 ```bash
-CLAUDEX_CLIPROXY_PORT=18317 CLAUDEX_HEADROOM_PORT=18787 ./install.sh
+CLAUDEX_CLIPROXY_PORT=18317 \
+CLAUDEX_HEADROOM_PORT=18787 \
+CLAUDEX_PROXY_PORT=13457 \
+./install.sh
 ```
 
-The selected pair is saved privately in `service-ports.json` under `CLAUDEX_DATA_DIR` and used by every launcher, generated configuration, health hook, discovery command, and diagnostic. Unknown service files and unrelated Headroom or CLIProxyAPI processes are never stopped or overwritten.
+All three selected ports are saved privately in `service-ports.json` under `CLAUDEX_DATA_DIR` and used by every launcher, generated configuration, health hook, discovery command, and diagnostic. An unknown listener is never stopped or adopted: without an override the installer selects another port, while an occupied explicit override fails. A foreign service definition is never overwritten and always fails closed.
+
+| Service | macOS LaunchAgent | Linux/WSL systemd user unit |
+| --- | --- | --- |
+| Claudex translation proxy | `com.user.claudex-translation-proxy` | `claudex-translation-proxy.service` |
+| Headroom | `com.user.claudex-headroom` | `claudex-headroom.service` |
+| CLIProxyAPI | `com.user.claudex-cliproxy` | `claudex-cliproxy.service` |
 
 ### Upgrade transaction
 
@@ -118,13 +130,16 @@ flowchart LR
     Run["Run install.sh"] --> Lock["Acquire installer lock"]
     Lock --> Stage["Stage updates"]
     Stage --> Verify{"Verify staged state"}
-    Verify -->|"Pass"| Activate["Activate and reconcile"]
-    Activate --> Healthy["Healthy owned services"]
+    Verify -->|"Pass"| Publish["Publish ports and model config"]
+    Publish --> Activate["Reconcile persistent services"]
+    Activate --> Healthy["Owned PID + loopback + model ready"]
     Verify -->|"Fail"| Restore["Restore prior state"]
     Activate -->|"Failure"| Restore
 ```
 
-Unchanged healthy services remain running. Before a Headroom cutover, the private runtime must become healthy on an unused loopback port, so cold initialization happens while the existing proxy still serves traffic. Headroom uses the workflow-specific `com.user.claudex-headroom` LaunchAgent on macOS or `claudex-headroom.service` on systemd. A legacy generic Headroom service is migrated only when its configuration and state paths match this workflow exactly. If activation fails, the installer restores the previous owned service and private package state; it exits nonzero if recovery cannot be proven healthy. CLIProxyAPI binary, configuration, service activation, and endpoint state use the same transactional boundary.
+Unchanged healthy services remain running. Before a Headroom cutover, the private runtime must become healthy on an unused loopback port, so cold initialization happens while the existing route still serves traffic. A legacy generic Headroom service is migrated only when its configuration and state paths match this workflow exactly. If activation fails, the installer restores the previous owned service, ports, generated model configuration, and private package state; it exits nonzero if recovery cannot be proven healthy. The Claudex proxy, Headroom, and CLIProxyAPI share this transactional boundary.
+
+`claudex-gpt` never starts, stops, or repairs the shared proxy. Before creating session state it requires the owned loaded definition, the service-manager PID on the exact loopback port, and the configured controller model in `/v1/models`. On failure it exits with `run claudex-doctor`; existing sessions do not own or terminate the proxy lifetime.
 
 After success, the **Installation locations** summary prints the checkout, data directory, launcher links, actual runtime binaries, service files, selected ports, and whether each service was installed, migrated, reconciled, or reused.
 

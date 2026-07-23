@@ -24,6 +24,7 @@ service_ports_file() {
 valid_service_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  [[ "$port" == "$((10#$port))" ]] || return 1
   ((10#$port >= 1024 && 10#$port <= 65535))
 }
 
@@ -32,18 +33,33 @@ read_service_ports() {
   local ports_file
   ports_file="$(service_ports_file "$data_root")"
   if [[ ! -e "$ports_file" ]]; then
-    printf '8317\t8787\n'
+    printf '8317\t8787\t13456\n'
     return 0
   fi
   [[ -f "$ports_file" && ! -L "$ports_file" ]] || return 1
   jq -er '
-    select(type == "object" and keys == ["cliproxyPort", "headroomPort"]) |
+    select(type == "object") |
+    if keys == ["cliproxyPort", "headroomPort"] then
+      . + {claudexProxyPort:
+        (if .cliproxyPort != 13456 and .headroomPort != 13456 then 13456
+         elif .cliproxyPort != 13457 and .headroomPort != 13457 then 13457
+         else 13458
+         end)}
+    elif keys == ["claudexProxyPort", "cliproxyPort", "headroomPort"] then
+      .
+    else
+      empty
+    end |
+    select(keys == ["claudexProxyPort", "cliproxyPort", "headroomPort"]) |
     select(.cliproxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
     select(.headroomPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
-    select(.cliproxyPort != .headroomPort) |
-    [.cliproxyPort, .headroomPort] | @tsv
+    select(.claudexProxyPort | type == "number" and floor == . and
+      . >= 1024 and . <= 65535) |
+    select(([.cliproxyPort, .headroomPort, .claudexProxyPort] |
+      unique | length) == 3) |
+    [.cliproxyPort, .headroomPort, .claudexProxyPort] | @tsv
   ' "$ports_file"
 }
 
@@ -51,17 +67,23 @@ write_service_ports() {
   local data_root="$1"
   local cliproxy_port="$2"
   local headroom_port="$3"
+  local claudex_proxy_port="$4"
   local ports_file temporary
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$headroom_port" || return 1
-  [[ "$cliproxy_port" != "$headroom_port" ]] || return 1
+  valid_service_port "$claudex_proxy_port" || return 1
+  [[ "$cliproxy_port" != "$headroom_port" && \
+     "$cliproxy_port" != "$claudex_proxy_port" && \
+     "$headroom_port" != "$claudex_proxy_port" ]] || return 1
   install -d -m 0700 "$data_root" || return 1
   ports_file="$(service_ports_file "$data_root")"
   [[ ! -L "$ports_file" ]] || return 1
   temporary="$(mktemp "$data_root/.service-ports.XXXXXX")" || return 1
   if ! jq -n --argjson cliproxy "$cliproxy_port" \
       --argjson headroom "$headroom_port" \
-      '{cliproxyPort: $cliproxy, headroomPort: $headroom}' >"$temporary" || \
+      --argjson claudex_proxy "$claudex_proxy_port" \
+      '{claudexProxyPort: $claudex_proxy, cliproxyPort: $cliproxy,
+        headroomPort: $headroom}' >"$temporary" || \
      ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$ports_file"; then
     rm -f -- "$temporary"
     return 1
@@ -88,19 +110,22 @@ PY
 
 next_available_port() {
   local occupied_port="$1"
-  local reserved_port="${2:-0}"
+  local reserved_port
+  shift
   valid_service_port "$occupied_port" || return 1
-  if [[ "$reserved_port" != 0 ]]; then
+  for reserved_port in "$@"; do
     valid_service_port "$reserved_port" || return 1
-  fi
-  python3 - "$occupied_port" "$reserved_port" <<'PY'
+  done
+  python3 - "$occupied_port" "$@" <<'PY'
+import itertools
 import socket
 import sys
 
-start, reserved = map(int, sys.argv[1:])
-ports = range(start + 1, 65536)
+start = int(sys.argv[1])
+reserved = set(map(int, sys.argv[2:]))
+ports = itertools.chain(range(start + 1, 65536), range(1024, start))
 for port in ports:
-    if port == reserved:
+    if port in reserved:
         continue
     listener = socket.socket()
     try:
@@ -119,27 +144,42 @@ select_service_port() {
   local service_name="$1"
   local override_name="$2"
   local desired_port="$3"
-  local reserved_port="$4"
-  local owned_listener="$5"
-  local interactive="$6"
-  local suggested_port selected_port
+  local owned_listener="$4"
+  local interactive="$5"
+  local suggested_port selected_port reserved_port collision_reason
+  local desired_is_reserved=false
+  shift 5
 
   valid_service_port "$desired_port" || return 1
-  if [[ "$reserved_port" != 0 ]]; then
+  for reserved_port do
     valid_service_port "$reserved_port" || return 1
-    [[ "$desired_port" != "$reserved_port" ]] || return 1
-  fi
-  if port_is_available "$desired_port" || [[ "$owned_listener" == true ]]; then
+    if [[ "$desired_port" == "$reserved_port" ]]; then
+      desired_is_reserved=true
+    fi
+  done
+  if [[ "$desired_is_reserved" == false ]] && \
+     { port_is_available "$desired_port" || [[ "$owned_listener" == true ]]; }; then
     printf '%s\n' "$desired_port"
     return 0
   fi
-  suggested_port="$(next_available_port "$desired_port" "$reserved_port")" || {
-    workflow_die "$service_name port $desired_port is occupied and no later port is available"
+  if [[ -n "${!override_name:-}" ]]; then
+    workflow_die "$service_name port $desired_port from $override_name is unavailable"
+    return 1
+  fi
+  suggested_port="$(next_available_port "$desired_port" "$@")" || {
+    workflow_die "$service_name port $desired_port is occupied and no alternate port is available"
     return 1
   }
+  collision_reason=occupied
+  if [[ "$desired_is_reserved" == true ]]; then
+    collision_reason='reserved by another Claudex service'
+  fi
   if [[ "$interactive" != true ]]; then
-    workflow_die "$service_name port $desired_port is occupied; set $override_name to an available port (suggested: $suggested_port)"
-    return 1
+    printf 'NOTICE: %s port %s is %s; using %s.\n' \
+      "$service_name" "$desired_port" "$collision_reason" \
+      "$suggested_port" >&2
+    printf '%s\n' "$suggested_port"
+    return 0
   fi
 
   while true; do
@@ -151,11 +191,15 @@ select_service_port() {
       printf 'Port must be an integer from 1024 through 65535.\n' >&2
       continue
     fi
-    if [[ "$selected_port" == "$reserved_port" ]]; then
-      printf 'Port %s is reserved by the other Claudex service.\n' \
-        "$selected_port" >&2
-      continue
-    fi
+    for reserved_port do
+      if [[ "$selected_port" == "$reserved_port" ]]; then
+        printf 'Port %s is reserved by another Claudex service.\n' \
+          "$selected_port" >&2
+        selected_port=
+        break
+      fi
+    done
+    [[ -n "$selected_port" ]] || continue
     if ! port_is_available "$selected_port"; then
       printf 'Port %s is also occupied.\n' "$selected_port" >&2
       continue
@@ -180,6 +224,9 @@ print_install_summary() {
   local headroom_port="${12}"
   local cliproxy_action="${13}"
   local headroom_action="${14}"
+  local claudex_proxy_service_file="${15}"
+  local claudex_proxy_port="${16}"
+  local claudex_proxy_action="${17}"
 
   printf '%s\n' \
     '' \
@@ -197,7 +244,9 @@ print_install_summary() {
     "  CLIProxyAPI: $cliproxy_action at 127.0.0.1:$cliproxy_port" \
     "    $cliproxy_service_file" \
     "  Headroom:    $headroom_action at 127.0.0.1:$headroom_port" \
-    "    $headroom_service_file"
+    "    $headroom_service_file" \
+    "  Claudex:     $claudex_proxy_action at 127.0.0.1:$claudex_proxy_port" \
+    "    $claudex_proxy_service_file"
 }
 
 service_definition_is_owned() {
@@ -248,6 +297,21 @@ def headroom_arguments_owned(arguments):
     ]
 
 
+def claudex_proxy_arguments_owned(arguments):
+    if not isinstance(arguments, list) or len(arguments) != 7:
+        return False
+    port = arguments[6]
+    return valid_port(port) and arguments == [
+        f"{data_root}/bin/claudex",
+        "--config",
+        f"{data_root}/model-config/current/claudex.toml",
+        "proxy",
+        "start",
+        "--port",
+        port,
+    ]
+
+
 raw = path.read_bytes()
 if b"<plist" in raw[:500]:
     document = plistlib.loads(raw)
@@ -260,6 +324,14 @@ if b"<plist" in raw[:500]:
                 "--config",
                 f"{data_root}/cliproxy.yaml",
             ]
+        )
+    elif kind == "claudex-proxy":
+        environment = document.get("EnvironmentVariables")
+        owned = (
+            document.get("Label") == "com.user.claudex-translation-proxy"
+            and claudex_proxy_arguments_owned(arguments)
+            and isinstance(environment, dict)
+            and environment.get("HOME") == os.environ.get("HOME")
         )
     else:
         labels = {
@@ -287,6 +359,17 @@ def decoded_words(value):
     return shlex.split(value.replace("%%", "%").replace("$$", "$"))
 
 
+def decoded_environment_words(value):
+    return shlex.split(value.replace("%%", "%"))
+
+
+def systemd_quote(value, escape_dollar=True):
+    value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if escape_dollar:
+        value = value.replace("$", "$$")
+    return f'"{value}"'
+
+
 exec_lines = [line[len("ExecStart="):] for line in lines if line.startswith("ExecStart=")]
 if len(exec_lines) != 1:
     raise SystemExit(1)
@@ -304,6 +387,43 @@ if kind == "cliproxy":
     raise SystemExit(0 if arguments == expected else 1)
 
 descriptions = [line for line in lines if line.startswith("Description=")]
+environment = {}
+for line in lines:
+    if not line.startswith("Environment="):
+        continue
+    try:
+        values = decoded_environment_words(line[len("Environment="):])
+    except ValueError:
+        raise SystemExit(1)
+    for value in values:
+        if "=" in value:
+            key, item = value.split("=", 1)
+            environment[key] = item
+
+if kind == "claudex-proxy":
+    port = arguments[6] if len(arguments) == 7 else ""
+    expected_exec = " ".join([
+        systemd_quote(f"{data_root}/bin/claudex"),
+        "--config",
+        systemd_quote(f"{data_root}/model-config/current/claudex.toml"),
+        "proxy",
+        "start",
+        "--port",
+        port,
+    ])
+    environment_lines = [line for line in lines if line.startswith("Environment=")]
+    expected_environment = "Environment=" + systemd_quote(
+        f"HOME={os.environ.get('HOME', '')}", escape_dollar=False
+    )
+    owned = (
+        descriptions == ["Description=Claudex translation proxy"]
+        and claudex_proxy_arguments_owned(arguments)
+        and exec_lines[0] == expected_exec
+        and environment_lines == [expected_environment]
+        and environment.get("HOME") == os.environ.get("HOME")
+    )
+    raise SystemExit(0 if owned else 1)
+
 expected_descriptions = {
     "new": {"Description=Claudex Headroom proxy"},
     "legacy": {"Description=Headroom proxy for Claudex"},
@@ -312,18 +432,6 @@ expected_descriptions = {
         "Description=Headroom proxy for Claudex",
     },
 }
-environment = {}
-for line in lines:
-    if not line.startswith("Environment="):
-        continue
-    try:
-        values = decoded_words(line[len("Environment="):])
-    except ValueError:
-        raise SystemExit(1)
-    for value in values:
-        if "=" in value:
-            key, item = value.split("=", 1)
-            environment[key] = item
 owned = (
     len(descriptions) == 1
     and descriptions[0] in expected_descriptions[mode]
@@ -341,6 +449,186 @@ cliproxy_service_is_owned() {
 
 headroom_service_is_owned() {
   service_definition_is_owned "$1" "$2" headroom "${3:-either}"
+}
+
+claudex_proxy_service_is_owned() {
+  service_definition_is_owned "$1" "$2" claudex-proxy
+}
+
+claudex_proxy_service_identity() {
+  local platform="$1"
+  case "$platform" in
+    darwin)
+      printf '%s\t%s\t%s\n' \
+        "$HOME/Library/LaunchAgents/com.user.claudex-translation-proxy.plist" \
+        'com.user.claudex-translation-proxy' '-'
+      ;;
+    systemd)
+      printf '%s\t%s\t%s\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-translation-proxy.service" \
+        '-' 'claudex-translation-proxy.service'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+managed_service_target_state() {
+  local platform="$1"
+  local label="$2"
+  local unit="$3"
+  local load_state output status
+  case "$platform" in
+    darwin)
+      if launchctl print "gui/$(id -u)/$label" \
+          >/dev/null 2>&1; then
+        printf 'loaded\n'
+        return 0
+      else
+        status=$?
+      fi
+      [[ "$status" -eq 113 ]] || return 1
+      printf 'absent\n'
+      ;;
+    systemd)
+      load_state="$(systemctl --user show --property LoadState --value \
+        "$unit" 2>/dev/null)" || return 1
+      case "$load_state" in
+        loaded) printf 'loaded\n' ;;
+        not-found) printf 'absent\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+managed_service_target_is_loaded() {
+  [[ "$(managed_service_target_state "$@")" == loaded ]]
+}
+
+managed_service_definition_path() {
+  local platform="$1"
+  local label="$2"
+  local unit="$3"
+  local output definition_path
+  case "$platform" in
+    darwin)
+      output="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null)" || \
+        return 1
+      definition_path="$(printf '%s\n' "$output" | awk '
+        sub(/^[[:space:]]*path = /, "") {print; exit}
+      ')"
+      ;;
+    systemd)
+      definition_path="$(systemctl --user show \
+        --property FragmentPath --value "$unit" 2>/dev/null)" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$definition_path" == /* ]] || return 1
+  printf '%s\n' "$definition_path"
+}
+
+managed_service_main_pid_value() {
+  local platform="$1"
+  local label="$2"
+  local unit="$3"
+  local output service_pid
+  case "$platform" in
+    darwin)
+      output="$(launchctl print "gui/$(id -u)/$label" 2>/dev/null)" || return 1
+      service_pid="$(printf '%s\n' "$output" | \
+        awk '$1 == "pid" && $2 == "=" && $3 ~ /^[1-9][0-9]*$/ {print $3; exit}')"
+      service_pid="${service_pid:-0}"
+      ;;
+    systemd)
+      output="$(systemctl --user show --property MainPID --value \
+        "$unit" 2>/dev/null)" || return 1
+      service_pid="$(printf '%s\n' "$output" | \
+        awk '$0 ~ /^(0|[1-9][0-9]*)$/ {print; exit}')"
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$service_pid" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  printf '%s\n' "$service_pid"
+}
+
+managed_service_main_pid() {
+  local service_pid
+  service_pid="$(managed_service_main_pid_value "$@")" || return 1
+  [[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "$service_pid"
+}
+
+pid_owns_loopback_listener() {
+  local service_pid="$1"
+  local port="$2"
+  local platform output
+  [[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  valid_service_port "$port" || return 1
+  platform="$(uname -s)" || return 1
+  case "$platform" in
+    Darwin)
+      command -v lsof >/dev/null 2>&1 || return 1
+      output="$(lsof -nP -a -p "$service_pid" \
+        -iTCP@127.0.0.1:"$port" -sTCP:LISTEN -t 2>/dev/null)" || return 1
+      printf '%s\n' "$output" | awk -v expected="$service_pid" '
+        $0 == expected {found = 1}
+        END {exit(found ? 0 : 1)}
+      '
+      ;;
+    Linux)
+      command -v ss >/dev/null 2>&1 || return 1
+      output="$(ss -H -ltnp "sport = :$port" 2>/dev/null)" || return 1
+      python3 - "$service_pid" "$port" "$output" <<'PY'
+import re
+import sys
+
+pid, port, output = sys.argv[1:]
+expected_address = f"127.0.0.1:{port}"
+pid_pattern = re.compile(rf"(?:^|[,()])pid={re.escape(pid)}(?:,|[)])")
+for line in output.splitlines():
+    fields = line.split()
+    if (
+        len(fields) >= 5
+        and fields[0] == "LISTEN"
+        and fields[3] == expected_address
+        and pid_pattern.search(line)
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+claudex_proxy_models_response_is_ready() {
+  local response_file="$1"
+  local expected_model="$2"
+  jq -e --arg model "$expected_model" '
+    .object == "list" and (.data | type == "array") and
+    any(.data[]?; .id == $model)
+  ' "$response_file" >/dev/null 2>&1
+}
+
+claudex_config_default_model() {
+  local config_file="$1"
+  [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
+  awk '
+    /^[[:space:]]*default_model[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*$/, "", value)
+      if (value == "" || found) exit 2
+      found = 1
+      model = value
+    }
+    END {
+      if (found == 1) print model
+      else exit 1
+    }
+  ' "$config_file"
 }
 
 validated_workflow_data_dir() {
@@ -1258,10 +1546,14 @@ render_claudex_config() {
   local claude_binary="${9:-}"
   local cliproxy_port="${10:-8317}"
   local headroom_port="${11:-8787}"
+  local claudex_proxy_port="${12:-13456}"
 
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$headroom_port" || return 1
-  [[ "$cliproxy_port" != "$headroom_port" ]] || return 1
+  valid_service_port "$claudex_proxy_port" || return 1
+  [[ "$cliproxy_port" != "$headroom_port" && \
+     "$cliproxy_port" != "$claudex_proxy_port" && \
+     "$headroom_port" != "$claudex_proxy_port" ]] || return 1
 
   if [[ -z "$claude_binary" ]]; then
     claude_binary="$(command -v claude)" || {
@@ -1272,7 +1564,7 @@ render_claudex_config() {
 
   printf '%s\n' \
     "claude_binary = \"$claude_binary\"" \
-    'proxy_port = 13456' \
+    "proxy_port = $claudex_proxy_port" \
     'proxy_host = "127.0.0.1"' \
     'log_level = "info"' \
     'hyperlinks = "auto"' \
@@ -1391,6 +1683,7 @@ render_discovered_claudex_config() {
   local output_file="$2"
   local cliproxy_port="${3:-8317}"
   local headroom_port="${4:-8787}"
+  local claudex_proxy_port="${5:-13456}"
   local model_ids gpt_models claude_models
   local fast_model balanced_model powerful_model
   local haiku_model sonnet_model opus_model
@@ -1411,7 +1704,7 @@ render_discovered_claudex_config() {
   render_claudex_config "$output_file" \
     "$powerful_model" "$fast_model" "$balanced_model" "$powerful_model" \
     "$haiku_model" "$sonnet_model" "$opus_model" "" \
-    "$cliproxy_port" "$headroom_port"
+    "$cliproxy_port" "$headroom_port" "$claudex_proxy_port"
 }
 
 extract_semver() {
@@ -1645,6 +1938,85 @@ render_systemd_user_unit() {
     "ExecStart=$executable --config $config" \
     'Restart=on-failure' \
     'RestartSec=5' \
+    "StandardOutput=$log" \
+    "StandardError=$log" \
+    '' \
+    '[Install]' \
+    'WantedBy=default.target' >"$output_file"
+}
+
+render_claudex_proxy_launch_agent() {
+  local output_file="$1"
+  local data_root="$2"
+  local port="${3:-13456}"
+  local escaped_binary escaped_config escaped_log escaped_home
+  valid_service_port "$port" || return 1
+  escaped_binary="$(xml_escape "$data_root/bin/claudex")"
+  escaped_config="$(xml_escape \
+    "$data_root/model-config/current/claudex.toml")"
+  escaped_log="$(xml_escape "$data_root/logs/claudex-proxy.log")"
+  escaped_home="$(xml_escape "$HOME")"
+  printf '%s\n' \
+    '<?xml version="1.0" encoding="UTF-8"?>' \
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+    '<plist version="1.0">' \
+    '<dict>' \
+    '  <key>Label</key>' \
+    '  <string>com.user.claudex-translation-proxy</string>' \
+    '  <key>ProgramArguments</key>' \
+    '  <array>' \
+    "    <string>$escaped_binary</string>" \
+    '    <string>--config</string>' \
+    "    <string>$escaped_config</string>" \
+    '    <string>proxy</string>' \
+    '    <string>start</string>' \
+    '    <string>--port</string>' \
+    "    <string>$port</string>" \
+    '  </array>' \
+    '  <key>RunAtLoad</key>' \
+    '  <true/>' \
+    '  <key>KeepAlive</key>' \
+    '  <true/>' \
+    '  <key>ProcessType</key>' \
+    '  <string>Background</string>' \
+    '  <key>Umask</key>' \
+    '  <integer>63</integer>' \
+    '  <key>StandardOutPath</key>' \
+    "  <string>$escaped_log</string>" \
+    '  <key>StandardErrorPath</key>' \
+    "  <string>$escaped_log</string>" \
+    '  <key>EnvironmentVariables</key>' \
+    '  <dict>' \
+    '    <key>HOME</key>' \
+    "    <string>$escaped_home</string>" \
+    '  </dict>' \
+    '</dict>' \
+    '</plist>' >"$output_file"
+}
+
+render_claudex_proxy_systemd_user_unit() {
+  local output_file="$1"
+  local data_root="$2"
+  local port="${3:-13456}"
+  local executable config log home_environment
+  valid_service_port "$port" || return 1
+  executable="$(systemd_quote "$data_root/bin/claudex")"
+  config="$(systemd_quote \
+    "$data_root/model-config/current/claudex.toml")"
+  log="$(systemd_quote "append:$data_root/logs/claudex-proxy.log")"
+  home_environment="$(systemd_environment_quote "HOME=$HOME")"
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=Claudex translation proxy' \
+    'Wants=claudex-headroom.service claudex-cliproxy.service' \
+    'After=claudex-headroom.service claudex-cliproxy.service' \
+    '' \
+    '[Service]' \
+    'Type=exec' \
+    "ExecStart=$executable --config $config proxy start --port $port" \
+    'Restart=always' \
+    'RestartSec=3' \
+    "Environment=$home_environment" \
     "StandardOutput=$log" \
     "StandardError=$log" \
     '' \

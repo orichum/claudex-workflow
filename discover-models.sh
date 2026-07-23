@@ -4,16 +4,18 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 
+MODEL_DISCOVERY_LOGIN_INCOMPLETE=42
+
 print_model_discovery_instruction() {
-  printf 'Next: claudex-login codex; claudex-login claude; %s/discover-models.sh\n' \
+  printf 'Next: claudex-login codex; claudex-login claude; %s/install.sh\n' \
     "$WORKFLOW_ROOT" >&2
 }
 
 discover_models_main_core() {
   local data_root generation_root candidate_dir models_file config_file active_generation
-  local cliproxy_port headroom_port
+  local cliproxy_port headroom_port claudex_proxy_port
   data_root="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || return 1
-  if ! IFS=$'\t' read -r cliproxy_port headroom_port \
+  if ! IFS=$'\t' read -r cliproxy_port headroom_port claudex_proxy_port \
       < <(read_service_ports "$data_root"); then
     print_model_discovery_instruction
     return 1
@@ -45,8 +47,25 @@ discover_models_main_core() {
     print_model_discovery_instruction
     return 1
   fi
+  if ! jq -e '
+      [.data[]?.id // empty] as $ids |
+      ($ids | index("gpt-5.6-luna")) != null and
+      ($ids | index("gpt-5.6-terra")) != null and
+      ($ids | index("gpt-5.6-sol")) != null and
+      ([$ids[] | select(. == "claude-haiku-4-5-20251001" or
+        . == "claude-haiku-4-5")] | length) > 0 and
+      ([$ids[] | select(. == "claude-sonnet-5" or
+        . == "claude-sonnet-4-6" or . == "claude-sonnet-4-5")] |
+        length) > 0 and
+      ($ids | index("claude-opus-4-8")) != null
+    ' "$models_file" >/dev/null 2>&1; then
+    rm -rf -- "$candidate_dir"
+    print_model_discovery_instruction
+    return "$MODEL_DISCOVERY_LOGIN_INCOMPLETE"
+  fi
   if ! render_discovered_claudex_config \
-      "$models_file" "$config_file" "$cliproxy_port" "$headroom_port"; then
+      "$models_file" "$config_file" "$cliproxy_port" "$headroom_port" \
+      "$claudex_proxy_port"; then
     rm -rf -- "$candidate_dir"
     print_model_discovery_instruction
     return 1
@@ -89,5 +108,7 @@ discover_models_main() (
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   set -euo pipefail
-  discover_models_main "$@"
+  printf 'ERROR: model discovery and publication are installer-owned; run %s/install.sh\n' \
+    "$WORKFLOW_ROOT" >&2
+  exit 2
 fi

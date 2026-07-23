@@ -10,7 +10,7 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
-if ! IFS=$'\t' read -r _ HEADROOM_PORT \
+if ! IFS=$'\t' read -r _ HEADROOM_PORT _CLAUDEX_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   printf 'ERROR: invalid Claudex service port configuration\n' >&2
   exit 1

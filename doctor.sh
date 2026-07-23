@@ -8,10 +8,20 @@ WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
 
 failures=0
-models_response="$(mktemp /tmp/claudex-doctor-models.XXXXXX)"
 doctor_fixture=""
+doctor_temp_dir=""
+models_response="/dev/null"
+claudex_models_response="/dev/null"
+check_ok() { printf 'OK   %s\n' "$1"; }
+check_fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
 cleanup_doctor_models() {
-  rm -f "$models_response"
+  if [[ -n "$doctor_temp_dir" ]]; then
+    case "$doctor_temp_dir" in
+      /tmp/claudex-doctor.*|/private/tmp/claudex-doctor.*)
+        rm -rf -- "$doctor_temp_dir"
+        ;;
+    esac
+  fi
   if [[ -n "$doctor_fixture" ]]; then
     case "$doctor_fixture" in
       /tmp/claudex-doctor-session.*|/private/tmp/claudex-doctor-session.*)
@@ -21,21 +31,105 @@ cleanup_doctor_models() {
   fi
 }
 trap cleanup_doctor_models EXIT
-
-check_ok() { printf 'OK   %s\n' "$1"; }
-check_fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
+if doctor_temp_dir="$(umask 077; mktemp -d /tmp/claudex-doctor.XXXXXX \
+    2>/dev/null)" && chmod 0700 "$doctor_temp_dir" 2>/dev/null; then
+  models_response="$doctor_temp_dir/models.response"
+  claudex_models_response="$doctor_temp_dir/claudex-models.response"
+else
+  check_fail 'doctor could not create private temporary state'
+fi
 
 service_ports_ok=true
-if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT \
+if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT CLAUDEX_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   service_ports_ok=false
   CLIPROXY_PORT=8317
   HEADROOM_PORT=8787
+  CLAUDEX_PROXY_PORT=13456
 fi
 if [[ "$service_ports_ok" == true ]]; then
-  check_ok "service ports are valid (CLIProxyAPI=$CLIPROXY_PORT, Headroom=$HEADROOM_PORT)"
+  check_ok "service ports are valid (CLIProxyAPI=$CLIPROXY_PORT, Headroom=$HEADROOM_PORT, Claudex=$CLAUDEX_PROXY_PORT)"
 else
   check_fail 'service port configuration is invalid'
+fi
+
+case "$(uname -s)" in
+  Darwin)
+    claudex_proxy_platform=darwin
+    if command -v lsof >/dev/null 2>&1; then
+      check_ok 'Claudex proxy PID/listener inspection has lsof'
+    else
+      check_fail 'Claudex proxy PID/listener inspection requires lsof'
+    fi
+    ;;
+  Linux)
+    claudex_proxy_platform=systemd
+    if command -v ss >/dev/null 2>&1; then
+      check_ok 'Claudex proxy PID/listener inspection has ss'
+    else
+      check_fail 'Claudex proxy PID/listener inspection requires ss (install iproute2)'
+    fi
+    ;;
+  *)
+    claudex_proxy_platform=""
+    check_fail 'Claudex proxy service management requires macOS, Linux, or WSL'
+    ;;
+esac
+
+claudex_proxy_service_file=""
+claudex_proxy_service_label=""
+claudex_proxy_service_unit=""
+claudex_proxy_definition_ok=false
+if [[ -n "$claudex_proxy_platform" ]] && \
+   IFS=$'\t' read -r \
+     claudex_proxy_service_file claudex_proxy_service_label claudex_proxy_service_unit \
+     < <(claudex_proxy_service_identity "$claudex_proxy_platform") && \
+   claudex_proxy_service_is_owned \
+     "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT"; then
+  claudex_proxy_target_state="$(managed_service_target_state \
+    "$claudex_proxy_platform" \
+    "$claudex_proxy_service_label" \
+    "$claudex_proxy_service_unit" 2>/dev/null || true)"
+  claudex_proxy_loaded_definition="$(managed_service_definition_path \
+    "$claudex_proxy_platform" \
+    "$claudex_proxy_service_label" \
+    "$claudex_proxy_service_unit" 2>/dev/null || true)"
+  if [[ "$claudex_proxy_target_state" == loaded && \
+        "$claudex_proxy_loaded_definition" == "$claudex_proxy_service_file" ]]; then
+    claudex_proxy_definition_ok=true
+  fi
+fi
+if [[ "$claudex_proxy_definition_ok" == true ]]; then
+  check_ok 'Claudex proxy definition is workflow-owned'
+else
+  check_fail 'Claudex proxy definition is workflow-owned'
+fi
+
+claudex_proxy_pid=""
+if [[ -n "$claudex_proxy_platform" ]]; then
+  claudex_proxy_pid="$(managed_service_main_pid \
+    "$claudex_proxy_platform" \
+    "$claudex_proxy_service_label" \
+    "$claudex_proxy_service_unit" 2>/dev/null || true)"
+fi
+if [[ -n "$claudex_proxy_pid" ]] && \
+   pid_owns_loopback_listener "$claudex_proxy_pid" "$CLAUDEX_PROXY_PORT"; then
+  check_ok "Claudex proxy service PID owns 127.0.0.1:$CLAUDEX_PROXY_PORT"
+else
+  check_fail "Claudex proxy service PID owns 127.0.0.1:$CLAUDEX_PROXY_PORT"
+fi
+
+claudex_controller_model="$(claudex_config_default_model \
+  "$CLAUDEX_CONFIG_FILE" 2>/dev/null || true)"
+if [[ -n "$claudex_controller_model" ]] && \
+   curl -fsS --connect-timeout 1 --max-time 2 \
+     "http://127.0.0.1:$CLAUDEX_PROXY_PORT/v1/models" \
+     >"$claudex_models_response" 2>/dev/null && \
+   claudex_proxy_models_response_is_ready \
+     "$claudex_models_response" "$claudex_controller_model"; then
+  check_ok 'Claudex proxy exposes the configured controller model'
+else
+  check_fail 'Claudex proxy exposes the configured controller model'
 fi
 
 file_mode() {

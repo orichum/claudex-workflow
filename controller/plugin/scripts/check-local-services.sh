@@ -5,7 +5,7 @@ WORKFLOW_ROOT="${CLAUDEX_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../
 # shellcheck source=../../../lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
-if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT \
+if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT CLAUDEX_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   jq -cn '{systemMessage:"Claudex health warning: service port configuration is invalid."}'
   exit 0
@@ -16,6 +16,8 @@ headroom_response=""
 headroom_error=""
 models_response=""
 models_error=""
+claudex_response=""
+claudex_error=""
 
 # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
@@ -30,6 +32,12 @@ cleanup() {
   fi
   if [[ -n "$models_error" ]]; then
     rm -f -- "$models_error" || :
+  fi
+  if [[ -n "$claudex_response" ]]; then
+    rm -f -- "$claudex_response" || :
+  fi
+  if [[ -n "$claudex_error" ]]; then
+    rm -f -- "$claudex_error" || :
   fi
   if [[ -n "$tmp_dir" ]]; then
     rmdir "$tmp_dir" 2>/dev/null || :
@@ -54,14 +62,19 @@ headroom_response="$tmp_dir/headroom.response"
 headroom_error="$tmp_dir/headroom.error"
 models_response="$tmp_dir/models.response"
 models_error="$tmp_dir/models.error"
+claudex_response="$tmp_dir/claudex.response"
+claudex_error="$tmp_dir/claudex.error"
 if ! (umask 077
   : >"$headroom_response"
   : >"$headroom_error"
   : >"$models_response"
   : >"$models_error"
+  : >"$claudex_response"
+  : >"$claudex_error"
   chmod 0600 \
     "$headroom_response" "$headroom_error" \
-    "$models_response" "$models_error"
+    "$models_response" "$models_error" \
+    "$claudex_response" "$claudex_error"
 ) 2>/dev/null; then
   emit_warning "Claudex health warning: local service health check could not secure response files."
   exit 0
@@ -75,9 +88,14 @@ curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
   "http://127.0.0.1:$CLIPROXY_PORT/v1/models" \
   >"$models_response" 2>"$models_error" &
 models_pid=$!
+curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+  "http://127.0.0.1:$CLAUDEX_PROXY_PORT/v1/models" \
+  >"$claudex_response" 2>"$claudex_error" &
+claudex_pid=$!
 
 headroom_status=0
 models_status=0
+claudex_status=0
 if wait "$headroom_pid"; then
   :
 else
@@ -88,10 +106,16 @@ if wait "$models_pid"; then
 else
   models_status=$?
 fi
+if wait "$claudex_pid"; then
+  :
+else
+  claudex_status=$?
+fi
 
 warning=""
-if [[ "$headroom_status" -ne 0 || "$models_status" -ne 0 ]]; then
-  warning="Claudex health warning: a bounded local Headroom or CLIProxyAPI request failed."
+if [[ "$headroom_status" -ne 0 || "$models_status" -ne 0 || \
+      "$claudex_status" -ne 0 ]]; then
+  warning="Claudex health warning: a bounded local Headroom, CLIProxyAPI, or Claudex proxy request failed."
 elif ! jq -e '
   .service == "headroom-proxy" and
   .status == "healthy" and
@@ -118,6 +142,17 @@ else
   fi
   if [[ -n "$missing_models" ]]; then
     warning="Claudex health warning: required model missing: $missing_models."
+  fi
+fi
+
+if [[ -z "$warning" ]]; then
+  claudex_config_file="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
+  claudex_controller_model="$(claudex_config_default_model \
+    "$claudex_config_file" 2>/dev/null || true)"
+  if [[ -z "$claudex_controller_model" ]] || \
+     ! claudex_proxy_models_response_is_ready \
+       "$claudex_response" "$claudex_controller_model"; then
+    warning="Claudex health warning: persistent Claudex proxy does not expose the configured controller model."
   fi
 fi
 

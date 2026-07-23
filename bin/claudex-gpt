@@ -40,6 +40,61 @@ unset inherited_claudex_variable
 CLAUDEX_CONFIG_FILE="$(model_config_file "$WORKFLOW_DATA_ROOT" claudex.toml)"
 
 umask 077
+if ! IFS=$'\t' read -r _CLIPROXY_PORT _HEADROOM_PORT CLAUDEX_PROXY_PORT \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT" 2>/dev/null); then
+  CLAUDEX_PROXY_PORT=13456
+fi
+proxy_not_ready() {
+  printf 'ERROR: persistent Claudex proxy is not ready at 127.0.0.1:%s; run claudex-doctor\n' \
+    "$CLAUDEX_PROXY_PORT" >&2
+  exit 1
+}
+valid_service_port "$CLAUDEX_PROXY_PORT" || proxy_not_ready
+case "$(uname -s)" in
+  Darwin) proxy_platform=darwin ;;
+  Linux) proxy_platform=systemd ;;
+  *) proxy_not_ready ;;
+esac
+if ! IFS=$'\t' read -r \
+    proxy_service_file proxy_service_label proxy_service_unit \
+    < <(claudex_proxy_service_identity "$proxy_platform" 2>/dev/null); then
+  proxy_not_ready
+fi
+claudex_proxy_service_is_owned \
+  "$proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+  >/dev/null 2>&1 || proxy_not_ready
+proxy_target_state="$(managed_service_target_state \
+  "$proxy_platform" "$proxy_service_label" "$proxy_service_unit" \
+  2>/dev/null)" || proxy_not_ready
+[[ "$proxy_target_state" == loaded ]] || proxy_not_ready
+proxy_loaded_definition="$(managed_service_definition_path \
+  "$proxy_platform" "$proxy_service_label" "$proxy_service_unit" \
+  2>/dev/null)" || proxy_not_ready
+[[ "$proxy_loaded_definition" == "$proxy_service_file" ]] || proxy_not_ready
+proxy_service_pid="$(managed_service_main_pid \
+  "$proxy_platform" "$proxy_service_label" "$proxy_service_unit" \
+  2>/dev/null)" || proxy_not_ready
+pid_owns_loopback_listener \
+  "$proxy_service_pid" "$CLAUDEX_PROXY_PORT" \
+  >/dev/null 2>&1 || proxy_not_ready
+controller_model="$(claudex_config_default_model \
+  "$CLAUDEX_CONFIG_FILE" 2>/dev/null)" || proxy_not_ready
+proxy_models_response="$(mktemp \
+  "${TMPDIR:-/tmp}/claudex-launch-models.XXXXXX" 2>/dev/null)" || proxy_not_ready
+cleanup_proxy_models() {
+  rm -f -- "$proxy_models_response"
+}
+trap cleanup_proxy_models EXIT
+if ! curl -fsS --connect-timeout 1 --max-time 2 \
+    "http://127.0.0.1:$CLAUDEX_PROXY_PORT/v1/models" \
+    >"$proxy_models_response" 2>/dev/null || \
+   ! claudex_proxy_models_response_is_ready \
+     "$proxy_models_response" "$controller_model"; then
+  proxy_not_ready
+fi
+cleanup_proxy_models
+trap - EXIT
+
 launch_dir="$(physical_pwd)"
 session_json="$({
   cd "$WORKFLOW_ROOT"
