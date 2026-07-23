@@ -1,77 +1,100 @@
 # Claudex workflow
 
-A portable Claude Code daily driver that combines GPT and Claude models in one automatically routed, high-effort workflow.
+A portable Claude Code daily driver that routes stable controller roles to any
+models exposed by CLIProxyAPI.
 
 **Supported:** macOS 13+ · glibc Linux · WSL2 with systemd
 
 ## Why use it
 
 - **One entry point:** `claudex-gpt` starts the isolated controller and its project-aware tools.
-- **Automatic delegation:** Sol stays inline for ordinary work and selects bounded specialists only when they materially improve the result.
+- **Provider-agnostic roles:** stable agent identities are resolved to the first
+  available model in the selected stack before launch.
+- **Automatic delegation:** the controller stays inline for ordinary work and selects bounded specialists only when they materially improve the result.
 - **Project-aware MCPs:** Docker MCP, MemPalace, and Graphify are exposed only when the current workspace needs them.
 - **Repeatable upgrades:** `./install.sh` stages and verifies workflow-owned updates before activation, with rollback on a failed transaction.
 
 ## How a request flows
 
-Every `claudex-gpt` process is a client of one workflow-owned Claudex translation proxy. The proxy outlives individual terminal sessions and forwards every GPT and Claude model call through Headroom and CLIProxyAPI. Headroom runs with `--lossless` and `--code-aware`; `HEADROOM_OUTPUT_SHAPER=0`, `HEADROOM_VERBOSITY_AUTOTUNE=0`, and `HEADROOM_EFFORT_ROUTER=0` prevent it from lowering effort, reshaping output, or truncating workers.
+Every `claudex-gpt` process is a client of one persistent Claudex translation proxy
+owned by this workflow. The proxy outlives individual terminal sessions
+and forwards selected model calls through Headroom and CLIProxyAPI. Headroom
+runs with `--lossless` and `--code-aware`; `HEADROOM_OUTPUT_SHAPER=0`,
+`HEADROOM_VERBOSITY_AUTOTUNE=0`, and `HEADROOM_EFFORT_ROUTER=0` prevent it from
+lowering effort, reshaping output, or truncating workers.
 
 ```mermaid
 flowchart LR
-    SessionA["claudex-gpt session A"] --> Translation["One persistent Claudex proxy"]
-    SessionB["claudex-gpt session B"] --> Translation
-    Translation --> Model{"Selected model"}
-    Model --> GPT["Sol or Terra"]
-    Model --> Claude["Sonnet or Opus"]
-    GPT --> Headroom["Headroom"]
-    Claude --> Headroom
-    Headroom --> API["CLIProxyAPI"]
-    API --> Codex["Codex OAuth"]
-    API --> ClaudeAuth["Claude OAuth"]
+    A["claudex-gpt"] --> B["Resolve project context"]
+    B --> C["Choose project modelStack or global defaultStack"]
+    C --> D["Read live CLIProxyAPI model catalogue"]
+    D --> E["Resolve controller and ordered agent candidates"]
+    E --> F["Create private run directory"]
+    F --> G["Write context.json, mcp.json, effective-models.json"]
+    G --> H["Generate session-private controller plugin"]
+    H --> I["Launch Claudex with selected controller"]
+    I --> J["Claude Code dispatches fixed role agents"]
+    J --> K["Anthropic wire request"]
+    K --> L["Headroom uses generated context limit"]
+    L --> M["CLIProxyAPI translates to selected provider"]
 ```
 
 <details>
 <summary>Plain-text flow</summary>
 
 ```text
-many claudex-gpt sessions
-  -> one persistent Claudex translation proxy
-  -> selected model: Sol | Terra | Sonnet | Opus
-  -> Headroom
-  -> CLIProxyAPI
-     -> Codex OAuth (GPT)
-     -> Claude OAuth (Claude)
+claudex-gpt
+  -> resolve project context
+  -> choose project modelStack or global defaultStack
+  -> read live CLIProxyAPI model catalogue
+  -> resolve controller and ordered agent candidates
+  -> create private run directory
+  -> write context.json, mcp.json, effective-models.json
+  -> generate session-private controller plugin
+  -> launch Claudex with selected controller
+  -> Claude Code dispatches fixed role agents
+  -> Anthropic wire request
+  -> Headroom uses generated context limit
+  -> CLIProxyAPI translates to selected provider
 ```
 
 </details>
 
-`gpt-5.6-sol` is the controller, normal writer, integrator, and final verifier. CLIProxyAPI routes each selected model to its configured provider login.
+The checked-in `balanced` stack preserves the familiar Sol, Terra, Sonnet, and
+Opus defaults. Those names are defaults, not routing logic: CLIProxyAPI routes
+each resolved model ID to its configured provider.
 
 ## What happens automatically
 
-You describe the task normally; workflows are not manually invoked. High effort stays enabled, while delegation remains selective to avoid unnecessary token use.
+You describe the task normally; workflows are not manually invoked. Stable role
+IDs keep orchestration independent of provider branding, while delegation
+remains selective to avoid unnecessary token use.
 
 ```mermaid
 flowchart TD
-    Task["User task"] --> Decide{"Sol evaluates scope and risk"}
-    Decide -->|"Small or latency-sensitive"| Inline["Sol stays inline"]
-    Decide -->|"Repository reconnaissance"| Terra["Terra explorer"]
-    Decide -->|"Independent critique"| Sonnet["Sonnet critic"]
-    Decide -->|"High-risk adjudication"| Opus["Opus architect"]
-    Decide -->|"Authorized isolated implementation"| Builder["Sol builder"]
-    Inline --> Integrate["Sol integrates and verifies"]
-    Terra --> Integrate
-    Sonnet --> Integrate
-    Opus --> Integrate
-    Builder --> Integrate
+    Task["User task"] --> Decide{"Controller evaluates scope and risk"}
+    Decide -->|"Small or latency-sensitive"| Inline["Controller stays inline"]
+    Decide -->|"Repository reconnaissance"| Explore["repository-explorer"]
+    Decide -->|"Independent verification"| Verify["repository-verifier"]
+    Decide -->|"Correctness critique"| Critic["correctness-critic"]
+    Decide -->|"High-risk adjudication"| Advise["architecture-advisor"]
+    Decide -->|"Authorized isolated implementation"| Worker["implementation-worker"]
+    Inline --> Integrate["Controller integrates and verifies"]
+    Explore --> Integrate
+    Verify --> Integrate
+    Critic --> Integrate
+    Advise --> Integrate
+    Worker --> Integrate
 ```
 
-| Path | Model | Purpose and authority |
+| Stable role | Portable default | Purpose and authority |
 | --- | --- | --- |
-| Sol controller | `gpt-5.6-sol` | High-effort controller and normal writer; works inline by default. |
-| Terra explorer/verifier | `gpt-5.6-terra` | Bounded read-only repository reconnaissance or independent verification. |
-| Sonnet critic | `claude-sonnet-5` | Bounded read-only model-diverse correctness and regression criticism. |
-| Opus architect | `claude-opus-4-8` | Reserved for high-risk read-only adjudication of security, authentication, concurrency, migration, irreversible architecture, or conflicting evidence. |
-| `sol-builder` | `gpt-5.6-sol` | Isolated implementation only with explicit authorization, a written plan, a clean committed baseline, and an exact disjoint path boundary. |
+| Controller | Sol (`gpt-5.6-sol`) | High-effort controller and normal writer; works inline by default. |
+| `repository-explorer` | Terra (`gpt-5.6-terra`) | Bounded read-only repository reconnaissance. |
+| `repository-verifier` | Terra (`gpt-5.6-terra`) | Bounded independent verification. |
+| `correctness-critic` | Sonnet (`claude-sonnet-5`) | Read-only model-diverse correctness and regression criticism. |
+| `architecture-advisor` | Opus (`claude-opus-4-8`) | Reserved for high-risk read-only adjudication of security, authentication, concurrency, migration, irreversible architecture, or conflicting evidence. |
+| `implementation-worker` | Sol (`gpt-5.6-sol`) | Isolated implementation only with explicit authorization, a written plan, a clean committed baseline, and an exact disjoint path boundary. |
 
 Heavy investigation and review workflows activate only for independent parallel investigations, repeated analysis across at least eight items, or a high-impact cross-check. They use bounded output schemas, never nest delegation, and report degraded or missing specialists instead of silently retrying.
 
@@ -79,7 +102,18 @@ Bundled skills and Ultracode are disabled. Frontend Design is included locally a
 
 ## Install and upgrade
 
-Required: Claude Code, `curl`, `jq`, `git`, Python 3.10+, `rg`, `tar`, and `uv`. Docker with Docker MCP Toolkit is optional unless a workspace uses a Docker profile.
+Required: Claude Code, `curl`, `jq`, `git`, Python 3.10+, `rg`, `tar`, and
+`uv`. Docker with Docker MCP Toolkit is optional unless a workspace uses a
+Docker profile.
+
+| Platform | Supported host | Service manager |
+| --- | --- | --- |
+| macOS | macOS 13 or newer | per-user LaunchAgents |
+| Linux | glibc-based distribution | systemd user services |
+| WSL | WSL2 with systemd enabled | systemd user services |
+
+Linux and WSL also require `ss` from the `iproute2` package for loopback
+listener ownership checks.
 
 ```bash
 git clone https://github.com/arvind9981/claudex-workflow.git
@@ -94,6 +128,14 @@ claudex-doctor
 The first installer run lays down verified binaries and provider-login commands. After both logins, the second run deliberately discovers the available models, publishes one coherent generated configuration, and reconciles the persistent translation proxy. Only the installer may publish that configuration or change workflow-owned services.
 
 The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, synchronizes declared Claude Code plugins, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. It does not patch upstream package source or installed package files.
+
+It also derives private `headroom/config/models.json` context limits from the
+registry in the exact CLIProxyAPI release being installed. Kimi, Google, and
+other provider limits are not pinned or hand-maintained here. When the registry
+contains the same model ID more than once, the lowest upstream context limit
+wins. Unchanged metadata does not restart Headroom. Changed metadata is
+preflighted with the staged runtime and is rolled back transactionally if
+activation fails.
 
 To update an existing checkout:
 
@@ -150,7 +192,7 @@ There are no background auto-updaters and no repository-managed version pins. Re
 ## Daily use
 
 ```bash
-claudex-gpt          # GPT controller with bounded GPT and Claude specialists
+claudex-gpt          # selected controller with bounded role-based specialists
 claude-headroom      # native Claude Code through Headroom
 claudex-headroom perf                       # workflow Headroom performance, last 7 days
 claudex-headroom perf --hours 24 --format json
@@ -160,7 +202,57 @@ claudex-doctor       # configuration, dependency, model, and service checks
 `claudex-headroom` reads only this workflow's private Headroom state and leaves
 any global Headroom installation untouched.
 
-Inside `claudex-gpt`, `/model opus` selects `claude-opus-4-8`; `/model gpt-5.6-sol` returns to Sol. Do not set `CLAUDE_CODE_SUBAGENT_MODEL` globally—the controller owns specialist selection.
+Do not set `CLAUDE_CODE_SUBAGENT_MODEL` globally—the selected stack and
+session-private controller plugin own specialist selection.
+
+## Provider-agnostic model stacks
+
+All routing policy lives in one version-controlled file:
+`controller/model-routing.json`. A stack names one controller model and ordered
+candidate arrays for the five fixed roles shown above. Model IDs are opaque:
+copy the exact ID reported by the live CLIProxyAPI catalogue; do not infer or
+shorten it.
+
+To add Kimi or Google OAuth models:
+
+```bash
+claudex-login kimi
+claudex-models list          # copy the actual Kimi model ID
+
+claudex-login antigravity
+claudex-models list          # copy the actual Google model IDs
+
+$EDITOR controller/model-routing.json
+claudex-models validate
+./install.sh
+```
+
+Add each exact ID to the `controller` field or to one or more ordered candidate
+arrays in `controller/model-routing.json`. `claudex-models validate` fails if
+the controller is unavailable or if any role exhausts its candidates. Custom
+API-key and OpenAI-compatible providers remain configured in CLIProxyAPI; once
+their IDs appear in `claudex-models list`, routing treats them the same way.
+Credentials and provider tokens never belong in Git.
+
+Select a stack for one registered workspace root:
+
+```bash
+claudex-context update ROOT --model-stack NAME
+claudex-context update ROOT --inherit-model-stack
+```
+
+The first command writes the project `modelStack`. The second clears that
+override so the project inherits the global `defaultStack`. New launches and
+resumed processes reload project context, routing policy, and the live model
+catalogue. An already-running process keeps its immutable mapping. Each launch
+writes private `context.json`, `mcp.json`, and `effective-models.json` files and
+generates a session-private plugin, so multiple concurrent sessions can safely
+use different stacks.
+
+The controller does not fall back: if its configured model is absent, launch
+stops before session state is used. Agent candidates fall back in declared order
+only during pre-launch resolution; an already-running agent is never switched
+mid-request.
 
 ## Manage Claudex plugins
 
@@ -297,9 +389,19 @@ The repository stores no credentials, generated archives, project memories, or G
 
 ## Diagnose, test, and rollback
 
-Run `claudex-doctor` after installation or when a dependency, generated configuration, service, project context, strict MCP fixture, or controller contract needs checking. The doctor performs disposable MemPalace and Graphify MCP handshakes and a non-billable Headroom-to-CLIProxyAPI routing check. Run `claudex-context validate` after manually editing context configuration.
+Run `claudex-doctor` after installation or when a dependency, generated
+configuration, service, project context, strict MCP fixture, or controller
+contract needs checking. Install and doctor use only release metadata and a
+non-billable sentinel for the Headroom-to-CLIProxyAPI boundary; they never send
+a paid provider prompt. Run `claudex-context validate` after manually editing
+context configuration.
 
-Paid provider requests never run during installation. Trigger them explicitly when you want end-to-end validation:
+Headroom applies compression at the generated context limit, but provider token
+accounting may remain approximate. This approximate token accounting does not
+mean the compression boundary is wrong. A real provider smoke request is always
+explicit:
+
+Trigger one only when you want end-to-end validation:
 
 ```bash
 ./smoke-test.sh gpt

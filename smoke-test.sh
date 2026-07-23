@@ -4,8 +4,53 @@ set -euo pipefail
 WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_DATA_ROOT="${CLAUDEX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow}"
 provider="${1:-gpt}"
-smoke_output="$(mktemp /tmp/claudex-smoke.XXXXXX)"
-trap 'rm -f "$smoke_output"' EXIT
+smoke_temp="$(mktemp -d /tmp/claudex-smoke.XXXXXX)"
+smoke_output="$smoke_temp/output"
+sessions_before="$smoke_temp/sessions.before"
+sessions_root="$WORKFLOW_DATA_ROOT/state/sessions"
+trap 'rm -rf "$smoke_temp"' EXIT
+
+list_session_dirs() {
+  [[ -d "$sessions_root" ]] || return 0
+  find "$sessions_root" -mindepth 1 -maxdepth 1 \
+    -type d -name 'run.*' -print | LC_ALL=C sort
+}
+
+list_session_dirs >"$sessions_before"
+
+new_effective_models_file() {
+  local candidate effective_file
+  local new_sessions=()
+  while IFS= read -r candidate; do
+    if ! grep -Fqx -- "$candidate" "$sessions_before"; then
+      new_sessions+=("$candidate")
+    fi
+  done < <(list_session_dirs)
+  if [[ "${#new_sessions[@]}" -ne 1 ]]; then
+    printf 'Expected exactly one new session run; found %d.\n' \
+      "${#new_sessions[@]}" >&2
+    return 1
+  fi
+  effective_file="${new_sessions[0]}/effective-models.json"
+  if ! jq -e '
+    .schemaVersion == 1 and
+    (.stack | type == "string" and length > 0) and
+    (.controller | type == "string" and length > 0) and
+    (.agents | type == "object") and
+    (.agents | keys == [
+      "architecture-advisor",
+      "correctness-critic",
+      "implementation-worker",
+      "repository-explorer",
+      "repository-verifier"
+    ]) and
+    (.agents | all(.[]; type == "string" and length > 0))
+  ' "$effective_file" >/dev/null 2>&1; then
+    printf 'New session effective model mapping is invalid.\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$effective_file"
+}
 
 if [[ "$provider" == "controller" ]]; then
   controller_prompt="$(cat <<EOF
@@ -31,6 +76,7 @@ EOF
     sed -n '1,80p' "$smoke_output" >&2
     exit 1
   fi
+  effective_models_file="$(new_effective_models_file)" || exit 1
 
   if ! jq -R -s -e \
     --arg expanded_review "$WORKFLOW_ROOT/controller/plugin/workflows/review.js" \
@@ -52,26 +98,6 @@ EOF
       (.input.args.subject | nonempty_string) and
       (.input.args.scope | nonempty_string) and
       .input.args.highRisk == false)
-  ' "$smoke_output" >/dev/null 2>&1; then
-    sed -n '1,80p' "$smoke_output" >&2
-    exit 1
-  fi
-
-  if ! jq -R -e '
-    def positive_output($model):
-      .modelUsage[$model] as $usage |
-      ($usage | type == "object") and
-      ($usage.outputTokens | type == "number" and . > 0);
-    fromjson? |
-    select(
-      .type == "result" and
-      .subtype == "success" and
-      .is_error == false and
-      (.modelUsage | type == "object") and
-      positive_output("gpt-5.6-sol") and
-      positive_output("gpt-5.6-terra") and
-      positive_output("claude-sonnet-5")
-    )
   ' "$smoke_output" >/dev/null 2>&1; then
     sed -n '1,80p' "$smoke_output" >&2
     exit 1
@@ -112,6 +138,32 @@ EOF
     exit 1
   fi
 
+  expected_models="$(jq -c '
+    [
+      .controller,
+      .agents["repository-verifier"],
+      .agents["correctness-critic"]
+    ] | unique
+  ' "$effective_models_file")"
+  if ! jq -R -e --argjson expected_models "$expected_models" '
+    def positive_output:
+      (type == "object") and
+      (.outputTokens | type == "number" and . > 0);
+    fromjson? |
+    select(
+      .type == "result" and
+      .subtype == "success" and
+      .is_error == false and
+      (.modelUsage | type == "object") and
+      (.modelUsage as $usage |
+        $expected_models |
+        all(.[]; . as $model | ($usage[$model] | positive_output)))
+    )
+  ' "$smoke_output" >/dev/null 2>&1; then
+    sed -n '1,80p' "$smoke_output" >&2
+    exit 1
+  fi
+
   printf 'PASS: automatic controller selected the audited Workflow\n'
   exit 0
 fi
@@ -119,13 +171,9 @@ fi
 case "$provider" in
   gpt)
     expected_reply='CLAUDEX_GPT_OK'
-    expected_model='gpt-5.6-sol'
-    model_args=()
     ;;
   claude)
     expected_reply='CLAUDEX_CLAUDE_OK'
-    expected_model='claude-opus-4-8'
-    model_args=(--model opus)
     ;;
   *)
     printf 'Usage: %s [gpt|claude|controller]\n' "$0" >&2
@@ -134,20 +182,26 @@ case "$provider" in
 esac
 
 if ! "$WORKFLOW_ROOT/bin/claudex-gpt" \
-  "${model_args[@]}" -p "Reply with exactly $expected_reply" \
+  -p "Reply with exactly $expected_reply" \
   --output-format json --max-turns 1 >"$smoke_output" 2>&1; then
   sed -n '1,80p' "$smoke_output" >&2
   exit 1
 fi
+effective_models_file="$(new_effective_models_file)" || exit 1
+selected_controller_model="$(jq -er '.controller' "$effective_models_file")"
 
 result_json="$(rg '^\{"type":"result"' "$smoke_output" | tail -1)"
-if jq -e --arg reply "$expected_reply" --arg model "$expected_model" \
-  '.subtype == "success" and
+if jq -e --arg reply "$expected_reply" --arg model "$selected_controller_model" \
+  'def positive_output:
+     (type == "object") and
+     (.outputTokens | type == "number" and . > 0);
+   .subtype == "success" and
    .is_error == false and
    .result == $reply and
-   (.modelUsage[$model].outputTokens | type == "number" and . > 0)' \
+   (.modelUsage | type == "object") and
+   (.modelUsage[$model] | positive_output)' \
   <<<"$result_json" >/dev/null; then
-  printf 'PASS: Claude Code completed through Claudex on %s\n' "$expected_model"
+  printf 'PASS: Claude Code completed through Claudex with positive output usage\n'
 else
   printf 'Unexpected Claude Code result.\n' >&2
   exit 1

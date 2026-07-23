@@ -1892,6 +1892,63 @@ import sys
 
 readme = open(sys.argv[1], encoding="utf-8").read()
 normalized_readme = " ".join(readme.split())
+required_readme_text = [
+    "Provider-agnostic model stacks",
+    "controller/model-routing.json",
+    "claudex-models list",
+    "claudex-models validate",
+    "claudex-login kimi",
+    "claudex-login antigravity",
+    "claudex-context update",
+    "--model-stack",
+    "repository-explorer",
+    "implementation-worker",
+    "effective-models.json",
+    "headroom/config/models.json",
+    "exact CLIProxyAPI release",
+    "approximate token accounting",
+    "The controller does not fall back",
+    "iproute2",
+    "`ss`",
+]
+for phrase in required_readme_text:
+    if phrase not in normalized_readme:
+        raise SystemExit(f"README is missing provider-agnostic routing detail: {phrase}")
+
+expected_daily_driver_flow = """```mermaid
+flowchart LR
+    A["claudex-gpt"] --> B["Resolve project context"]
+    B --> C["Choose project modelStack or global defaultStack"]
+    C --> D["Read live CLIProxyAPI model catalogue"]
+    D --> E["Resolve controller and ordered agent candidates"]
+    E --> F["Create private run directory"]
+    F --> G["Write context.json, mcp.json, effective-models.json"]
+    G --> H["Generate session-private controller plugin"]
+    H --> I["Launch Claudex with selected controller"]
+    I --> J["Claude Code dispatches fixed role agents"]
+    J --> K["Anthropic wire request"]
+    K --> L["Headroom uses generated context limit"]
+    L --> M["CLIProxyAPI translates to selected provider"]
+```"""
+if expected_daily_driver_flow not in readme:
+    raise SystemExit("README is missing the exact daily-driver routing flow")
+
+expected_plain_text_flow = """claudex-gpt
+  -> resolve project context
+  -> choose project modelStack or global defaultStack
+  -> read live CLIProxyAPI model catalogue
+  -> resolve controller and ordered agent candidates
+  -> create private run directory
+  -> write context.json, mcp.json, effective-models.json
+  -> generate session-private controller plugin
+  -> launch Claudex with selected controller
+  -> Claude Code dispatches fixed role agents
+  -> Anthropic wire request
+  -> Headroom uses generated context limit
+  -> CLIProxyAPI translates to selected provider"""
+if expected_plain_text_flow not in readme:
+    raise SystemExit("README plain-text flow does not mirror the routing diagram")
+
 required_headings = [
     "Why use it",
     "How a request flows",
@@ -1920,7 +1977,6 @@ required_copy = [
     "Terra",
     "Sonnet",
     "Opus",
-    "sol-builder",
     "CLIProxyAPI",
     "Headroom",
     "--lossless",
@@ -1981,17 +2037,9 @@ for phrase in required_copy:
 
 flow_section = readme.split("## How a request flows", 1)[1]
 flow_block = flow_section.split("```text", 1)[1].split("```", 1)[0]
-expected_flow = """many claudex-gpt sessions
-  -> one persistent Claudex translation proxy
-  -> selected model: Sol | Terra | Sonnet | Opus
-  -> Headroom
-  -> CLIProxyAPI
-     -> Codex OAuth (GPT)
-     -> Claude OAuth (Claude)"""
-if expected_flow not in flow_block:
+if expected_plain_text_flow not in flow_block:
     raise SystemExit(
-        "README request flow must connect selected model calls through "
-        "Headroom and CLIProxyAPI before provider routing"
+        "README plain-text request flow must mirror the provider-neutral diagram"
     )
 PY
 for documented_runtime_detail in \
