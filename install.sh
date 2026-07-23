@@ -993,9 +993,7 @@ if [[ "$headroom_restart_required" == true ]]; then
   preflight_headroom_binary || workflow_die \
     "private Headroom failed isolated preflight; the existing service was left running"
   if [[ "$headroom_models_changed" == changed ]]; then
-    rm -f -- "$headroom_models_file" || workflow_die \
-      "unsafe Headroom model metadata path could not be replaced"
-    activate_staged_file \
+    activate_private_file_atomic \
       "$desired_headroom_models" "$headroom_models_file" 0600
     [[ "$(private_file_change_state \
       "$desired_headroom_models" "$headroom_models_file" 600)" == unchanged ]] || \

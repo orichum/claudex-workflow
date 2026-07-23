@@ -232,7 +232,11 @@ arrays in `controller/model-routing.json`. `claudex-models validate` fails if
 the controller is unavailable or if any role exhausts its candidates. Custom
 API-key and OpenAI-compatible providers remain configured in CLIProxyAPI; once
 their IDs appear in `claudex-models list`, routing treats them the same way.
-Credentials and provider tokens never belong in Git.
+The list command always publishes every safe live catalogue ID, including
+unconfigured models. It also shows the resolved controller and role selections
+when the chosen stack is ready; if that stack cannot resolve, the catalogue is
+still listed with an `unresolved` status and warning. Credentials and provider
+tokens never belong in Git.
 
 Select a stack for one registered workspace root:
 
@@ -404,10 +408,13 @@ explicit:
 Trigger one only when you want end-to-end validation:
 
 ```bash
-./smoke-test.sh gpt
-./smoke-test.sh claude
+./smoke-test.sh provider
 ./smoke-test.sh controller
 ```
+
+The `provider` mode sends one minimal request through the session's routed
+controller and verifies positive usage for that exact effective model. The
+`controller` mode additionally exercises the audited multi-agent workflow.
 
 `./rollback.sh` disables only the workflow-owned `claudex-gpt` launcher link. It retains credentials, services, package data, project files, MemPalace data, and Graphify graphs.
 

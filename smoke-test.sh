@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_DATA_ROOT="${CLAUDEX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow}"
-provider="${1:-gpt}"
+provider="${1:-provider}"
 smoke_temp="$(mktemp -d /tmp/claudex-smoke.XXXXXX)"
 smoke_output="$smoke_temp/output"
 sessions_before="$smoke_temp/sessions.before"
@@ -169,14 +169,11 @@ EOF
 fi
 
 case "$provider" in
-  gpt)
-    expected_reply='CLAUDEX_GPT_OK'
-    ;;
-  claude)
-    expected_reply='CLAUDEX_CLAUDE_OK'
+  provider)
+    expected_reply='CLAUDEX_ROUTED_PROVIDER_OK'
     ;;
   *)
-    printf 'Usage: %s [gpt|claude|controller]\n' "$0" >&2
+    printf 'Usage: %s [provider|controller]\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -201,7 +198,7 @@ if jq -e --arg reply "$expected_reply" --arg model "$selected_controller_model" 
    (.modelUsage | type == "object") and
    (.modelUsage[$model] | positive_output)' \
   <<<"$result_json" >/dev/null; then
-  printf 'PASS: Claude Code completed through Claudex with positive output usage\n'
+  printf 'PASS: routed controller completed through Claudex with positive output usage\n'
 else
   printf 'Unexpected Claude Code result.\n' >&2
   exit 1

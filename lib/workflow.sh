@@ -1967,6 +1967,120 @@ activate_staged_file() {
   install -m "$mode" "$staged_path" "$destination"
 }
 
+activate_private_file_atomic() {
+  local staged_path="$1"
+  local destination="$2"
+  local mode="$3"
+  python3 - "$staged_path" "$destination" "$mode" <<'PY'
+import os
+from pathlib import Path
+import secrets
+import stat
+import sys
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+mode = int(sys.argv[3], 8)
+parent = destination.parent
+parent_stat = os.lstat(parent)
+if (
+    stat.S_ISLNK(parent_stat.st_mode)
+    or not stat.S_ISDIR(parent_stat.st_mode)
+    or parent_stat.st_uid != os.getuid()
+    or stat.S_IMODE(parent_stat.st_mode) != 0o700
+):
+    raise SystemExit("private destination directory is unsafe")
+source_stat = os.lstat(source)
+if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+    raise SystemExit("staged private file is unsafe")
+try:
+    destination_stat = os.lstat(destination)
+except FileNotFoundError:
+    destination_stat = None
+if destination_stat is not None and not (
+    stat.S_ISREG(destination_stat.st_mode)
+    or stat.S_ISLNK(destination_stat.st_mode)
+):
+    raise SystemExit("private destination is neither regular, symlink, nor absent")
+
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+no_follow = getattr(os, "O_NOFOLLOW", 0)
+directory_fd = os.open(parent, directory_flags | no_follow)
+source_fd = None
+temporary_fd = None
+temporary_name = f".{destination.name}.{secrets.token_hex(12)}"
+replaced = False
+try:
+    directory_stat = os.fstat(directory_fd)
+    if (directory_stat.st_dev, directory_stat.st_ino) != (
+        parent_stat.st_dev,
+        parent_stat.st_ino,
+    ):
+        raise OSError("private destination directory changed")
+    source_fd = os.open(source, os.O_RDONLY | no_follow)
+    if (os.fstat(source_fd).st_dev, os.fstat(source_fd).st_ino) != (
+        source_stat.st_dev,
+        source_stat.st_ino,
+    ):
+        raise OSError("staged private file changed")
+    temporary_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
+        mode,
+        dir_fd=directory_fd,
+    )
+    os.fchmod(temporary_fd, mode)
+    while True:
+        block = os.read(source_fd, 65536)
+        if not block:
+            break
+        offset = 0
+        while offset < len(block):
+            offset += os.write(temporary_fd, block[offset:])
+    os.fsync(temporary_fd)
+    temporary_stat = os.fstat(temporary_fd)
+    os.close(temporary_fd)
+    temporary_fd = None
+    os.replace(
+        temporary_name,
+        destination.name,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+    )
+    replaced = True
+    os.fsync(directory_fd)
+    final_stat = os.stat(
+        destination.name,
+        dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+    parent_after = os.lstat(parent)
+    if (
+        not stat.S_ISREG(final_stat.st_mode)
+        or final_stat.st_uid != os.getuid()
+        or stat.S_IMODE(final_stat.st_mode) != mode
+        or (final_stat.st_dev, final_stat.st_ino)
+        != (temporary_stat.st_dev, temporary_stat.st_ino)
+        or (parent_after.st_dev, parent_after.st_ino)
+        != (directory_stat.st_dev, directory_stat.st_ino)
+        or parent_after.st_uid != os.getuid()
+        or stat.S_IMODE(parent_after.st_mode) != 0o700
+    ):
+        raise OSError("private destination validation failed")
+finally:
+    if source_fd is not None:
+        os.close(source_fd)
+    if temporary_fd is not None:
+        os.close(temporary_fd)
+    if not replaced:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+    os.close(directory_fd)
+PY
+}
+
 backup_path() {
   local source_path="$1"
   local backup_dir="$2"

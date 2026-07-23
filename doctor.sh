@@ -248,15 +248,47 @@ jq -n '{
   nodes: [{id: "claudex-audit", label: "claudex-audit"}], links: []
 }' >"$fixture_project/graphify-out/graph.json"
 install -d -m 0755 "$fixture_workflow/integrations/common"
+fixture_plugin="$fixture_workflow/controller-plugin"
+install -d -m 0755 "$fixture_plugin" "$fixture_plugin/agents"
+install -m 0644 "$WORKFLOW_ROOT/controller/plugin/agents/"*.md \
+  "$fixture_plugin/agents/"
 install -m 0644 \
   "$WORKFLOW_ROOT/integrations/__init__.py" \
   "$fixture_workflow/integrations/__init__.py"
 install -m 0644 \
   "$WORKFLOW_ROOT/integrations/common/__init__.py" \
   "$WORKFLOW_ROOT/integrations/common/context_population.py" \
+  "$WORKFLOW_ROOT/integrations/common/model_routing.py" \
   "$WORKFLOW_ROOT/integrations/common/project_context.py" \
   "$WORKFLOW_ROOT/integrations/common/session_config.py" \
   "$fixture_workflow/integrations/common/"
+jq -n '{
+  schemaVersion: 1,
+  defaultStack: "fixture",
+  stacks: {
+    fixture: {
+      controller: "provider/controller",
+      agents: {
+        "repository-explorer": ["provider/explorer"],
+        "repository-verifier": ["provider/verifier"],
+        "correctness-critic": ["provider/critic"],
+        "architecture-advisor": ["provider/architect"],
+        "implementation-worker": ["provider/worker"]
+      }
+    }
+  }
+}' >"$doctor_fixture/model-routing.json"
+jq -n '{
+  object: "list",
+  data: [
+    {id: "provider/controller"},
+    {id: "provider/explorer"},
+    {id: "provider/verifier"},
+    {id: "provider/critic"},
+    {id: "provider/architect"},
+    {id: "provider/worker"}
+  ]
+}' >"$doctor_fixture/models.json"
 jq -n \
   --arg palace "$fixture_palace" \
   --arg root "$fixture_project" \
@@ -270,7 +302,10 @@ if fixture_session_json="$({
     --workflow-root "$fixture_workflow" \
     --data-root "$fixture_data" \
     --launch-dir "$fixture_project" \
-    --config "$doctor_fixture/project-context.json"
+    --config "$doctor_fixture/project-context.json" \
+    --routing-config "$doctor_fixture/model-routing.json" \
+    --models-file "$doctor_fixture/models.json" \
+    --plugin-source "$fixture_plugin"
 } 2>/dev/null)" && \
    fixture_mcp="$(jq -er '.mcpFile' <<<"$fixture_session_json" 2>/dev/null)" && \
    [[ "$fixture_mcp" == "$fixture_data/state/sessions/"run.*/mcp.json ]] && \
@@ -605,7 +640,18 @@ for entry in entries:
         stat.S_ISDIR(observed.st_mode)
         and observed.st_uid == os.getuid()
     ):
-        owned.append((observed.st_mtime_ns, entry.name))
+        completion = sessions / entry.name / ".complete"
+        try:
+            completed = os.lstat(completion)
+        except OSError:
+            continue
+        if (
+            stat.S_ISREG(completed.st_mode)
+            and not stat.S_ISLNK(completed.st_mode)
+            and completed.st_uid == os.getuid()
+            and stat.S_IMODE(completed.st_mode) == 0o600
+        ):
+            owned.append((completed.st_mtime_ns, entry.name))
 if owned:
     print(sessions / max(owned)[1])
 PY

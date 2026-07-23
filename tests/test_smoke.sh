@@ -33,11 +33,7 @@ chmod 0600 "$session_dir/effective-models.json"
 
 printf 'warning: offline fixture diagnostic\n' >&2
 if [[ " $* " != *" --output-format stream-json "* ]]; then
-  if [[ " $* " == *" CLAUDEX_CLAUDE_OK "* ]]; then
-    provider_reply=CLAUDEX_CLAUDE_OK
-  else
-    provider_reply=CLAUDEX_GPT_OK
-  fi
+  provider_reply=CLAUDEX_ROUTED_PROVIDER_OK
   provider_model=provider/controller-model
   [[ "${SMOKE_PROVIDER_SUBSTITUTE:-0}" == 1 ]] && \
     provider_model=provider/unrelated-model
@@ -148,16 +144,23 @@ assert_fails degraded
 assert_fails duplicate-workflow
 assert_fails duplicate-record
 
-gpt_output="$(bash "$fixture_root/smoke-test.sh" gpt)"
-[[ "$gpt_output" == 'PASS: Claude Code completed through Claudex with positive output usage' ]]
-claude_output="$(bash "$fixture_root/smoke-test.sh" claude)"
-[[ "$claude_output" == 'PASS: Claude Code completed through Claudex with positive output usage' ]]
-if SMOKE_PROVIDER_ZERO=1 bash "$fixture_root/smoke-test.sh" gpt >/dev/null 2>&1; then
+provider_output="$(bash "$fixture_root/smoke-test.sh" provider)"
+[[ "$provider_output" == 'PASS: routed controller completed through Claudex with positive output usage' ]]
+if bash "$fixture_root/smoke-test.sh" gpt >/dev/null 2>&1; then
+  printf 'provider smoke still accepted the misleading gpt mode\n' >&2
+  exit 1
+fi
+if bash "$fixture_root/smoke-test.sh" claude >/dev/null 2>&1; then
+  printf 'provider smoke still accepted the misleading claude mode\n' >&2
+  exit 1
+fi
+if SMOKE_PROVIDER_ZERO=1 \
+    bash "$fixture_root/smoke-test.sh" provider >/dev/null 2>&1; then
   printf 'provider smoke accepted zero output usage\n' >&2
   exit 1
 fi
 if SMOKE_PROVIDER_SUBSTITUTE=1 \
-    bash "$fixture_root/smoke-test.sh" gpt >/dev/null 2>&1; then
+    bash "$fixture_root/smoke-test.sh" provider >/dev/null 2>&1; then
   printf 'provider smoke accepted unrelated positive usage\n' >&2
   exit 1
 fi

@@ -32,6 +32,49 @@ trap 'rm -rf -- "$fixture"' EXIT
 source "$ROOT/lib/workflow.sh"
 data_root="$fixture/data with % and \$"
 
+headroom_atomic_root="$fixture/headroom-atomic"
+install -d -m 0700 "$headroom_atomic_root"
+printf 'new metadata\n' >"$headroom_atomic_root/staged"
+printf 'symlink target\n' >"$headroom_atomic_root/symlink-target"
+for destination_state in absent regular symlink; do
+  destination="$headroom_atomic_root/models-$destination_state.json"
+  case "$destination_state" in
+    absent) ;;
+    regular)
+      printf 'old metadata\n' >"$destination"
+      chmod 0600 "$destination"
+      ;;
+    symlink)
+      ln -s "$headroom_atomic_root/symlink-target" "$destination"
+      ;;
+  esac
+  activate_private_file_atomic \
+    "$headroom_atomic_root/staged" "$destination" 0600
+  [[ -f "$destination" && ! -L "$destination" ]]
+  [[ "$(cat "$destination")" == 'new metadata' ]]
+  [[ "$(path_mode "$destination")" == 600 ]]
+done
+[[ "$(cat "$headroom_atomic_root/symlink-target")" == 'symlink target' ]]
+python3 - "$ROOT/lib/workflow.sh" "$ROOT/install.sh" <<'PY'
+import sys
+
+workflow = open(sys.argv[1], encoding="utf-8").read()
+installer = open(sys.argv[2], encoding="utf-8").read()
+start = workflow.index("activate_private_file_atomic()")
+end = workflow.index("\n}\n", start)
+helper = workflow[start:end]
+for proof in ("os.O_EXCL", "os.fsync", "os.replace"):
+    if proof not in helper:
+        raise SystemExit(f"private activation lacks {proof}")
+if helper.index("os.fsync") > helper.index("os.replace"):
+    raise SystemExit("private activation does not fsync content before rename")
+cutover = installer[installer.index('if [[ "$headroom_restart_required" == true ]]'):]
+if 'rm -f -- "$headroom_models_file"' in cutover:
+    raise SystemExit("Headroom model cutover still has a deletion window")
+if 'activate_private_file_atomic' not in cutover:
+    raise SystemExit("Headroom model cutover is not crash-atomic")
+PY
+
 headroom_cli_root="$fixture/headroom-cli"
 install -d "$headroom_cli_root/headroom/bin"
 printf '%s\n' \
@@ -1398,12 +1441,36 @@ fi
 health_hook_fixture="$fixture/session-health-hook"
 health_hook_data="$health_hook_fixture/data"
 health_hook_tools="$health_hook_fixture/tools"
-install -d -m 0700 "$health_hook_data" "$health_hook_tools"
+health_hook_run="$health_hook_data/state/sessions/run.provider-neutral"
+install -d -m 0700 \
+  "$health_hook_data" "$health_hook_tools" \
+  "$health_hook_data/state" "$health_hook_data/state/sessions" \
+  "$health_hook_run"
 write_service_ports "$health_hook_data" 18317 18787 13457
 printf '%s\n' \
   '[model]' \
-  'default_model = "gpt-5.6-sol"' \
+  'default_model = "provider/controller"' \
   >"$health_hook_data/claudex.toml"
+jq -n '{
+  schemaVersion: 1,
+  stack: "provider-neutral",
+  controller: "provider/controller",
+  configuredCandidates: {
+    "repository-explorer": ["provider/explorer"],
+    "repository-verifier": ["provider/verifier"],
+    "correctness-critic": ["provider/critic"],
+    "architecture-advisor": ["provider/architect"],
+    "implementation-worker": ["provider/worker"]
+  },
+  agents: {
+    "repository-explorer": "provider/explorer",
+    "repository-verifier": "provider/verifier",
+    "correctness-critic": "provider/critic",
+    "architecture-advisor": "provider/architect",
+    "implementation-worker": "provider/worker"
+  }
+}' >"$health_hook_run/effective-models.json"
+chmod 0600 "$health_hook_run/effective-models.json"
 cat >"$health_hook_tools/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1415,12 +1482,16 @@ case "$url" in
     ;;
   http://127.0.0.1:18317/v1/models)
     marker=cliproxy
-    printf '%s\n' '{"data":[{"id":"gpt-5.6-sol"},{"id":"claude-opus-4-8"}]}'
+    if [[ "${HOOK_CATALOG_MODE:-ready}" == ready ]]; then
+      printf '%s\n' '{"data":[{"id":"provider/controller"},{"id":"provider/explorer"},{"id":"provider/verifier"},{"id":"provider/critic"},{"id":"provider/architect"},{"id":"provider/worker"}]}'
+    else
+      printf '%s\n' '{"data":[{"id":"provider/controller"}]}'
+    fi
     ;;
   http://127.0.0.1:13457/v1/models)
     marker=claudex
     if [[ "${HOOK_CLAUDEX_MODE:-ready}" == ready ]]; then
-      printf '%s\n' '{"object":"list","data":[{"id":"gpt-5.6-sol"}]}'
+      printf '%s\n' '{"object":"list","data":[{"id":"provider/controller"}]}'
     else
       printf '%s\n' '{"object":"list","data":[]}'
     fi
@@ -1444,6 +1515,8 @@ install -d -m 0700 "$health_hook_barrier"
 health_hook_output="$(
   CLAUDEX_DATA_DIR="$health_hook_data" \
   CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  CLAUDEX_RUN_DIR="$health_hook_run" \
+  CLAUDEX_EFFECTIVE_MODELS_FILE="$health_hook_run/effective-models.json" \
   HOOK_REQUIRE_CONCURRENCY=1 \
   HOOK_BARRIER_DIR="$health_hook_barrier" \
   PATH="$health_hook_tools:$PATH" \
@@ -1453,6 +1526,21 @@ health_hook_output="$(
 health_hook_output="$(
   CLAUDEX_DATA_DIR="$health_hook_data" \
   CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  CLAUDEX_RUN_DIR="$health_hook_run" \
+  CLAUDEX_EFFECTIVE_MODELS_FILE="$health_hook_run/effective-models.json" \
+  HOOK_CATALOG_MODE=missing \
+  PATH="$health_hook_tools:$PATH" \
+    "$ROOT/controller/plugin/scripts/check-local-services.sh"
+)"
+jq -e '
+  (.systemMessage | type == "string") and
+  (.systemMessage | contains("required effective model"))
+' <<<"$health_hook_output" >/dev/null
+health_hook_output="$(
+  CLAUDEX_DATA_DIR="$health_hook_data" \
+  CLAUDEX_WORKFLOW_ROOT="$ROOT" \
+  CLAUDEX_RUN_DIR="$health_hook_run" \
+  CLAUDEX_EFFECTIVE_MODELS_FILE="$health_hook_run/effective-models.json" \
   HOOK_CLAUDEX_MODE=missing \
   PATH="$health_hook_tools:$PATH" \
     "$ROOT/controller/plugin/scripts/check-local-services.sh"
@@ -1550,7 +1638,12 @@ case "$url" in
   *) exit 22 ;;
 esac
 EOF
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' \
+  >"$doctor_proxy_tools/mempalace-mcp"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' \
+  >"$doctor_proxy_tools/graphify-mcp"
 chmod 0755 "$doctor_proxy_tools"/*
+ln -s "$(command -v python3)" "$doctor_proxy_tools/python3"
 
 run_proxy_doctor_case() {
   local case_name="$1"
@@ -1574,6 +1667,13 @@ rg -Fxq 'OK   Claudex proxy exposes the configured controller model' \
   "$doctor_proxy_fixture/healthy.output"
 rg -Fxq 'OK   Headroom model metadata matches CLIProxyAPI 1.0.0' \
   "$doctor_proxy_fixture/healthy.output"
+if ! rg -Fxq \
+    'OK   disposable strict MCP generation exposes only supported integrations' \
+    "$doctor_proxy_fixture/healthy.output"; then
+  rg 'disposable strict|MCP generation' \
+    "$doctor_proxy_fixture/healthy.output" >&2 || true
+  exit 1
+fi
 
 run_proxy_doctor_case definition-failure DOCTOR_TARGET_STATE=not-found
 rg -Fxq 'FAIL Claudex proxy definition is workflow-owned' \
@@ -1599,14 +1699,23 @@ rg -Fxq 'OK   Claudex proxy service PID owns 127.0.0.1:13457' \
 rg -Fxq 'FAIL Claudex proxy exposes the configured controller model' \
   "$doctor_proxy_fixture/model-failure.output"
 
+install -d -m 0700 \
+  "$doctor_proxy_data/state/sessions/run.partial-newest"
+run_proxy_doctor_case partial-newest-session
+rg -Fxq 'OK   no prior effective session to inspect' \
+  "$doctor_proxy_fixture/partial-newest-session.output"
 install -d -m 0755 \
-  "$doctor_proxy_data/state/sessions/run.unsafe-newest"
-run_proxy_doctor_case unsafe-newest-session
+  "$doctor_proxy_data/state/sessions/run.unsafe-completed"
+printf '{}\n' \
+  >"$doctor_proxy_data/state/sessions/run.unsafe-completed/.complete"
+chmod 0600 \
+  "$doctor_proxy_data/state/sessions/run.unsafe-completed/.complete"
+run_proxy_doctor_case unsafe-completed-session
 rg -Fxq 'FAIL latest session effective mapping is internally inconsistent' \
-  "$doctor_proxy_fixture/unsafe-newest-session.output"
+  "$doctor_proxy_fixture/unsafe-completed-session.output"
 if rg -Fxq 'OK   no prior effective session to inspect' \
-    "$doctor_proxy_fixture/unsafe-newest-session.output"; then
-  printf 'doctor skipped the newest owned session with an unsafe mode\n' >&2
+    "$doctor_proxy_fixture/unsafe-completed-session.output"; then
+  printf 'doctor skipped the newest completed session with an unsafe mode\n' >&2
   exit 1
 fi
 rg -Fq 'UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/headroom/tools"' "$ROOT/install.sh"
@@ -2005,8 +2114,7 @@ required_copy = [
     "graphify-out/graph.json",
     "CLAUDEX_DATA_DIR",
     "claudex-doctor",
-    "./smoke-test.sh gpt",
-    "./smoke-test.sh claude",
+    "./smoke-test.sh provider",
     "./smoke-test.sh controller",
     "./rollback.sh",
     "gpt-5.6-sol",

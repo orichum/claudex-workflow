@@ -67,7 +67,8 @@ jq -n '{
     {id: "provider/verifier-fallback"},
     {id: "provider/critic-fallback"},
     {id: "provider/architect-fallback"},
-    {id: "provider/worker-fallback"}
+    {id: "provider/worker-fallback"},
+    {id: "provider/unconfigured-live"}
   ]
 }' >"$fixture/models.json"
 jq -n '{
@@ -117,6 +118,8 @@ rg -Fq 'STATUS' <<<"$list_output"
 rg -Fq 'portable' <<<"$list_output"
 rg -Fq 'global' <<<"$list_output"
 rg -Fq 'controller' <<<"$list_output"
+rg -Fq 'provider/unconfigured-live' <<<"$list_output"
+rg -Fq 'unconfigured' <<<"$list_output"
 for role_and_model in \
   'repository-explorer explorer' \
   'repository-verifier verifier' \
@@ -134,6 +137,33 @@ done
 rg -Fq 'http://127.0.0.1:18317/v1/models' "$fixture/curl.args"
 rg -Fq -- '--connect-timeout 1' "$fixture/curl.args"
 rg -Fq -- '--max-time 4' "$fixture/curl.args"
+[[ -z "$(find "$temporary" -mindepth 1 -print -quit)" ]]
+
+unresolved_list_status=0
+(
+  cd "$elsewhere"
+  CLAUDEX_DATA_DIR="$data_root" \
+  MODELS_CURL_ARGS="$fixture/curl.args" \
+  MODELS_FIXTURE="$fixture/models-without-controller.json" \
+  TMPDIR="$temporary" \
+  PATH="$tools:$PATH" \
+    "$workflow/bin/claudex-models" list \
+      >"$fixture/unresolved-list.stdout" \
+      2>"$fixture/unresolved-list.stderr"
+) || unresolved_list_status=$?
+[[ "$unresolved_list_status" -eq 0 ]]
+for live_model in \
+  provider/explorer-fallback \
+  provider/verifier-fallback \
+  provider/critic-fallback \
+  provider/architect-fallback \
+  provider/worker-fallback
+do
+  rg -Fq "$live_model" "$fixture/unresolved-list.stdout"
+done
+rg -Fq 'unresolved' "$fixture/unresolved-list.stdout"
+rg -Fq 'controller provider/controller is unavailable' \
+  "$fixture/unresolved-list.stderr"
 [[ -z "$(find "$temporary" -mindepth 1 -print -quit)" ]]
 
 validate_output="$(

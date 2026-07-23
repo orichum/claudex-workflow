@@ -168,6 +168,10 @@ class SessionConfigTests(unittest.TestCase):
         session = self.create()
 
         self.assertEqual(stat.S_IMODE(session.run_dir.stat().st_mode), 0o700)
+        completion = session.run_dir / ".complete"
+        self.assertTrue(completion.is_file())
+        self.assertFalse(completion.is_symlink())
+        self.assertEqual(stat.S_IMODE(completion.stat().st_mode), 0o600)
         self.assertEqual(
             stat.S_IMODE(session.context_file.stat().st_mode), 0o600
         )
@@ -207,6 +211,47 @@ class SessionConfigTests(unittest.TestCase):
             session.effective_models_sha256,
         )
         self.assertEqual(verified, session)
+
+    def test_create_session_removes_incomplete_run_after_failure(self) -> None:
+        real_atomic_json = session_config.atomic_json
+
+        def fail_mcp(path, payload, mode=0o600):
+            if Path(path).name == "mcp.json":
+                raise SessionError("injected MCP publication failure")
+            return real_atomic_json(path, payload, mode)
+
+        with mock.patch.object(
+            session_config, "atomic_json", side_effect=fail_mcp
+        ):
+            with self.assertRaisesRegex(SessionError, "injected MCP"):
+                self.create()
+
+        sessions = self.runtime / "state" / "sessions"
+        self.assertEqual(list(sessions.glob("run.*")), [])
+
+    def test_create_session_removes_run_when_initial_fsync_fails(self) -> None:
+        real_fsync_directory = session_config._fsync_directory
+        failed = False
+
+        def fail_session_publication(directory):
+            nonlocal failed
+            if Path(directory).name == "sessions" and not failed:
+                failed = True
+                raise OSError("injected session directory fsync failure")
+            return real_fsync_directory(directory)
+
+        with mock.patch.object(
+            session_config,
+            "_fsync_directory",
+            side_effect=fail_session_publication,
+        ):
+            with self.assertRaisesRegex(
+                SessionError, "session directory could not be created"
+            ):
+                self.create()
+
+        sessions = self.runtime / "state" / "sessions"
+        self.assertEqual(list(sessions.glob("run.*")), [])
 
     def test_two_sessions_keep_independent_plugins(self) -> None:
         first = self.create(stack="balanced", models=self.first_catalog)

@@ -231,6 +231,96 @@ def _render_stack_table(
     ) + "\n"
 
 
+def _selected_routes(effective: Optional[EffectiveStack]) -> dict[str, list[str]]:
+    selected: dict[str, list[str]] = {}
+    if effective is None:
+        return selected
+    selected.setdefault(effective.controller, []).append("controller")
+    for role in ROLES:
+        selected.setdefault(effective.agents[role], []).append(role)
+    return selected
+
+
+def _configured_models(
+    routing: Mapping[str, object], requested_stack: Optional[str]
+) -> set[str]:
+    name = requested_stack or str(routing["defaultStack"])
+    stacks = routing["stacks"]
+    if not isinstance(stacks, Mapping) or name not in stacks:
+        return set()
+    stack = stacks[name]
+    if not isinstance(stack, Mapping):
+        return set()
+    configured = {str(stack["controller"])}
+    candidates = stack["agents"]
+    if isinstance(candidates, Mapping):
+        for role in ROLES:
+            configured.update(str(model) for model in candidates[role])
+    return configured
+
+
+def _render_catalogue_table(
+    routing: Mapping[str, object],
+    catalogue: Sequence[str],
+    requested_stack: Optional[str],
+    effective: Optional[EffectiveStack],
+) -> str:
+    selected = _selected_routes(effective)
+    configured = _configured_models(routing, requested_stack)
+    rows = []
+    for model in catalogue:
+        if model in selected:
+            route = "selected: " + ", ".join(selected[model])
+        elif model in configured:
+            route = "configured candidate"
+        else:
+            route = "unconfigured"
+        rows.append((model, route))
+    headers = ("MODEL", "ROUTING")
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    ]
+
+    def render(values: Sequence[str]) -> str:
+        return " | ".join(
+            value.ljust(width) for value, width in zip(values, widths)
+        ).rstrip()
+
+    return "\n".join(
+        (
+            render(headers),
+            "-+-".join("-" * width for width in widths),
+            *(render(row) for row in rows),
+        )
+    ) + "\n"
+
+
+def _render_unresolved_stack(
+    routing: Mapping[str, object], requested_stack: Optional[str], scope: str
+) -> str:
+    name = requested_stack or str(routing["defaultStack"])
+    headers = ("STACK", "SCOPE", "STATUS")
+    row = (name, scope, "unresolved")
+    widths = [
+        max(len(headers[index]), len(row[index]))
+        for index in range(len(headers))
+    ]
+
+    def render(values: Sequence[str]) -> str:
+        return " | ".join(
+            value.ljust(width) for value, width in zip(values, widths)
+        ).rstrip()
+
+    return "\n".join(
+        (
+            render(headers),
+            "-+-".join("-" * width for width in widths),
+            render(row),
+        )
+    ) + "\n"
+
+
 def _write_effective(path: Path, effective: EffectiveStack) -> None:
     payload = (
         json.dumps(
@@ -261,11 +351,35 @@ def main(arguments: Optional[list[str]] = None) -> int:
     try:
         routing = load_routing(parsed.routing_config)
         catalogue = load_catalog(parsed.models_file)
-        effective = resolve_effective(routing, catalogue, parsed.stack)
         if parsed.command == "list":
             scope = "selected" if parsed.stack is not None else "global"
+            try:
+                effective = resolve_effective(
+                    routing, catalogue, parsed.stack
+                )
+            except RoutingError as error:
+                print(
+                    _render_catalogue_table(
+                        routing, catalogue, parsed.stack, None
+                    ),
+                    end="",
+                )
+                print(
+                    _render_unresolved_stack(routing, parsed.stack, scope),
+                    end="",
+                )
+                print(f"WARNING: {error}", file=sys.stderr)
+                return 0
+            print(
+                _render_catalogue_table(
+                    routing, catalogue, parsed.stack, effective
+                ),
+                end="",
+            )
             print(_render_stack_table(effective, catalogue, scope), end="")
-        elif parsed.effective_output is not None:
+            return 0
+        effective = resolve_effective(routing, catalogue, parsed.stack)
+        if parsed.effective_output is not None:
             _write_effective(parsed.effective_output, effective)
     except ModelAvailabilityError as error:
         print(f"ERROR: {error}", file=sys.stderr)

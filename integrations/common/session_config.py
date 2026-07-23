@@ -422,6 +422,25 @@ def _validated_session_ancestors(
     return workflow_root, data_root, state, sessions
 
 
+def _discard_incomplete_run(sessions: Path, run_dir: Path) -> None:
+    """Remove one unpublished direct child without following a replacement."""
+    if run_dir.parent != sessions or not run_dir.name.startswith("run."):
+        raise SessionError("incomplete session path is not managed")
+    try:
+        observed = os.lstat(run_dir)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(
+            observed.st_mode
+        ):
+            os.unlink(run_dir)
+        else:
+            shutil.rmtree(run_dir)
+        _fsync_directory(sessions)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise SessionError("incomplete session could not be removed") from error
+
+
 def create_session(
     workflow_root: Path,
     launch_dir: Path,
@@ -441,44 +460,67 @@ def create_session(
         data_root = _require_directory(_absolute_lexical(data_root), expected_mode=0o700)
     state = require_owned_component(data_root, "state", private=True, create=True)
     sessions = require_owned_component(state, "sessions", private=True, create=True)
+    run_dir: Optional[Path] = None
+    published = False
     try:
-        run_dir = Path(tempfile.mkdtemp(prefix="run.", dir=sessions))
-        _fsync_directory(sessions)
-    except OSError as error:
-        raise SessionError("session directory could not be created") from error
-    run_dir = require_private_direct_child(sessions, run_dir, expected_mode=0o700)
+        try:
+            run_dir = Path(tempfile.mkdtemp(prefix="run.", dir=sessions))
+            _fsync_directory(sessions)
+        except OSError as error:
+            raise SessionError(
+                "session directory could not be created"
+            ) from error
+        run_dir = require_private_direct_child(
+            sessions, run_dir, expected_mode=0o700
+        )
+        context_file = run_dir / "context.json"
+        context = resolve_context(load_config(config_path), launch_dir)
+        context_bytes = atomic_json(context_file, context, 0o600)
+        context_sha256 = hashlib.sha256(context_bytes).hexdigest()
 
-    context_file = run_dir / "context.json"
-    context = resolve_context(load_config(config_path), launch_dir)
-    context_bytes = atomic_json(context_file, context, 0o600)
-    context_sha256 = hashlib.sha256(context_bytes).hexdigest()
+        routing = load_routing(routing_path)
+        route = context.get("route")
+        requested_stack = (
+            route.get("modelStack")
+            if isinstance(route, dict)
+            and isinstance(route.get("modelStack"), str)
+            else None
+        )
+        effective = resolve_effective(
+            routing, load_catalog(models_path), requested_stack
+        )
+        effective_file = run_dir / "effective-models.json"
+        effective_bytes = atomic_json(
+            effective_file, effective.as_json(), 0o600
+        )
+        effective_sha256 = hashlib.sha256(effective_bytes).hexdigest()
+        materialize_runtime_plugin(
+            plugin_source, run_dir / "plugin", effective
+        )
 
-    routing = load_routing(routing_path)
-    route = context.get("route")
-    requested_stack = (
-        route.get("modelStack")
-        if isinstance(route, dict) and isinstance(route.get("modelStack"), str)
-        else None
-    )
-    effective = resolve_effective(
-        routing, load_catalog(models_path), requested_stack
-    )
-    effective_file = run_dir / "effective-models.json"
-    effective_bytes = atomic_json(effective_file, effective.as_json(), 0o600)
-    effective_sha256 = hashlib.sha256(effective_bytes).hexdigest()
-    plugin_dir = materialize_runtime_plugin(
-        plugin_source, run_dir / "plugin", effective
-    )
-
-    mcp_file = run_dir / "mcp.json"
-    atomic_json(mcp_file, _session_mcp_payload(context), 0o600)
-    return verify_session(
-        workflow_root,
-        run_dir,
-        context_sha256,
-        effective_sha256,
-        verification_data_root,
-    )
+        mcp_file = run_dir / "mcp.json"
+        atomic_json(mcp_file, _session_mcp_payload(context), 0o600)
+        session = verify_session(
+            workflow_root,
+            run_dir,
+            context_sha256,
+            effective_sha256,
+            verification_data_root,
+        )
+        atomic_json(
+            run_dir / ".complete",
+            {
+                "schemaVersion": 1,
+                "contextSha256": context_sha256,
+                "effectiveModelsSha256": effective_sha256,
+            },
+            0o600,
+        )
+        published = True
+        return session
+    finally:
+        if run_dir is not None and not published:
+            _discard_incomplete_run(sessions, run_dir)
 
 
 def verify_context_binding(
