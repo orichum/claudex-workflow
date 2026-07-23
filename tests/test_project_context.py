@@ -359,6 +359,12 @@ class ProjectContextTests(unittest.TestCase):
                         "memoryPalace": "~/.mempalace/palaces/complion",
                         "memoryWing": "complion",
                     },
+                    {
+                        "root": "~/claudex-workflow",
+                        "dockerProfile": None,
+                        "memoryPalace": "~/.mempalace/palaces/claudex-workflow",
+                        "memoryWing": "claudex-workflow",
+                    },
                 ],
             },
         )
