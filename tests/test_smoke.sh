@@ -69,7 +69,7 @@ workflow_status=complete
 workflow_missing='[]'
 if [[ "${SMOKE_SCENARIO:-expanded}" == degraded ]]; then
   workflow_status=degraded
-  workflow_missing='[{"label":"critique","agentType":"claudex-controller:sonnet-critic","reason":"missing-structured-result"}]'
+  workflow_missing='[{"label":"critique","agentType":"claudex-controller:correctness-critic","reason":"missing-structured-result"}]'
 fi
 workflow_record_dir="$fixture_data_root/claude-config/projects/-fixture/$controller_session_id/workflows"
 mkdir -p "$workflow_record_dir"

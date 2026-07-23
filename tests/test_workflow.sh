@@ -781,6 +781,71 @@ rg -q 'or AI/tool attribution trailer' \
   "$ROOT/controller/controller-policy.md"
 test ! -d "$ROOT/integrations/docker"
 
+guard="$ROOT/controller/plugin/scripts/guard-orchestration.sh"
+
+invoke_agent_guard() {
+  local agent_type="$1"
+  local isolation="${2:-}"
+  jq -cn \
+    --arg agent_type "$agent_type" \
+    --arg isolation "$isolation" \
+    '{
+      tool_name: "Agent",
+      tool_input: (
+        {subagent_type: $agent_type} +
+        (if $isolation == "" then {} else {isolation: $isolation} end)
+      )
+    }' |
+    CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" "$guard"
+}
+
+generic_denial="$(invoke_agent_guard Explore)"
+jq -e '
+  .hookSpecificOutput.permissionDecision == "deny" and
+  (.hookSpecificOutput.permissionDecisionReason |
+    contains("Do not retry") and contains("do not escalate"))
+' >/dev/null <<<"$generic_denial"
+
+for read_only_agent in \
+  claudex-controller:repository-explorer \
+  claudex-controller:repository-verifier \
+  claudex-controller:correctness-critic \
+  claudex-controller:architecture-advisor
+do
+  isolation_denial="$(invoke_agent_guard "$read_only_agent" worktree)"
+  jq -e '
+    .hookSpecificOutput.permissionDecision == "deny" and
+    (.hookSpecificOutput.permissionDecisionReason |
+      contains("read-only") and contains("current checkout"))
+  ' >/dev/null <<<"$isolation_denial"
+done
+
+[[ -z "$(invoke_agent_guard claudex-controller:repository-explorer)" ]]
+[[ -z "$(invoke_agent_guard claudex-controller:implementation-worker worktree)" ]]
+
+for role in \
+  repository-explorer \
+  repository-verifier \
+  correctness-critic \
+  architecture-advisor \
+  implementation-worker
+do
+  agent_file="$ROOT/controller/plugin/agents/$role.md"
+  rg -q "^name: $role$" "$agent_file"
+  rg -q '^model: inherit$' "$agent_file"
+done
+
+rg -q 'Never invoke generic `Explore`, `Plan`, `general-purpose`, or `Bash` agents' \
+  "$ROOT/controller/controller-policy.md"
+rg -Uq 'A rejected orchestration call is\s+not evidence' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'Only implementation-worker may request worktree isolation' \
+  "$ROOT/controller/controller-policy.md"
+rg -q 'allowed bounded replacement for generic repository exploration' \
+  "$ROOT/controller/plugin/agents/repository-explorer.md"
+rg -q 'not a replacement for generic planning' \
+  "$ROOT/controller/plugin/agents/architecture-advisor.md"
+
 # Sol receives complete independent evidence directly; an extra mandatory
 # synthesis turn would add latency and token burn without increasing worker
 # strength. Generous string ceilings only stop pathological repetition.

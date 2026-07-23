@@ -23,16 +23,22 @@ tool_name="$(jq -r '.tool_name // empty' <<<"$input")"
 case "$tool_name" in
   Agent)
     agent_type="$(jq -r '.tool_input.subagent_type // empty' <<<"$input")"
+    isolation="$(jq -r '.tool_input.isolation // empty' <<<"$input")"
     case "$agent_type" in
-      claudex-controller:terra-explorer|\
-      claudex-controller:terra-verifier|\
-      claudex-controller:sonnet-critic|\
-      claudex-controller:opus-architect|\
-      claudex-controller:sol-builder)
-        exit 0
+      claudex-controller:repository-explorer|\
+      claudex-controller:repository-verifier|\
+      claudex-controller:correctness-critic|\
+      claudex-controller:architecture-advisor)
+        if [[ -n "$isolation" ]]; then
+          deny "Claudex read-only agents must run in the current checkout without worktree isolation"
+        fi
+        ;;
+      claudex-controller:implementation-worker)
+        [[ "$isolation" == "worktree" ]] || \
+          deny "Claudex implementation-worker must use worktree isolation"
         ;;
       *)
-        deny "Agent type is not in the Claudex controller allowlist: $agent_type"
+        deny "Agent type is not in the Claudex controller allowlist: $agent_type. Do not retry a generic Agent type and do not escalate solely because this call was denied"
         ;;
     esac
     ;;

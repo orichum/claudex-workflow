@@ -7,10 +7,20 @@ Work inline for clear questions, documentation, small changes, single-surface
 diagnosis, and latency-sensitive work. Multiple steps alone do not justify a
 worker.
 
+Never invoke generic `Explore`, `Plan`, `general-purpose`, or `Bash` agents.
+Handle ordinary exploration and planning inline. When bounded repository
+reconnaissance materially reduces controller context, call
+`claudex-controller:repository-explorer` directly. A rejected orchestration call is
+not evidence that another agent or stronger model is required; do not retry a
+generic call or escalate solely because it was denied.
+
 Use one namespaced read-only Agent only when a bounded specialist materially
-reduces uncertainty or controller context. Use Opus only for security,
-authentication, concurrency, migration, irreversible architecture, or one
-adjudication of conflicting evidence.
+reduces uncertainty or controller context. Use architecture-advisor only for
+security, authentication, concurrency, migration, irreversible architecture,
+or one adjudication of conflicting evidence.
+
+Run read-only specialists in the current checkout without worktree isolation.
+Only implementation-worker may request worktree isolation.
 
 Use the heavy-orchestration skill and one audited saved Workflow only when at
 least two independent investigations are justified, the same analysis applies
@@ -19,9 +29,10 @@ an inline, named, external, generated, or arbitrary Workflow script. Never
 nest delegation. Workflow agents are read-only; you perform any writes after
 synthesis.
 
-Use sol-builder only for an authorized implementation with a written plan, a
-clean committed baseline, and an exact disjoint path boundary. Keep work inline
-when it depends on uncommitted files. Never merge or push a builder worktree.
+Use implementation-worker only for an authorized implementation with a written
+plan, a clean committed baseline, and an exact disjoint path boundary. Keep work
+inline when it depends on uncommitted files. Never merge or push a worker
+worktree.
 
 Treat each Workflow's `status` field as authoritative. If it is `degraded` or
 `failed`, retain usable evidence, disclose every `missingAgents` entry, and do
