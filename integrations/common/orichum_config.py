@@ -26,6 +26,7 @@ from .github_identity import GithubIdentityError, validate_github_account
 
 MAX_CONFIG_BYTES = 2 * 1024 * 1024
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_MODEL_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}")
 _EFFORTS = {"low", "medium", "high", "max"}
 _ADAPTER_TYPES = {"anthropic", "openai-compatible"}
 _REDACTED_KEYS = (
@@ -235,7 +236,13 @@ def _validate_providers(
         name = _identifier(raw_name, "provider name")
         provider = _exact(
             raw_provider,
-            {"type", "transport", "families", "authType"},
+            {
+                "type",
+                "transport",
+                "families",
+                "familyPrefixes",
+                "authType",
+            },
             f"provider {name}",
         )
         if provider["type"] not in _ADAPTER_TYPES:
@@ -245,9 +252,46 @@ def _validate_providers(
         _identifier(
             provider["authType"], f"provider {name} auth type"
         )
-        providers[name] = set(
+        families = set(
             _unique_identifiers(provider["families"], f"provider {name} families")
         )
+        raw_prefixes = provider["familyPrefixes"]
+        if (
+            not isinstance(raw_prefixes, dict)
+            or set(raw_prefixes) != families
+        ):
+            raise ConfigError(
+                f"provider {name} familyPrefixes must match its families"
+            )
+        prefixes: list[str] = []
+        for family, raw_family_prefixes in raw_prefixes.items():
+            if not isinstance(raw_family_prefixes, list) or not raw_family_prefixes:
+                raise ConfigError(
+                    f"provider {name} family {family} prefixes "
+                    "must be a non-empty array"
+                )
+            for prefix in raw_family_prefixes:
+                if (
+                    not isinstance(prefix, str)
+                    or not _MODEL_PREFIX.fullmatch(prefix)
+                ):
+                    raise ConfigError(
+                        f"provider {name} has an unsafe family prefix"
+                    )
+                prefixes.append(prefix)
+        if len(prefixes) != len(set(prefixes)):
+            raise ConfigError(
+                f"provider {name} family prefixes must be unique"
+            )
+        for index, prefix in enumerate(prefixes):
+            if any(
+                prefix.startswith(other) or other.startswith(prefix)
+                for other in prefixes[index + 1 :]
+            ):
+                raise ConfigError(
+                    f"provider {name} family prefixes must not overlap"
+                )
+        providers[name] = families
 
     raw_pools = raw["accountPools"]
     if not isinstance(raw_pools, dict) or not raw_pools:

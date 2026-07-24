@@ -100,12 +100,14 @@ class OrichumConfigTests(unittest.TestCase):
                         "transport": "cliproxy",
                         "authType": "codex",
                         "families": ["gpt"],
+                        "familyPrefixes": {"gpt": ["gpt-"]},
                     },
                     "anthropic": {
                         "type": "anthropic",
                         "transport": "cliproxy",
                         "authType": "claude",
                         "families": ["claude"],
+                        "familyPrefixes": {"claude": ["claude-"]},
                     },
                 },
                 "accountPools": {
@@ -282,6 +284,38 @@ class OrichumConfigTests(unittest.TestCase):
                 "families"
             ].append("future")
         )
+
+    def test_rejects_invalid_provider_family_prefixes(self) -> None:
+        mutations = (
+            lambda provider: provider["familyPrefixes"].update(
+                {"future": ["future-"]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": []}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": [""]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": ["gpt/", "gpt-"]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": ["gpt-", "gpt-"]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": ["gpt-", "gpt-5"]}
+            ),
+            lambda provider: provider.update({"familyPrefixes": {}}),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.documents = self.valid_documents()
+                mutation(
+                    self.documents["providers"]["providers"]["openai"]
+                )
+                self.write_documents()
+                with self.assertRaises(ConfigError):
+                    self.load()
 
     def test_rejects_project_pools_that_cannot_route_the_selected_stack(self) -> None:
         self.assert_invalid(

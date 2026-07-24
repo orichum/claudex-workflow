@@ -128,6 +128,94 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("antigravity", stdout)
         self.assertIn("openai-compatible", stdout)
 
+    def test_stack_available_is_read_only_and_redacts_route_metadata(self) -> None:
+        accounts = (
+            orichum_cli.Account(
+                id="oc-a-1111111111111111",
+                name="Work Claude",
+                provider="anthropic",
+                credential_ref="claude-work.json",
+                pool="xebia",
+                routing_prefix="oc-r-1111111111111111",
+                priority=100,
+                state="active",
+                original_prefix=None,
+                original_priority=None,
+            ),
+            orichum_cli.Account(
+                id="oc-a-2222222222222222",
+                name="Antigravity",
+                provider="antigravity",
+                credential_ref="antigravity-work.json",
+                pool="shared",
+                routing_prefix="oc-r-2222222222222222",
+                priority=50,
+                state="active",
+                original_prefix=None,
+                original_priority=None,
+            ),
+        )
+        raw = {
+            "object": "list",
+            "data": [
+                {
+                    "id": (
+                        "oc-r-1111111111111111/"
+                        "claude-sonnet-5"
+                    )
+                },
+                {
+                    "id": (
+                        "oc-r-2222222222222222/"
+                        "future-model"
+                    )
+                },
+            ],
+        }
+
+        with (
+            mock.patch.object(orichum_cli, "_verify_runtime") as verify,
+            mock.patch.object(
+                orichum_cli,
+                "_runtime_service_ports",
+                return_value={
+                    "claudexProxyPort": 13457,
+                    "cliproxyPort": 8317,
+                    "headroomPort": 8787,
+                    "routeProxyPort": 13456,
+                },
+            ),
+            mock.patch.object(
+                orichum_cli, "load_accounts", return_value=accounts
+            ),
+            mock.patch.object(
+                orichum_cli, "fetch_live_catalog", return_value=raw
+            ) as fetch,
+        ):
+            status, stdout, stderr = self.run_cli(
+                "stack", "available"
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr, "")
+        verify.assert_called_once()
+        fetch.assert_called_once_with(8317)
+        self.assertIn("PROVIDER", stdout)
+        self.assertIn("FAMILY", stdout)
+        self.assertIn("MODEL", stdout)
+        self.assertIn("ACCOUNTS", stdout)
+        self.assertIn("STATUS", stdout)
+        self.assertIn("anthropic", stdout)
+        self.assertIn("claude-sonnet-5", stdout)
+        self.assertIn("Work Claude", stdout)
+        self.assertIn("future-model", stdout)
+        self.assertIn("unclassified", stdout)
+        self.assertIn("not selectable", stdout)
+        self.assertNotIn("oc-r-", stdout)
+        self.assertNotIn("oc-a-", stdout)
+        self.assertNotIn("claude-work.json", stdout)
+        self.assertNotIn("antigravity-work.json", stdout)
+
     def test_external_diagnostics_use_argv_runner_without_shell(self) -> None:
         with mock.patch.object(orichum_cli, "_run_external", return_value=8) as run:
             status, _, _ = self.run_cli("doctor")

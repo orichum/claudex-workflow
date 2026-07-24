@@ -66,6 +66,11 @@ from .stack_bindings import (
     stack_binding_transaction,
 )
 from .stack_definition import normalize_model_stacks
+from .stack_catalog import (
+    CatalogError,
+    fetch_live_catalog,
+    project_live_catalog,
+)
 from .session_config import (
     SessionError,
     SessionPaths,
@@ -212,6 +217,46 @@ def _stack_list(config: ResolvedConfig) -> str:
         for name, stack in sorted(document.stacks.items())
     ]
     return _render_table(("STACK", "DEFAULT", "CONTROLLER"), rows)
+
+
+def _stack_available(
+    paths: Mapping[str, Path], config: ResolvedConfig
+) -> str:
+    _verify_runtime(paths)
+    ports = _runtime_service_ports(paths)
+    accounts = load_accounts(paths["config"] / "accounts.json")
+    validate_account_bindings(accounts, config.documents["providers"])
+    routing = normalize_model_stacks(config.documents["model-stacks"])
+    catalog = project_live_catalog(
+        fetch_live_catalog(ports["cliproxyPort"]),
+        accounts,
+        routing.models,
+        config.documents["providers"],
+    )
+    rows = [
+        (
+            choice.provider,
+            choice.family,
+            choice.upstream,
+            ", ".join(choice.account_names),
+            "selectable",
+        )
+        for choice in catalog.choices
+    ]
+    rows.extend(
+        (
+            model.provider,
+            "unclassified",
+            model.upstream,
+            ", ".join(model.account_names),
+            "not selectable",
+        )
+        for model in catalog.unclassified
+    )
+    return _render_table(
+        ("PROVIDER", "FAMILY", "MODEL", "ACCOUNTS", "STATUS"),
+        sorted(rows, key=lambda row: (row[0], row[1], row[2], row[3])),
+    )
 
 
 def _resolve_stack(config: ResolvedConfig, requested: str | None) -> dict[str, object]:
@@ -1651,6 +1696,12 @@ def build_parser() -> argparse.ArgumentParser:
     resolve = model_action.add_parser("resolve")
     resolve.add_argument("stack", nargs="?")
 
+    stack = commands.add_parser("stack")
+    stack_action = stack.add_subparsers(
+        dest="stack_command", required=True
+    )
+    stack_action.add_parser("available")
+
     provider = commands.add_parser("provider")
     provider_action = provider.add_subparsers(
         dest="provider_command", required=True
@@ -1819,6 +1870,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command == "context":
             print(_context_list(config), end="")
             return 0
+        if parsed.command == "stack":
+            print(_stack_available(paths, config), end="")
+            return 0
         if parsed.command == "models":
             if parsed.models_command == "list":
                 print(_model_list(config), end="")
@@ -1847,6 +1901,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (
         AccountError,
+        CatalogError,
         CliError,
         ConfigError,
         ContextError,
