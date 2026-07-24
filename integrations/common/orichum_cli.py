@@ -59,6 +59,8 @@ from .provider_credentials import (
     resolve_credential_ref,
 )
 from .route_selection import RouteError, validate_route_credential
+from .stack_bindings import StackBindingError, load_stack_bindings
+from .stack_definition import normalize_model_stacks
 from .session_config import (
     SessionError,
     SessionPaths,
@@ -178,13 +180,15 @@ def _context_list(config: ResolvedConfig) -> str:
 
 
 def _model_list(config: ResolvedConfig) -> str:
-    models = config.documents["model-stacks"]["models"]
+    models = normalize_model_stacks(
+        config.documents["model-stacks"]
+    ).models
     rows = [
         (
             model,
-            metadata["provider"],
-            metadata["family"],
-            metadata["upstream"],
+            ", ".join(metadata.routes),
+            metadata.family,
+            ", ".join(metadata.routes.values()),
         )
         for model, metadata in sorted(models.items())
     ]
@@ -192,32 +196,39 @@ def _model_list(config: ResolvedConfig) -> str:
 
 
 def _stack_list(config: ResolvedConfig) -> str:
-    document = config.documents["model-stacks"]
-    default = document["defaultStack"]
+    document = normalize_model_stacks(config.documents["model-stacks"])
+    default = document.default_stack
     rows = [
-        (name, "yes" if name == default else "—", stack["controller"])
-        for name, stack in sorted(document["stacks"].items())
+        (
+            name,
+            "yes" if name == default else "—",
+            ", ".join(candidate.model for candidate in stack.controller),
+        )
+        for name, stack in sorted(document.stacks.items())
     ]
     return _render_table(("STACK", "DEFAULT", "CONTROLLER"), rows)
 
 
 def _resolve_stack(config: ResolvedConfig, requested: str | None) -> dict[str, object]:
-    document = config.documents["model-stacks"]
-    stack_name = requested or document["defaultStack"]
+    document = normalize_model_stacks(config.documents["model-stacks"])
+    stack_name = requested or document.default_stack
     try:
-        stack = document["stacks"][stack_name]
+        stack = document.stacks[stack_name]
     except KeyError as error:
-        available = ", ".join(sorted(document["stacks"]))
+        available = ", ".join(sorted(document.stacks))
         raise CliError(
             f"model stack is not configured: {stack_name}; "
             f"available stacks: {available}"
         ) from error
     return {
         "stack": stack_name,
-        "controller": stack["controller"],
-        "configuredCandidates": stack["agents"],
+        "controller": stack.controller[0].model,
+        "configuredCandidates": {
+            role: [candidate.model for candidate in stack.agents[role]]
+            for role in ROLES
+        },
         "agents": {
-            role: candidates[0] for role, candidates in stack["agents"].items()
+            role: stack.agents[role][0].model for role in ROLES
         },
     }
 
@@ -534,6 +545,9 @@ def _prepare_new_session(
         requested_stack=route["modelStack"],
         health={},
         selection_ordinal=ordinal,
+        bindings=load_stack_bindings(
+            paths["config"] / "stack-bindings.json"
+        ),
         available_models=available,
     )
     _validate_plan_routes(
@@ -689,6 +703,9 @@ def _prepare_fork(
             requested_stack=requested_stack,
             health={},
             selection_ordinal=int.from_bytes(os.urandom(8), "big"),
+            bindings=load_stack_bindings(
+                paths["config"] / "stack-bindings.json"
+            ),
             available_models=available,
         )
         controller = plan.controller
@@ -906,6 +923,34 @@ def _mutate_account(
             synchronize(account)
         elif action == "remove":
             current = find_account(load_accounts(registry), parsed.selector)
+            stack_bindings = load_stack_bindings(
+                paths["config"] / "stack-bindings.json"
+            )
+            if current.id in stack_bindings.candidate_accounts.values():
+                stacks = normalize_model_stacks(
+                    config.documents["model-stacks"]
+                )
+                for stack_name, stack in stacks.stacks.items():
+                    candidates = (
+                        ("controller", stack.controller),
+                        *((role, stack.agents[role]) for role in ROLES),
+                    )
+                    for role, role_candidates in candidates:
+                        if any(
+                            stack_bindings.candidate_accounts.get(
+                                candidate.id
+                            )
+                            == current.id
+                            for candidate in role_candidates
+                        ):
+                            raise CliError(
+                                "account cannot be removed: bound by "
+                                f"stack {stack_name} role {role}"
+                            )
+                raise CliError(
+                    "account cannot be removed while a stack binding "
+                    "references it"
+                )
             if current.state == "pending-remove":
                 synchronize(current)
                 return
@@ -1786,6 +1831,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
         RouteError,
         SessionError,
+        StackBindingError,
     ) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

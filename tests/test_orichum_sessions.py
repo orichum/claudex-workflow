@@ -20,6 +20,8 @@ from integrations.common.orichum_sessions import (
     resolve_session_plan,
 )
 from integrations.common.route_selection import Route
+from integrations.common.stack_bindings import StackBindings
+from integrations.common.stack_definition import normalize_model_stacks
 from integrations.common.project_context import (
     ContextError,
     resolve_control_plane_context,
@@ -324,6 +326,7 @@ class OrichumSessionTests(unittest.TestCase):
         }
         config = {
             "model-stacks": {
+                "schemaVersion": 1,
                 "defaultStack": "balanced",
                 "models": models,
                 "stacks": {
@@ -341,6 +344,9 @@ class OrichumSessionTests(unittest.TestCase):
                 "fallbackRoutes": {"gpt": ["openai"]},
             },
         }
+        config["model-stacks"] = normalize_model_stacks(
+            config["model-stacks"]
+        )
 
         def account(suffix: str, priority: int) -> Account:
             return Account(
@@ -387,6 +393,105 @@ class OrichumSessionTests(unittest.TestCase):
                 plan.effective.agents[role],
                 plan.agents[role].primary.upstream_model,
             )
+
+    def test_session_plan_tries_candidates_in_order_and_honors_account_binding(
+        self,
+    ) -> None:
+        controller_candidates = [
+            {
+                "id": "oc-c-1111111111111111",
+                "model": "gpt-unavailable",
+                "providers": ["openai"],
+            },
+            {
+                "id": "oc-c-2222222222222222",
+                "model": "gpt-controller",
+                "providers": ["openai"],
+            },
+        ]
+        agent_candidate = {
+            "id": "oc-c-3333333333333333",
+            "model": "gpt-worker",
+            "providers": ["openai"],
+        }
+        config = {
+            "model-stacks": {
+                "schemaVersion": 2,
+                "defaultStack": "balanced",
+                "models": {
+                    "gpt-unavailable": {
+                        "family": "gpt",
+                        "routes": {"openai": "gpt-unavailable"},
+                    },
+                    "gpt-controller": {
+                        "family": "gpt",
+                        "routes": {"openai": "gpt-controller-live"},
+                    },
+                    "gpt-worker": {
+                        "family": "gpt",
+                        "routes": {"openai": "gpt-worker-live"},
+                    },
+                },
+                "stacks": {
+                    "balanced": {
+                        "controller": controller_candidates,
+                        "agents": {
+                            role: [dict(agent_candidate, id=f"oc-c-{index:016x}")]
+                            for index, role in enumerate(ROLES, start=3)
+                        },
+                    }
+                },
+            },
+            "providers": {
+                "providers": {"openai": {"authType": "codex"}},
+                "accountPools": {"work": {"providers": ["openai"]}},
+                "fallbackRoutes": {"gpt": ["openai"]},
+            },
+        }
+
+        def account(suffix: str, priority: int) -> Account:
+            return Account(
+                id=f"oc-a-{suffix}",
+                name=f"Account {suffix}",
+                provider="openai",
+                credential_ref=f"codex-{suffix}.json",
+                pool="work",
+                routing_prefix=f"oc-r-{suffix}",
+                priority=priority,
+                state="active",
+                original_prefix=None,
+                original_priority=None,
+            )
+
+        primary = account("0000000000000001", 100)
+        secondary = account("0000000000000002", 50)
+        bindings = StackBindings(
+            {"oc-c-2222222222222222": secondary.id}
+        )
+        available = {
+            f"{primary.routing_prefix}/gpt-controller-live",
+            f"{secondary.routing_prefix}/gpt-controller-live",
+            f"{primary.routing_prefix}/gpt-worker-live",
+            f"{secondary.routing_prefix}/gpt-worker-live",
+        }
+
+        plan = resolve_session_plan(
+            config,
+            (primary, secondary),
+            pools=("work",),
+            requested_stack=None,
+            health={},
+            selection_ordinal=0,
+            bindings=bindings,
+            available_models=available,
+        )
+
+        self.assertEqual(plan.controller.primary.account_id, secondary.id)
+        self.assertEqual(plan.controller.fallbacks, ())
+        self.assertEqual(
+            plan.controller.primary.upstream_model,
+            f"{secondary.routing_prefix}/gpt-controller-live",
+        )
 
 
 if __name__ == "__main__":

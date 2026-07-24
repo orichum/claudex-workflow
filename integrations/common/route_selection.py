@@ -36,13 +36,25 @@ def eligible_routes(
     family: str,
     logical_model: str,
     config: Mapping[str, object],
+    allowed_providers: Collection[str],
+    locked_account_id: str | None,
+    upstream_by_provider: Mapping[str, str],
     available_models: Collection[str] | None = None,
 ) -> tuple[Route, ...]:
     try:
-        metadata = config["models"][logical_model]
-        if metadata["family"] != family:
-            raise RouteError("logical model does not belong to requested family")
-        upstream = metadata["upstream"]
+        models = config.get("models")
+        if models is not None:
+            metadata = models.get(logical_model)
+            if metadata is not None:
+                configured_family = (
+                    metadata["family"]
+                    if isinstance(metadata, Mapping)
+                    else metadata.family
+                )
+                if configured_family != family:
+                    raise RouteError(
+                        "logical model does not belong to requested family"
+                    )
         provider_config = config["providers"]
         pool_providers = set(
             provider_config["accountPools"][pool]["providers"]
@@ -54,19 +66,29 @@ def eligible_routes(
     except (KeyError, TypeError) as error:
         raise RouteError("route configuration is incomplete") from error
 
+    allowed = set(allowed_providers)
     routes = []
     for account in accounts:
         if (
             account.state != "active"
             or account.pool != pool
+            or (
+                locked_account_id is not None
+                and account.id != locked_account_id
+            )
+            or account.provider not in allowed
             or account.provider not in pool_providers
             or account.provider not in fallback_rank
+            or account.provider not in upstream_by_provider
         ):
             continue
         digest = hashlib.sha256(
             f"{account.id}\0{logical_model}".encode("utf-8")
         ).hexdigest()[:16]
-        upstream_model = f"{account.routing_prefix}/{upstream}"
+        upstream_model = (
+            f"{account.routing_prefix}/"
+            f"{upstream_by_provider[account.provider]}"
+        )
         if (
             available_models is not None
             and upstream_model not in available_models
@@ -105,6 +127,9 @@ def choose_new_session_route(
     config: Mapping[str, object],
     health: Mapping[str, str],
     selection_ordinal: int,
+    allowed_providers: Collection[str],
+    locked_account_id: str | None,
+    upstream_by_provider: Mapping[str, str],
     available_models: Collection[str] | None = None,
 ) -> Route:
     if type(selection_ordinal) is not int or selection_ordinal < 0:
@@ -118,6 +143,9 @@ def choose_new_session_route(
                 family=family,
                 logical_model=logical_model,
                 config=config,
+                allowed_providers=allowed_providers,
+                locked_account_id=locked_account_id,
+                upstream_by_provider=upstream_by_provider,
                 available_models=available_models,
             )
             if health.get(route.account_id, "healthy") == "healthy"
@@ -141,6 +169,9 @@ def route_chain(
     config: Mapping[str, object],
     health: Mapping[str, str],
     selection_ordinal: int,
+    allowed_providers: Collection[str],
+    locked_account_id: str | None,
+    upstream_by_provider: Mapping[str, str],
     max_alternates: int = 1,
     available_models: Collection[str] | None = None,
 ) -> tuple[Route, ...]:
@@ -155,6 +186,9 @@ def route_chain(
         config=config,
         health=health,
         selection_ordinal=selection_ordinal,
+        allowed_providers=allowed_providers,
+        locked_account_id=locked_account_id,
+        upstream_by_provider=upstream_by_provider,
         available_models=available_models,
     )
     candidates: list[Route] = []
@@ -166,6 +200,9 @@ def route_chain(
             family=family,
             logical_model=logical_model,
             config=config,
+            allowed_providers=allowed_providers,
+            locked_account_id=locked_account_id,
+            upstream_by_provider=upstream_by_provider,
             available_models=available_models,
         ):
             if (

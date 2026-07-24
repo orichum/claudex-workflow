@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 from integrations.common import orichum_cli
+from integrations.common.stack_bindings import StackBindings, save_stack_bindings
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -305,6 +306,46 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual((status, stdout, stderr), (0, "", ""))
         self.assertEqual(
             json.loads(registry.read_text(encoding="utf-8"))["accounts"], []
+        )
+
+    def test_account_remove_rejects_stack_candidate_binding(self) -> None:
+        config_home, credential = self.provision_account_runtime()
+        status, stdout, stderr = self.run_cli(
+            "provider",
+            "account",
+            "add",
+            "Bound Claude",
+            "anthropic",
+            credential.name,
+            "xebia",
+        )
+        self.assertEqual((status, stdout, stderr), (0, "", ""))
+        account = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )["accounts"][0]
+        save_stack_bindings(
+            config_home / "stack-bindings.json",
+            StackBindings(
+                {"oc-c-a69e16d6ee83ad12": account["id"]}
+            ),
+            expected_digest=None,
+        )
+
+        status, stdout, stderr = self.run_cli(
+            "provider", "account", "remove", account["id"]
+        )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("balanced", stderr)
+        self.assertIn("correctness-critic", stderr)
+        self.assertNotIn(credential.name, stderr)
+        self.assertNotIn(account["routingPrefix"], stderr)
+        self.assertEqual(
+            json.loads(
+                (config_home / "accounts.json").read_text(encoding="utf-8")
+            )["accounts"][0]["state"],
+            "active",
         )
 
     def test_account_add_rejects_provider_pool_and_credential_mismatch(self) -> None:
