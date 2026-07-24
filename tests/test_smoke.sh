@@ -167,6 +167,7 @@ for required_contract in \
     'permissions:' \
     'contents: read' \
     'runs-on: macos-15' \
+    'GH_TOKEN: ${{ github.token }}' \
     'test "$(uname -m)" = arm64' \
     'brew install ripgrep' \
     'launchctl print "gui/$(id -u)/io.orichum.cliproxy"' \

@@ -7,6 +7,42 @@ source "$ROOT/lib/workflow.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-installer-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
+authenticated_release="$fixture/authenticated-release.json"
+gh() {
+  [[ "$1" == api && "$2" == repos/example/tool/releases/latest ]]
+  printf '{"tag_name":"v1.2.3"}\n'
+}
+curl() {
+  printf 'authenticated release lookup unexpectedly used curl\n' >&2
+  return 99
+}
+GH_TOKEN=ephemeral-test-token \
+  fetch_latest_github_release example/tool "$authenticated_release"
+[[ "$(jq -r .tag_name "$authenticated_release")" == v1.2.3 ]]
+unset -f gh curl
+
+anonymous_release="$fixture/anonymous-release.json"
+gh() {
+  printf 'anonymous release lookup unexpectedly used gh\n' >&2
+  return 99
+}
+curl() {
+  local output_file=
+  while (($# > 0)); do
+    if [[ "$1" == --output ]]; then
+      output_file="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  [[ -n "$output_file" ]]
+  printf '{"tag_name":"v4.5.6"}\n' >"$output_file"
+}
+fetch_latest_github_release example/tool "$anonymous_release"
+[[ "$(jq -r .tag_name "$anonymous_release")" == v4.5.6 ]]
+unset -f gh curl
+
 printf '6.8.0-generic\n' >"$fixture/linux-osrelease"
 printf '4.4.0-Microsoft\n' >"$fixture/wsl1-osrelease"
 printf '5.15.153.1-microsoft-standard-WSL2\n' >"$fixture/wsl2-osrelease"

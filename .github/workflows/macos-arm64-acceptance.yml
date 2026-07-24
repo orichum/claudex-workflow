@@ -26,6 +26,8 @@ jobs:
   acceptance:
     runs-on: macos-15
     timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out source
         uses: actions/checkout@v6

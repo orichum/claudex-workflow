@@ -2151,6 +2151,18 @@ remove_managed_symlink() {
   fi
 }
 
+fetch_latest_github_release() {
+  local repository="$1"
+  local output_file="$2"
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    gh api "repos/$repository/releases/latest" >"$output_file"
+  else
+    curl --fail --location --silent --show-error \
+      "https://api.github.com/repos/$repository/releases/latest" \
+      --output "$output_file"
+  fi
+}
+
 stage_latest_github_binary() {
   local repository="$1"
   local prefix="$2"
@@ -2164,8 +2176,7 @@ stage_latest_github_binary() {
   metadata="$staging_dir/release.json"
   archive="$staging_dir/release.tar.gz"
   staged_binary="$staging_dir/$archive_binary"
-  curl --fail --location --silent --show-error \
-    "https://api.github.com/repos/$repository/releases/latest" --output "$metadata"
+  fetch_latest_github_release "$repository" "$metadata"
   row="$(jq -er --arg prefix "$prefix" --arg suffix "$suffix" '
     [.assets[] | select(.name | startswith($prefix) and endswith($suffix))] |
     if length == 1 then .[0] else error("expected exactly one release asset") end |
