@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+import fcntl
 import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -341,14 +344,17 @@ def _verify_runtime(paths: Mapping[str, Path]) -> None:
     verifier = WORKFLOW_ROOT / "bin" / "orichum-runtime-ready"
     if not verifier.is_file() or verifier.is_symlink():
         raise CliError("Orichum runtime verifier is unavailable")
-    completed = subprocess.run(
-        [str(verifier), str(paths["data"])],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-        timeout=10,
-    )
+    try:
+        completed = subprocess.run(
+            [str(verifier), str(paths["data"])],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise CliError("Orichum runtime health verification timed out") from error
     if completed.returncode != 0:
         try:
             accounts = load_accounts(paths["config"] / "accounts.json")
@@ -363,24 +369,42 @@ def _verify_runtime(paths: Mapping[str, Path]) -> None:
         raise CliError("Orichum services are not owned and ready; run install.sh")
 
 
-def _live_models(paths: Mapping[str, Path]) -> frozenset[str]:
+def _runtime_service_ports(paths: Mapping[str, Path]) -> dict[str, int]:
     try:
-        ports = json.loads(
+        document = json.loads(
             _read_stable_file(
                 paths["data"] / "service-ports.json",
                 "service port state",
                 64 * 1024,
             )
         )
-        route_port = ports["routeProxyPort"]
-        if (
-            type(route_port) is not int
-            or route_port < 1024
-            or route_port > 65535
-        ):
-            raise ValueError
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise CliError("service port state is unavailable") from error
+    expected = {
+        "claudexProxyPort",
+        "cliproxyPort",
+        "headroomPort",
+        "routeProxyPort",
+    }
+    if not isinstance(document, dict) or set(document) != expected:
+        raise CliError("service port state is invalid")
+    ports = {}
+    for name in expected:
+        value = document[name]
+        if type(value) is not int or value < 1024 or value > 65535:
+            raise CliError("service port state is invalid")
+        ports[name] = value
+    if len(set(ports.values())) != len(ports):
+        raise CliError("service ports must be distinct")
+    return ports
+
+
+def _live_models(paths: Mapping[str, Path]) -> frozenset[str]:
+    try:
+        ports = _runtime_service_ports(paths)
+        cliproxy_port = ports["cliproxyPort"]
         connection = http.client.HTTPConnection(
-            "127.0.0.1", route_port, timeout=3
+            "127.0.0.1", cliproxy_port, timeout=3
         )
         connection.request("GET", "/v1/models")
         response = connection.getresponse()
@@ -393,9 +417,7 @@ def _live_models(paths: Mapping[str, Path]) -> frozenset[str]:
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         )
     except (
-        KeyError,
-        TypeError,
-        ValueError,
+        CliError,
         UnicodeError,
         json.JSONDecodeError,
         http.client.HTTPException,
@@ -1069,8 +1091,143 @@ def _read_stable_file(path: Path, label: str, maximum: int) -> bytes:
         os.close(descriptor)
 
 
+def _port_is_available(port: int) -> bool:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", port))
+    except OSError:
+        return False
+    finally:
+        listener.close()
+    return True
+
+
+def _reserve_session_claudex_port(
+    state_home: Path,
+    run_dir: Path,
+    session_id: str,
+    preferred_port: int,
+    excluded_ports: frozenset[int],
+) -> int:
+    if (
+        type(preferred_port) is not int
+        or preferred_port < 1024
+        or preferred_port > 65535
+    ):
+        raise CliError("preferred Claudex proxy port is invalid")
+    leases = state_home / "claudex-port-leases"
+    leases.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if leases.is_symlink() or not leases.is_dir():
+        raise CliError("Claudex proxy lease state is unsafe")
+    leases.chmod(0o700)
+    lock_path = state_home / ".claudex-port.lock"
+    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    lock_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lock_descriptor = os.open(lock_path, lock_flags, 0o600)
+    except OSError as error:
+        raise CliError("Claudex proxy port lock is unavailable") from error
+    try:
+        os.fchmod(lock_descriptor, 0o600)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        span = 65535 - 1024 + 1
+        for attempt in range(span):
+            candidate = 1024 + (preferred_port - 1024 + attempt) % span
+            if candidate in excluded_ports:
+                continue
+            lease = leases / f"{candidate}.json"
+            if lease.exists() or lease.is_symlink():
+                if lease.is_symlink() or not lease.is_file():
+                    continue
+                try:
+                    document = json.loads(
+                        lease.read_text(encoding="utf-8")
+                    )
+                    owner_pid = document.get("pid")
+                    if type(owner_pid) is int and owner_pid > 0:
+                        os.kill(owner_pid, 0)
+                        continue
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+                if not _port_is_available(candidate):
+                    continue
+                try:
+                    lease.unlink()
+                except OSError:
+                    continue
+            if not _port_is_available(candidate):
+                continue
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(lease, flags, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                try:
+                    os.fchmod(descriptor, 0o600)
+                    payload = json.dumps(
+                        {
+                            "pid": os.getpid(),
+                            "runId": run_dir.name,
+                            "sessionId": session_id,
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    offset = 0
+                    while offset < len(payload):
+                        written = os.write(descriptor, payload[offset:])
+                        if written <= 0:
+                            raise CliError(
+                                "Claudex proxy lease write stalled"
+                            )
+                        offset += written
+                    os.fsync(descriptor)
+                except (OSError, CliError):
+                    lease.unlink(missing_ok=True)
+                    raise
+            finally:
+                os.close(descriptor)
+            port_file = run_dir / "claudex-proxy-port"
+            port_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            port_flags |= getattr(os, "O_CLOEXEC", 0)
+            port_flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                port_descriptor = os.open(port_file, port_flags, 0o600)
+                try:
+                    os.fchmod(port_descriptor, 0o600)
+                    payload = f"{candidate}\n".encode("ascii")
+                    offset = 0
+                    while offset < len(payload):
+                        written = os.write(
+                            port_descriptor, payload[offset:]
+                        )
+                        if written <= 0:
+                            raise CliError(
+                                "session Claudex proxy port write stalled"
+                            )
+                        offset += written
+                    os.fsync(port_descriptor)
+                finally:
+                    os.close(port_descriptor)
+            except (OSError, CliError) as error:
+                port_file.unlink(missing_ok=True)
+                lease.unlink(missing_ok=True)
+                raise CliError(
+                    "session Claudex proxy port could not be recorded"
+                ) from error
+            return candidate
+    finally:
+        os.close(lock_descriptor)
+    raise CliError("no Claudex proxy port is available")
+
+
 def _materialize_session_claudex_config(
-    source: Path, prepared: PreparedLaunch
+    source: Path,
+    prepared: PreparedLaunch,
+    proxy_port: int,
+    inherited_environment: Mapping[str, str],
 ) -> Path:
     content = _read_stable_file(source, "Claudex configuration", 1024 * 1024)
     marker = b'X-Orichum-Session-ID = "unbound"'
@@ -1080,6 +1237,32 @@ def _materialize_session_claudex_config(
         marker,
         f'X-Orichum-Session-ID = "{prepared.logical.id}"'.encode("ascii"),
     )
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CliError("Claudex configuration is not UTF-8") from error
+    proxy_pattern = re.compile(r"(?m)^proxy_port = [0-9]+$")
+    if len(proxy_pattern.findall(text)) != 1:
+        raise CliError("Claudex configuration lacks one proxy port")
+    text = proxy_pattern.sub(f"proxy_port = {proxy_port}", text)
+    if "[profiles.extra_env]" in text:
+        raise CliError("Claudex configuration already defines profile environment")
+    real_home = inherited_environment.get("HOME") or str(Path.home())
+    restored_environment = {"HOME": real_home}
+    for name in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
+        value = inherited_environment.get(name)
+        if value:
+            restored_environment[name] = value
+    extra_environment = "\n".join(
+        f"{name} = {json.dumps(value)}"
+        for name, value in restored_environment.items()
+    )
+    content = (
+        text.rstrip()
+        + "\n\n[profiles.extra_env]\n"
+        + extra_environment
+        + "\n"
+    ).encode("utf-8")
     output = prepared.physical.run_dir / "claudex.toml"
     descriptor = os.open(
         output,
@@ -1135,6 +1318,38 @@ def _github_config_for_session(
         raise CliError("project GitHub identity is unavailable") from error
 
 
+def _managed_python_entrypoint(data_home: Path) -> str:
+    private_root = data_home / "python"
+    entrypoint = data_home / "bin" / "orichum-python"
+    try:
+        root_stat = private_root.lstat()
+        entrypoint_stat = entrypoint.lstat()
+        resolved_root = private_root.resolve(strict=True)
+        resolved_interpreter = entrypoint.resolve(strict=True)
+        interpreter_stat = resolved_interpreter.stat()
+        resolved_interpreter.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CliError("private Orichum Python is unavailable or unsafe") from error
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or not stat.S_ISDIR(root_stat.st_mode)
+        or not stat.S_ISLNK(entrypoint_stat.st_mode)
+        or not stat.S_ISREG(interpreter_stat.st_mode)
+        or root_stat.st_uid != os.getuid()
+        or interpreter_stat.st_uid != os.getuid()
+        or stat.S_IMODE(root_stat.st_mode) & 0o022
+        or stat.S_IMODE(interpreter_stat.st_mode) & 0o022
+        or not os.access(resolved_interpreter, os.X_OK)
+    ):
+        raise CliError("private Orichum Python is unavailable or unsafe")
+    try:
+        if not os.path.samefile(resolved_interpreter, sys.executable):
+            raise CliError("Orichum CLI is not running on its private Python")
+    except OSError as error:
+        raise CliError("private Orichum Python identity is unavailable") from error
+    return str(entrypoint)
+
+
 def _session_environment(
     prepared: PreparedLaunch,
     paths: Mapping[str, Path],
@@ -1143,6 +1358,9 @@ def _session_environment(
     claudex_config: Path,
 ) -> dict[str, str]:
     physical = prepared.physical
+    claudex_home = physical.run_dir / "claudex-home"
+    claudex_home.mkdir(mode=0o700)
+    claudex_home.chmod(0o700)
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -1164,12 +1382,16 @@ def _session_environment(
             "GH_HOST",
         ):
             environment.pop(key, None)
+    managed_python = _managed_python_entrypoint(paths["data"])
     environment.update(
         {
+            "HOME": str(claudex_home),
             "ORICHUM_SESSION_ID": prepared.logical.id,
             "ORICHUM_STATE_HOME": str(paths["state"]),
             "ORICHUM_CONFIG_HOME": str(paths["config"]),
             "ORICHUM_DATA_HOME": str(paths["data"]),
+            "ORICHUM_PYTHON": managed_python,
+            "ORICHUM_PYTHON_VALIDATED": managed_python,
             "CLAUDEX_CONFIG_FILE": str(claudex_config),
             "CLAUDEX_MCP_CONFIG": str(physical.mcp_file),
             "CLAUDEX_RUN_DIR": str(physical.run_dir),
@@ -1195,6 +1417,14 @@ def _session_environment(
             "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
         }
     )
+    for name in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
+        if name in os.environ:
+            isolated = claudex_home / (
+                "cache" if name == "XDG_CACHE_HOME" else "runtime"
+            )
+            isolated.mkdir(mode=0o700)
+            isolated.chmod(0o700)
+            environment[name] = str(isolated)
     if github_config is not None:
         environment["GH_CONFIG_DIR"] = str(github_config)
     return environment
@@ -1222,8 +1452,25 @@ def _launch_session(
     ):
         if not path.is_file() or path.is_symlink():
             raise CliError(f"{label} is unavailable")
+    runtime_ports = _runtime_service_ports(paths)
     claudex_config = _materialize_session_claudex_config(
-        shared_claudex_config, prepared
+        shared_claudex_config,
+        prepared,
+        _reserve_session_claudex_port(
+            paths["state"],
+            prepared.physical.run_dir,
+            prepared.logical.id,
+            runtime_ports["claudexProxyPort"],
+            frozenset(
+                runtime_ports[name]
+                for name in (
+                    "cliproxyPort",
+                    "headroomPort",
+                    "routeProxyPort",
+                )
+            ),
+        ),
+        os.environ,
     )
     runtime = config.documents["runtime"]["controller"]
     physical = prepared.physical

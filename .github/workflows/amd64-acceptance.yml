@@ -60,14 +60,42 @@ jobs:
               tests/test_plugins.sh \
               tests/test_installer.sh \
               tests/test_install_transaction.sh; do
-            bash "$test_script"
+            if ! bash "$test_script"; then
+              printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
+                "$test_script"
+              bash -x "$test_script"
+              exit 1
+            fi
           done
 
       - name: Fresh install without providers
         shell: bash
         run: |
           set -euo pipefail
+          report_acceptance_failure() {
+            local status="$?"
+            printf '::error title=Native acceptance failure::line %s exited %s: %s\n' \
+              "${BASH_LINENO[0]:-$LINENO}" "$status" "$BASH_COMMAND"
+            exit "$status"
+          }
+          trap report_acceptance_failure ERR
           ./install.sh
+          managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
+          test -x "$managed_python"
+          "$managed_python" -I -B -c '
+          import platform, sys
+          assert platform.python_implementation() == "CPython"
+          assert sys.version_info[:2] == (3, 14)
+          '
+          jq -e '
+            keys == [
+              "claudexProxyPort",
+              "cliproxyPort",
+              "headroomPort",
+              "routeProxyPort"
+            ] and
+            ([.[]] | unique | length) == 4
+          ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           test "$(systemctl --user is-active orichum-cliproxy.service)" = active
           test "$(systemctl --user is-active orichum-headroom.service)" = active
           test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
@@ -75,15 +103,35 @@ jobs:
             jq -e '.data | type == "array"' >/dev/null
           systemctl --user show orichum-headroom.service --property=ExecStart --value |
             rg -Fq -- '--disable-kompress'
-          curl -fsS "http://127.0.0.1:$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")/health" |
-            jq -e '.service == "headroom-proxy"' >/dev/null
+          headroom_port="$(
+            jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json"
+          )"
+          headroom_health="$RUNNER_TEMP/headroom-provider-pending.json"
+          headroom_status="$(
+            curl -sS --output "$headroom_health" \
+              --write-out '%{http_code}' \
+              "http://127.0.0.1:$headroom_port/health"
+          )"
+          test "$headroom_status" = 200
+          jq -e '
+            .service == "headroom-proxy" and
+            .status == "unhealthy" and
+            .ready == false
+          ' "$headroom_health" >/dev/null
+          trap - ERR
           set +e
+          poison_bin="$RUNNER_TEMP/poison-python"
+          mkdir -p "$poison_bin"
+          printf '#!/bin/sh\nexit 99\n' >"$poison_bin/python3"
+          chmod +x "$poison_bin/python3"
           doctor_output="$(
-            PATH="$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            PATH="$poison_bin:$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               orichum doctor 2>&1
           )"
           doctor_rc=$?
           set -e
+          trap report_acceptance_failure ERR
+          printf '%s\n' "$doctor_output"
           test "$doctor_rc" -eq 1
           test "$(grep -c '^FAIL ' <<<"$doctor_output")" -eq 1
           grep -Fq 'provider login is pending' <<<"$doctor_output"
@@ -125,6 +173,15 @@ jobs:
           orichum provider account add \
             "AMD64 Claude" anthropic claude-amd64.json shared --priority primary
           ./install.sh
+          jq -e '
+            keys == [
+              "claudexProxyPort",
+              "cliproxyPort",
+              "headroomPort",
+              "routeProxyPort"
+            ] and
+            ([.[]] | unique | length) == 4
+          ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           for unit in \
               orichum-cliproxy.service \
               orichum-headroom.service \
@@ -132,7 +189,14 @@ jobs:
             test "$(systemctl --user is-enabled "$unit")" = enabled
             test "$(systemctl --user is-active "$unit")" = active
           done
+          systemctl --user show orichum-route-proxy.service \
+            --property=ExecStart --value |
+            rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-route-proxy"
           route_port="$(jq -r .routeProxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
+          curl -fsS "http://127.0.0.1:$route_port/health" |
+            jq -e '
+              .service == "orichum-route-proxy" and .ready == true
+            ' >/dev/null
           curl -fsS "http://127.0.0.1:$route_port/v1/models" |
             jq -e '
               [.data[].id] as $ids |
@@ -156,9 +220,22 @@ jobs:
         run: |
           set -euo pipefail
           before_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
+          before_route_pid="$(
+            systemctl --user show orichum-route-proxy.service \
+              --property=MainPID --value
+          )"
+          before_python_target="$(readlink "$ORICHUM_DATA_HOME/bin/orichum-python")"
           ./install.sh | tee "$RUNNER_TEMP/orichum-upgrade.log"
           after_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
           test "$before_ports" = "$after_ports"
+          test "$before_route_pid" = "$(
+            systemctl --user show orichum-route-proxy.service \
+              --property=MainPID --value
+          )"
+          test "$before_python_target" = "$(
+            readlink "$ORICHUM_DATA_HOME/bin/orichum-python"
+          )"
+          grep -Fq 'Python action:  reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Headroom:    reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
@@ -178,6 +255,12 @@ jobs:
           done
           ports_file="$ORICHUM_DATA_HOME/service-ports.json"
           if [[ -f "$ports_file" ]]; then
+            jq '{
+              preferredClaudexProxyPort: .claudexProxyPort,
+              cliproxyPort,
+              headroomPort,
+              routeProxyPort
+            }' "$ports_file"
             for field_and_path in \
                 'cliproxyPort /v1/models' \
                 'headroomPort /health' \

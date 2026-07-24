@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
+export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-transaction.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
@@ -207,6 +208,7 @@ rg -Fq 'orichum_launcher_mutated=true' "$ROOT/install.sh"
 rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
+rg -Fq 'remove_orichum_python_generation' "$ROOT/install.sh"
 rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
 rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
 settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
@@ -224,6 +226,7 @@ end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
 rollback = source[start:end]
 
 stop_route = rollback.index("claudex_proxy_runtime_mutated")
+restore_python = rollback.index("rollback_python_activation")
 restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
     'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
@@ -233,6 +236,7 @@ restore_route = rollback.index("restore_claudex_proxy_service")
 restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
+    < restore_python
     < restore_private_tools
     < restore_cliproxy
     < restore_endpoint
@@ -245,16 +249,69 @@ if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in sou
     raise SystemExit("final Headroom readiness is not tied to usable route state")
 
 snapshot_private_tools = source.index("snapshot_private_tool_state")
+python_transaction = source.index("python_transaction_active=true")
+provision_python = source.index("install_or_reuse_orichum_python")
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
 upgrade_headroom = source.index("upgrade_headroom_distribution")
 if not (
+    python_transaction
+    < provision_python
+    < snapshot_private_tools
+    and
     snapshot_private_tools
     < upgrade_mempalace
     < upgrade_graphify
     < upgrade_headroom
 ):
     raise SystemExit("private tool snapshot does not precede all three upgrades")
+PY
+
+for acceptance_workflow in \
+    "$ROOT/.github/workflows/amd64-acceptance.yml" \
+    "$ROOT/.github/workflows/macos-arm64-acceptance.yml"; do
+  rg -Fq 'headroom-provider-pending.json' "$acceptance_workflow"
+  rg -Fq -- "--write-out '%{http_code}'" "$acceptance_workflow"
+  rg -Fq 'test "$headroom_status" = 200' "$acceptance_workflow"
+  rg -Fq '.status == "unhealthy"' "$acceptance_workflow"
+  rg -Fq '.ready == false' "$acceptance_workflow"
+  rg -Fq 'if ! bash "$test_script"; then' "$acceptance_workflow"
+  rg -Fq 'bash -x "$test_script"' "$acceptance_workflow"
+  rg -Fq 'report_acceptance_failure()' "$acceptance_workflow"
+  rg -Fq 'trap report_acceptance_failure ERR' "$acceptance_workflow"
+  rg -Fq "printf '%s\\n' \"\$doctor_output\"" "$acceptance_workflow"
+  python3 - "$acceptance_workflow" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+disable = source.index("trap - ERR", source.index("doctor_output=") - 300)
+capture = source.index("doctor_output=", disable)
+enable = source.index("trap report_acceptance_failure ERR", capture)
+if not disable < capture < enable:
+    raise SystemExit("expected doctor failure is not isolated from the ERR trap")
+PY
+  rg -Fq 'Native acceptance failure' "$acceptance_workflow"
+done
+
+rg -Fq 'report_test_failure()' "$ROOT/tests/test_installer.sh"
+rg -Fq 'trap report_test_failure ERR' "$ROOT/tests/test_installer.sh"
+rg -Fq 'ERROR: test_installer.sh:%s exited %s: %s' \
+  "$ROOT/tests/test_installer.sh"
+python3 - "$ROOT/install.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+start = source.index("claudex_proxy_runtime_is_owned()")
+end = source.index("\n}\n", start) + 3
+runtime_check = source[start:end]
+if "managed_service_main_pid" not in runtime_check:
+    raise SystemExit("route proxy readiness does not verify an active service")
+if "claudex_proxy_health_is_ready_at" not in runtime_check:
+    raise SystemExit("route proxy readiness does not verify health identity")
+if "pid_owns_loopback_listener" in runtime_check:
+    raise SystemExit("route proxy readiness still depends on socket metadata")
 PY
 
 printf 'PASS: Orichum installer rollback and port selection\n'

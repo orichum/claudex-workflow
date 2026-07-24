@@ -15,9 +15,10 @@ discover_models_main_core() {
   local data_root generation_root candidate_dir models_file effective_file
   local config_file active_generation routing_file config_root
   local resolver_status
-  local cliproxy_port headroom_port claudex_proxy_port
+  local cliproxy_port headroom_port claudex_proxy_port route_proxy_port
   data_root="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || return 1
-  if ! IFS=$'\t' read -r cliproxy_port headroom_port claudex_proxy_port \
+  if ! IFS=$'\t' read -r \
+      cliproxy_port headroom_port claudex_proxy_port route_proxy_port \
       < <(read_service_ports "$data_root"); then
     print_model_discovery_instruction
     return 1
@@ -55,7 +56,7 @@ discover_models_main_core() {
   fi
   if ! (
     cd "$WORKFLOW_ROOT"
-    python3 -B - "$routing_file" <<'PY'
+    workflow_python -B - "$routing_file" <<'PY'
 import sys
 from pathlib import Path
 from integrations.common.model_routing import load_routing_view
@@ -70,7 +71,7 @@ PY
   resolver_status=0
   (
     cd "$WORKFLOW_ROOT"
-    python3 -B -m integrations.common.model_routing validate \
+    workflow_python -B -m integrations.common.model_routing validate \
       --routing-config "$routing_file" \
       --models-file "$models_file" \
       --effective-output "$effective_file"
@@ -90,7 +91,7 @@ PY
   esac
   if ! render_discovered_claudex_config \
       "$effective_file" "$config_file" "$cliproxy_port" "$headroom_port" \
-      "$claudex_proxy_port"; then
+      "$claudex_proxy_port" "$route_proxy_port"; then
     rm -rf -- "$candidate_dir"
     print_model_discovery_instruction
     return 1

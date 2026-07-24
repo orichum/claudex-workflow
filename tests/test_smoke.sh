@@ -13,32 +13,52 @@ done
 install -d \
   "$fixture/fake-bin" \
   "$fixture/caller" \
-  "$fixture/shadowed/integrations/common"
+  "$fixture/shadowed/integrations/common" \
+  "$fixture/data/bin" \
+  "$fixture/data/python/cpython-3.14.6/bin"
+system_python="$(command -v python3)"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
-  'if [[ -n "${CAPTURE_ARGS:-}" ]]; then' \
+  'if [[ "$*" == *platform.python_implementation* ]]; then' \
+  "  printf 'CPython\\t3.14.6\\n'" \
+  'elif [[ -n "${CAPTURE_ARGS:-}" ]]; then' \
   '  printf "%s\n" "$@"' \
-  'else' \
+  'elif [[ -n "${OBSERVE_CWD:-}" ]]; then' \
   '  pwd' \
-  'fi' >"$fixture/fake-bin/python3"
+  'else' \
+  "  exec \"$system_python\" \"\$@\"" \
+  'fi' >"$fixture/data/python/cpython-3.14.6/bin/python3.14"
+chmod 0755 "$fixture/data/python/cpython-3.14.6/bin/python3.14"
+ln -s "$fixture/data/python/cpython-3.14.6/bin/python3.14" \
+  "$fixture/data/bin/orichum-python"
+printf '#!/usr/bin/env bash\nexit 99\n' >"$fixture/fake-bin/python3"
 chmod 0755 "$fixture/fake-bin/python3"
+export ORICHUM_DATA_HOME="$fixture/data"
 caller_dir="$(cd "$fixture/caller" && pwd -P)"
 observed_cwd="$(
   cd "$caller_dir"
-  PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum" config
+  OBSERVE_CWD=1 PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum" config
 )"
 [[ "$observed_cwd" == "$caller_dir" ]]
 
 install -d \
   "$fixture/post-install-system-bin" \
   "$fixture/post-install-user-bin" \
-  "$fixture/post-install-data/headroom/bin"
+  "$fixture/post-install-data/headroom/bin" \
+  "$fixture/post-install-data/bin" \
+  "$fixture/post-install-data/python/cpython-3.14.6/bin"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
+  'if [[ "$*" == *platform.python_implementation* ]]; then' \
+  "  printf 'CPython\\t3.14.6\\n'" \
+  '  exit 0' \
+  'fi' \
   'command -v mempalace-mcp' \
   'command -v graphify-mcp' \
-  >"$fixture/post-install-system-bin/python3"
-chmod 0755 "$fixture/post-install-system-bin/python3"
+  >"$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14"
+chmod 0755 "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14"
+ln -s "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14" \
+  "$fixture/post-install-data/bin/orichum-python"
 for private_tool in mempalace-mcp graphify-mcp; do
   printf '#!/usr/bin/env bash\nexit 0\n' \
     >"$fixture/post-install-data/headroom/bin/$private_tool"
@@ -63,6 +83,13 @@ forwarded="$(
 )"
 [[ "$(tail -n 3 <<<"$forwarded")" == $'--\n-p\nacceptance prompt' ]]
 rg -Fxq -- '-I' <<<"$forwarded"
+rg -Fq 'export ORICHUM_PYTHON_VALIDATED' "$ROOT/bin/orichum"
+if rg -n '(^|[[:space:]])python3([[:space:]]|$)' \
+    "$ROOT/bin" "$ROOT/controller/plugin/hooks/hooks.json" \
+    "$ROOT/discover-models.sh"; then
+  printf 'installed Orichum runtime still invokes ambient python3\n' >&2
+  exit 1
+fi
 
 touch \
   "$fixture/shadowed/integrations/__init__.py" \
@@ -105,7 +132,28 @@ rg -Fq 'ACCOUNT POOLS' <<<"$contexts"
 rg -Fq 'MCP_DOCKER' "$ROOT/README.md"
 rg -Fq 'orichum fork' "$ROOT/README.md"
 [[ "$(rg -c -- '--max-time 4' \
-  "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 3 ]]
+  "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 4 ]]
+rg -Fq \
+  'Claudex template separates per-session and recovery proxy ports' \
+  "$ROOT/doctor.sh"
+rg -Fq 'Claudex template is pending provider login' "$ROOT/doctor.sh"
+rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
+rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
+rg -Fq 'validate_orichum_python' \
+  "$ROOT/bin/orichum-runtime-ready"
+for parallel_health_contract in \
+    'clip_verify_pid=$!' \
+    'head_verify_pid=$!' \
+    'route_verify_pid=$!'; do
+  rg -Fq "$parallel_health_contract" "$ROOT/bin/orichum-runtime-ready"
+done
+for python_summary in \
+    'Python request: 3.14.x' \
+    'Python version:' \
+    'Python runtime:' \
+    'Python action:'; do
+  rg -Fq "$python_summary" "$ROOT/lib/workflow.sh"
+done
 [[ "$(jq -r '
   .hooks.SessionStart[0].hooks[0].timeout
 ' "$ROOT/controller/plugin/hooks/hooks.json")" == 6 ]]
@@ -129,7 +177,7 @@ for required_contract in \
     'timeout-minutes: 30' \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
     'sudo apt-get install --yes ripgrep' \
-    'PATH="$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+    'PATH="$poison_bin:$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
     'systemctl --user show orichum-headroom.service --property=ExecStart --value' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \

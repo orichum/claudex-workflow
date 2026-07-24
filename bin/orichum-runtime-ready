@@ -8,8 +8,18 @@ source "$workflow_root/lib/workflow.sh"
 [[ "$#" -eq 1 ]] || exit 2
 data_root="$1"
 [[ -d "$data_root" && ! -L "$data_root" ]] || exit 1
-IFS=$'\t' read -r cliproxy_port headroom_port route_port \
+ORICHUM_PYTHON="$(orichum_python_entrypoint "$data_root")"
+validate_orichum_python "$data_root" "$ORICHUM_PYTHON" >/dev/null
+export ORICHUM_PYTHON
+ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
+export ORICHUM_PYTHON_VALIDATED
+IFS=$'\t' read -r \
+  cliproxy_port headroom_port claudex_port route_port \
   < <(read_service_ports "$data_root")
+valid_service_port "$claudex_port"
+[[ "$claudex_port" != "$cliproxy_port" && \
+   "$claudex_port" != "$headroom_port" && \
+   "$claudex_port" != "$route_port" ]]
 
 case "$(uname -s)" in
   Darwin)
@@ -43,9 +53,11 @@ esac
 verify_service() {
   local file="$1" kind="$2" label="$3" unit="$4" port="$5" mode="${6:-}"
   if [[ -n "$mode" ]]; then
-    service_definition_is_owned "$file" "$data_root" "$kind" "$mode"
+    service_definition_is_owned \
+      "$file" "$data_root" "$kind" "$mode" "$workflow_root"
   else
-    service_definition_is_owned "$file" "$data_root" "$kind"
+    service_definition_is_owned \
+      "$file" "$data_root" "$kind" either "$workflow_root"
   fi
   managed_service_target_is_loaded "$platform" "$label" "$unit"
   [[ "$(managed_service_definition_path \
@@ -56,11 +68,22 @@ verify_service() {
 }
 
 verify_service \
-  "$clip_file" cliproxy "$clip_label" "$clip_unit" "$cliproxy_port"
+  "$clip_file" cliproxy "$clip_label" "$clip_unit" "$cliproxy_port" &
+clip_verify_pid=$!
 verify_service \
-  "$head_file" headroom "$head_label" "$head_unit" "$headroom_port" new
+  "$head_file" headroom "$head_label" "$head_unit" "$headroom_port" new &
+head_verify_pid=$!
 verify_service \
-  "$route_file" claudex-proxy "$route_label" "$route_unit" "$route_port"
+  "$route_file" claudex-proxy "$route_label" "$route_unit" "$route_port" &
+route_verify_pid=$!
+service_verification_ready=true
+for verify_pid in \
+    "$clip_verify_pid" "$head_verify_pid" "$route_verify_pid"; do
+  if ! wait "$verify_pid"; then
+    service_verification_ready=false
+  fi
+done
+[[ "$service_verification_ready" == true ]]
 
 temporary="$(mktemp "${TMPDIR:-/tmp}/orichum-models.XXXXXX")"
 trap 'rm -f -- "$temporary"' EXIT
@@ -68,8 +91,9 @@ curl -fsS --connect-timeout 1 --max-time 3 \
   "http://127.0.0.1:$cliproxy_port/v1/models" >"$temporary"
 cliproxy_models_response_is_ready "$temporary"
 curl -fsS --connect-timeout 1 --max-time 3 \
-  "http://127.0.0.1:$route_port/v1/models" >"$temporary"
-cliproxy_models_response_is_ready "$temporary"
+  "http://127.0.0.1:$route_port/health" | jq -e '
+    .service == "orichum-route-proxy" and .ready == true
+  ' >/dev/null
 curl -fsS --connect-timeout 1 --max-time 3 \
   "http://127.0.0.1:$headroom_port/health" | jq -e '
     .service == "headroom-proxy" and .status == "healthy" and .ready == true

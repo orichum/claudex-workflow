@@ -68,14 +68,42 @@ jobs:
               tests/test_plugins.sh \
               tests/test_installer.sh \
               tests/test_install_transaction.sh; do
-            bash "$test_script"
+            if ! bash "$test_script"; then
+              printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
+                "$test_script"
+              bash -x "$test_script"
+              exit 1
+            fi
           done
 
       - name: Fresh install without providers
         shell: bash
         run: |
           set -euo pipefail
+          report_acceptance_failure() {
+            local status="$?"
+            printf '::error title=Native acceptance failure::line %s exited %s: %s\n' \
+              "${BASH_LINENO[0]:-$LINENO}" "$status" "$BASH_COMMAND"
+            exit "$status"
+          }
+          trap report_acceptance_failure ERR
           ./install.sh
+          managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
+          test -x "$managed_python"
+          "$managed_python" -I -B -c '
+          import platform, sys
+          assert platform.python_implementation() == "CPython"
+          assert sys.version_info[:2] == (3, 14)
+          '
+          jq -e '
+            keys == [
+              "claudexProxyPort",
+              "cliproxyPort",
+              "headroomPort",
+              "routeProxyPort"
+            ] and
+            ([.[]] | unique | length) == 4
+          ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.cliproxy" >/dev/null
           headroom_service="$(
             launchctl print "gui/$(id -u)/io.orichum.headroom"
@@ -90,15 +118,32 @@ jobs:
           headroom_port="$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")"
           curl -fsS "http://127.0.0.1:$cliproxy_port/v1/models" |
             jq -e '.data | type == "array"' >/dev/null
-          curl -fsS "http://127.0.0.1:$headroom_port/health" |
-            jq -e '.service == "headroom-proxy"' >/dev/null
+          headroom_health="$RUNNER_TEMP/headroom-provider-pending.json"
+          headroom_status="$(
+            curl -sS --output "$headroom_health" \
+              --write-out '%{http_code}' \
+              "http://127.0.0.1:$headroom_port/health"
+          )"
+          test "$headroom_status" = 200
+          jq -e '
+            .service == "headroom-proxy" and
+            .status == "unhealthy" and
+            .ready == false
+          ' "$headroom_health" >/dev/null
+          trap - ERR
           set +e
+          poison_bin="$RUNNER_TEMP/poison-python"
+          mkdir -p "$poison_bin"
+          printf '#!/bin/sh\nexit 99\n' >"$poison_bin/python3"
+          chmod +x "$poison_bin/python3"
           doctor_output="$(
-            PATH="$USER_BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            PATH="$poison_bin:$USER_BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
               orichum doctor 2>&1
           )"
           doctor_rc=$?
           set -e
+          trap report_acceptance_failure ERR
+          printf '%s\n' "$doctor_output"
           test "$doctor_rc" -eq 1
           test "$(grep -c '^FAIL ' <<<"$doctor_output")" -eq 1
           grep -Fq 'provider login is pending' <<<"$doctor_output"
@@ -142,10 +187,25 @@ jobs:
             "macOS ARM64 Claude" anthropic claude-macos-arm64.json shared \
             --priority primary
           ./install.sh
+          jq -e '
+            keys == [
+              "claudexProxyPort",
+              "cliproxyPort",
+              "headroomPort",
+              "routeProxyPort"
+            ] and
+            ([.[]] | unique | length) == 4
+          ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.cliproxy" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.headroom" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.route-proxy" >/dev/null
+          launchctl print "gui/$(id -u)/io.orichum.route-proxy" |
+            rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-route-proxy"
           route_port="$(jq -r .routeProxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
+          curl -fsS "http://127.0.0.1:$route_port/health" |
+            jq -e '
+              .service == "orichum-route-proxy" and .ready == true
+            ' >/dev/null
           curl -fsS "http://127.0.0.1:$route_port/v1/models" |
             jq -e '
               [.data[].id] as $ids |
@@ -169,9 +229,22 @@ jobs:
         run: |
           set -euo pipefail
           before_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
+          before_route_pid="$(
+            launchctl print "gui/$(id -u)/io.orichum.route-proxy" |
+              awk '/^[[:space:]]*pid = / { print $3; exit }'
+          )"
+          before_python_target="$(readlink "$ORICHUM_DATA_HOME/bin/orichum-python")"
           ./install.sh | tee "$RUNNER_TEMP/orichum-upgrade.log"
           after_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
           test "$before_ports" = "$after_ports"
+          test "$before_route_pid" = "$(
+            launchctl print "gui/$(id -u)/io.orichum.route-proxy" |
+              awk '/^[[:space:]]*pid = / { print $3; exit }'
+          )"
+          test "$before_python_target" = "$(
+            readlink "$ORICHUM_DATA_HOME/bin/orichum-python"
+          )"
+          grep -Fq 'Python action:  reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Headroom:    reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
@@ -195,6 +268,12 @@ jobs:
           fi
           ports_file="$ORICHUM_DATA_HOME/service-ports.json"
           if [[ -f "$ports_file" ]]; then
+            jq '{
+              preferredClaudexProxyPort: .claudexProxyPort,
+              cliproxyPort,
+              headroomPort,
+              routeProxyPort
+            }' "$ports_file"
             for field_and_path in \
                 'cliproxyPort /v1/models' \
                 'headroomPort /health' \

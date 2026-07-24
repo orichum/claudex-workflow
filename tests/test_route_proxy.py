@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import threading
@@ -174,10 +175,33 @@ class ProxyHarness:
         connection.close()
         return response.status, payload
 
+    def get(self, path: str) -> tuple[int, bytes]:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=3
+        )
+        connection.request("GET", path)
+        response = connection.getresponse()
+        payload = response.read()
+        connection.close()
+        return response.status, payload
+
 
 class RouteProxyTests(unittest.TestCase):
     primary = "oc-r-0000000000000001/gpt-5.6-sol"
     fallback = "oc-r-0000000000000002/gpt-5.6-sol"
+
+    def test_health_is_local_and_does_not_require_upstream(self) -> None:
+        with ProxyHarness(65535, {}) as proxy:
+            status, body = proxy.get("/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "pid": os.getpid(),
+                "ready": True,
+                "service": "orichum-route-proxy",
+            },
+        )
 
     def test_normalizes_claudex_profile_path_for_cliproxy(self) -> None:
         with RecordingUpstream([(200, b"ok")]) as upstream:

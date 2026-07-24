@@ -5,9 +5,21 @@ WORKFLOW_ROOT="${CLAUDEX_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../
 # shellcheck source=../../../lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
-if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT CLAUDEX_PROXY_PORT \
+if ! IFS=$'\t' read -r \
+    CLIPROXY_PORT HEADROOM_PORT _ ROUTE_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   jq -cn '{systemMessage:"Orichum health warning: service port configuration is invalid."}'
+  exit 0
+fi
+SESSION_CLAUDEX_PORT_FILE="${CLAUDEX_RUN_DIR:-}/claudex-proxy-port"
+if [[ -z "${CLAUDEX_RUN_DIR:-}" ]] || \
+   [[ ! -f "$SESSION_CLAUDEX_PORT_FILE" || \
+      -L "$SESSION_CLAUDEX_PORT_FILE" ]] || \
+   [[ "$(path_mode "$SESSION_CLAUDEX_PORT_FILE" 2>/dev/null || true)" != 600 ]] || \
+   ! SESSION_CLAUDEX_PORT="$(<"$SESSION_CLAUDEX_PORT_FILE")" || \
+   ! valid_service_port "$SESSION_CLAUDEX_PORT"; then
+  jq -cn \
+    '{systemMessage:"Orichum health warning: session Claudex proxy state is invalid."}'
   exit 0
 fi
 
@@ -18,6 +30,8 @@ models_response=""
 models_error=""
 claudex_response=""
 claudex_error=""
+session_response=""
+session_error=""
 
 # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
@@ -38,6 +52,12 @@ cleanup() {
   fi
   if [[ -n "$claudex_error" ]]; then
     rm -f -- "$claudex_error" || :
+  fi
+  if [[ -n "$session_response" ]]; then
+    rm -f -- "$session_response" || :
+  fi
+  if [[ -n "$session_error" ]]; then
+    rm -f -- "$session_error" || :
   fi
   if [[ -n "$tmp_dir" ]]; then
     rmdir "$tmp_dir" 2>/dev/null || :
@@ -64,6 +84,8 @@ models_response="$tmp_dir/models.response"
 models_error="$tmp_dir/models.error"
 claudex_response="$tmp_dir/claudex.response"
 claudex_error="$tmp_dir/claudex.error"
+session_response="$tmp_dir/session.response"
+session_error="$tmp_dir/session.error"
 if ! (umask 077
   : >"$headroom_response"
   : >"$headroom_error"
@@ -71,10 +93,13 @@ if ! (umask 077
   : >"$models_error"
   : >"$claudex_response"
   : >"$claudex_error"
+  : >"$session_response"
+  : >"$session_error"
   chmod 0600 \
     "$headroom_response" "$headroom_error" \
     "$models_response" "$models_error" \
-    "$claudex_response" "$claudex_error"
+    "$claudex_response" "$claudex_error" \
+    "$session_response" "$session_error"
 ) 2>/dev/null; then
   emit_warning "Orichum health warning: local service health check could not secure response files."
   exit 0
@@ -89,13 +114,18 @@ curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   >"$models_response" 2>"$models_error" &
 models_pid=$!
 curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
-  "http://127.0.0.1:$CLAUDEX_PROXY_PORT/v1/models" \
+  "http://127.0.0.1:$ROUTE_PROXY_PORT/v1/models" \
   >"$claudex_response" 2>"$claudex_error" &
 claudex_pid=$!
+curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
+  "http://127.0.0.1:$SESSION_CLAUDEX_PORT/health" \
+  >"$session_response" 2>"$session_error" &
+session_pid=$!
 
 headroom_status=0
 models_status=0
 claudex_status=0
+session_status=0
 if wait "$headroom_pid"; then
   :
 else
@@ -111,11 +141,16 @@ if wait "$claudex_pid"; then
 else
   claudex_status=$?
 fi
+if wait "$session_pid"; then
+  :
+else
+  session_status=$?
+fi
 
 warning=""
 if [[ "$headroom_status" -ne 0 || "$models_status" -ne 0 || \
-      "$claudex_status" -ne 0 ]]; then
-  warning="Orichum health warning: a bounded local Headroom, CLIProxyAPI, or Orichum proxy request failed."
+      "$claudex_status" -ne 0 || "$session_status" -ne 0 ]]; then
+  warning="Orichum health warning: a bounded local Claudex, Headroom, CLIProxyAPI, or Orichum proxy request failed."
 elif ! jq -e '
   .service == "headroom-proxy" and
   .status == "healthy" and
@@ -186,7 +221,9 @@ else
 fi
 
 if [[ -z "$warning" ]]; then
-  if [[ -z "$effective_controller" ]] || \
+  if [[ "$(<"$session_response")" != ok ]]; then
+    warning="Orichum health warning: session Claudex proxy is not healthy."
+  elif [[ -z "$effective_controller" ]] || \
      ! claudex_proxy_models_response_is_ready \
        "$claudex_response" "$effective_controller"; then
     warning="Orichum health warning: persistent Orichum proxy does not expose the configured controller model."
