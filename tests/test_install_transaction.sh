@@ -306,7 +306,9 @@ source = Path(sys.argv[1]).read_text()
 start = source.index("claudex_proxy_runtime_is_owned()")
 end = source.index("\n}\n", start) + 3
 runtime_check = source[start:end]
-if "claudex_proxy_health_is_owned_at" not in runtime_check:
+if "managed_service_main_pid" not in runtime_check:
+    raise SystemExit("route proxy readiness does not verify an active service")
+if "claudex_proxy_health_is_ready_at" not in runtime_check:
     raise SystemExit("route proxy readiness does not verify health identity")
 if "pid_owns_loopback_listener" in runtime_check:
     raise SystemExit("route proxy readiness still depends on socket metadata")
