@@ -136,6 +136,8 @@ rg -Fq 'orichum fork' "$ROOT/README.md"
 rg -Fq \
   'Claudex template separates per-session and recovery proxy ports' \
   "$ROOT/doctor.sh"
+rg -Fq 'Claudex template is pending provider login' "$ROOT/doctor.sh"
+rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_orichum_python' \
   "$ROOT/bin/orichum-runtime-ready"

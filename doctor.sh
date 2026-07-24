@@ -29,12 +29,17 @@ else
   fail 'focused control plane is invalid'
 fi
 
+provider_login_pending=false
+if [[ -f "$config_root/accounts.json" ]] && \
+   jq -e '.schemaVersion == 2 and (.accounts | length == 0)' \
+     "$config_root/accounts.json" >/dev/null 2>&1; then
+  provider_login_pending=true
+fi
+
 if "$WORKFLOW_ROOT/bin/orichum-runtime-ready" "$data_root" \
     >/dev/null 2>&1; then
   ok 'CLIProxyAPI, route proxy, and Headroom are owned and ready'
-elif [[ -f "$config_root/accounts.json" ]] && \
-     jq -e '.schemaVersion == 2 and (.accounts | length == 0)' \
-       "$config_root/accounts.json" >/dev/null 2>&1; then
+elif [[ "$provider_login_pending" == true ]]; then
   fail 'provider login is pending; register an account, then re-run install.sh'
 else
   fail 'one or more Orichum services are absent, foreign, or unhealthy'
@@ -55,6 +60,9 @@ if IFS=$'\t' read -r \
 fi
 if [[ "$ports_valid" == true ]]; then
   ok 'Claudex template separates per-session and recovery proxy ports'
+elif [[ "$provider_login_pending" == true && \
+        ! -e "$claudex_config" && ! -L "$claudex_config" ]]; then
+  ok 'Claudex template is pending provider login'
 else
   fail 'Claudex template conflates its listener with the recovery proxy'
 fi
