@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import http.client
 import json
+import math
 from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest import mock
@@ -274,6 +276,7 @@ class StackCatalogTests(unittest.TestCase):
         ):
             with self.assertRaises(CatalogError):
                 fetch_live_catalog(8317)
+        response.read.assert_not_called()
 
         response.status = 200
         response.read.return_value = b"x" * (MAX_MODEL_CATALOG_BYTES + 1)
@@ -288,6 +291,136 @@ class StackCatalogTests(unittest.TestCase):
             with self.subTest(port=port):
                 with self.assertRaises(CatalogError):
                     fetch_live_catalog(port)
+
+    def test_fetch_rejects_invalid_timeout_before_opening_socket(self) -> None:
+        invalid = (
+            None,
+            "1",
+            True,
+            False,
+            0,
+            -1,
+            math.nan,
+            math.inf,
+            -math.inf,
+        )
+        for timeout in invalid:
+            with self.subTest(timeout=timeout):
+                with mock.patch(
+                    "integrations.common.stack_catalog.http.client.HTTPConnection"
+                ) as connect:
+                    with self.assertRaises(CatalogError):
+                        fetch_live_catalog(8317, timeout=timeout)
+                connect.assert_not_called()
+
+    def test_fetch_enforces_total_deadline_during_slow_body(self) -> None:
+        class Clock:
+            value = 0.0
+
+            def monotonic(self) -> float:
+                return self.value
+
+        clock = Clock()
+        body = bytearray(b'{"data":[]}')
+        header = bytearray(
+            b"HTTP/1.1 200 OK\r\nContent-Length: "
+            + str(len(body)).encode("ascii")
+            + b"\r\n\r\n"
+        )
+
+        class SlowSocket:
+            def __init__(self) -> None:
+                self.timeout = None
+
+            def settimeout(self, timeout: float) -> None:
+                self.timeout = timeout
+
+            def sendall(self, _payload: bytes) -> None:
+                return
+
+            def recv_into(self, target: bytearray) -> int:
+                source = header if header else body
+                if not source:
+                    return 0
+                count = len(source) if header else 1
+                target[:count] = source[:count]
+                del source[:count]
+                if source is body:
+                    clock.value += 0.3
+                return count
+
+            def makefile(self, _mode: str):
+                outer = self
+
+                class SlowFile:
+                    def readline(self, limit: int = -1) -> bytes:
+                        if not header:
+                            return b""
+                        newline = header.index(b"\n") + 1
+                        count = (
+                            newline
+                            if limit < 0
+                            else min(newline, limit)
+                        )
+                        result = bytes(header[:count])
+                        del header[:count]
+                        return result
+
+                    def read(self, count: int = -1) -> bytes:
+                        amount = (
+                            len(body)
+                            if count < 0
+                            else min(count, len(body))
+                        )
+                        result = bytes(body[:amount])
+                        del body[:amount]
+                        clock.value += 0.3 * amount
+                        return result
+
+                    def close(self) -> None:
+                        outer.close()
+
+                return SlowFile()
+
+            def close(self) -> None:
+                return
+
+        class SlowConnection:
+            def __init__(self) -> None:
+                self.sock = None
+
+            def connect(self) -> None:
+                self.sock = SlowSocket()
+
+            def request(self, _method: str, _path: str) -> None:
+                if self.sock is None:
+                    self.connect()
+                self.sock.sendall(b"request")
+
+            def getresponse(self) -> http.client.HTTPResponse:
+                response = http.client.HTTPResponse(
+                    self.sock, method="GET"
+                )
+                response.begin()
+                return response
+
+            def close(self) -> None:
+                if self.sock is not None:
+                    self.sock.close()
+
+        connection = SlowConnection()
+        with (
+            mock.patch(
+                "integrations.common.stack_catalog.http.client.HTTPConnection",
+                return_value=connection,
+            ),
+            mock.patch(
+                "time.monotonic",
+                side_effect=clock.monotonic,
+            ),
+        ):
+            with self.assertRaisesRegex(CatalogError, "deadline"):
+                fetch_live_catalog(8317, timeout=1.0)
 
 
 if __name__ == "__main__":

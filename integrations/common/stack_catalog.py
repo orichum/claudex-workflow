@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import http.client
+import io
 import json
+import math
+import time
 from typing import Mapping, Sequence
 
 from .account_registry import Account
@@ -58,6 +61,47 @@ def _unique_object(
     return result
 
 
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CatalogError("live model catalogue deadline exceeded")
+    return remaining
+
+
+class _DeadlineRawIO(io.RawIOBase):
+    def __init__(self, sock: object, deadline: float) -> None:
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, target: object) -> int:
+        self._sock.settimeout(_remaining(self._deadline))
+        return self._sock.recv_into(target)
+
+
+class _DeadlineSocket:
+    def __init__(self, sock: object, deadline: float) -> None:
+        self._sock = sock
+        self._deadline = deadline
+
+    def sendall(self, payload: bytes) -> None:
+        self._sock.settimeout(_remaining(self._deadline))
+        self._sock.sendall(payload)
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        if mode != "rb":
+            raise CatalogError("CLIProxyAPI response mode is invalid")
+        return io.BufferedReader(
+            _DeadlineRawIO(self._sock, self._deadline)
+        )
+
+    def close(self) -> None:
+        self._sock.close()
+
+
 def fetch_live_catalog(port: int, timeout: float = 4.0) -> object:
     """Fetch one bounded model list from a loopback CLIProxyAPI port."""
     if type(port) is not int or port < 1024 or port > 65535:
@@ -66,17 +110,28 @@ def fetch_live_catalog(port: int, timeout: float = 4.0) -> object:
         isinstance(timeout, bool)
         or not isinstance(timeout, (int, float))
         or timeout <= 0
+        or not math.isfinite(timeout)
     ):
         raise CatalogError("CLIProxyAPI timeout is invalid")
+    duration = float(timeout)
+    deadline = time.monotonic() + duration
     connection = http.client.HTTPConnection(
-        "127.0.0.1", port, timeout=timeout
+        "127.0.0.1", port, timeout=duration
     )
     try:
+        connection.connect()
+        if connection.sock is None:
+            raise CatalogError("CLIProxyAPI connection is unavailable")
+        _remaining(deadline)
+        connection.sock = _DeadlineSocket(connection.sock, deadline)
         connection.request("GET", "/v1/models")
+        _remaining(deadline)
         response = connection.getresponse()
-        payload = response.read(MAX_MODEL_CATALOG_BYTES + 1)
+        _remaining(deadline)
         if response.status != 200:
             raise CatalogError("CLIProxyAPI model request was rejected")
+        payload = response.read(MAX_MODEL_CATALOG_BYTES + 1)
+        _remaining(deadline)
         if len(payload) > MAX_MODEL_CATALOG_BYTES:
             raise CatalogError("CLIProxyAPI model catalogue is too large")
         document = json.loads(
