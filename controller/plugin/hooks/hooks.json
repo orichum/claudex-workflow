@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/route-mempalace-input.py\"",
+          "command": "\"${ORICHUM_PYTHON}\" \"${CLAUDE_PLUGIN_ROOT}/scripts/route-mempalace-input.py\"",
             "timeout": 5
           }
         ]

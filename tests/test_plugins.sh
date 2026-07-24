@@ -4,16 +4,32 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/lib/workflow.sh"
+export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
 checkout="$fixture/checkout"
+private_data="$fixture/private data"
 install -d "$checkout/bin" "$checkout/lib" "$checkout/config" \
-  "$fixture/fake-bin" "$fixture/fake-state"
+  "$fixture/fake-bin" "$fixture/fake-state" \
+  "$private_data/bin" \
+  "$private_data/python/cpython-3.14.6/bin"
 cp "$ROOT/lib/workflow.sh" "$checkout/lib/workflow.sh"
 cp "$ROOT/config/plugins.json" "$checkout/config/plugins.json"
 cp "$ROOT/bin/orichum-plugin" "$checkout/bin/orichum-plugin"
 chmod 0755 "$checkout/bin/orichum-plugin"
+system_python="$(command -v python3)"
+cat >"$private_data/python/cpython-3.14.6/bin/python3.14" <<PYTHON
+#!/usr/bin/env bash
+if [[ "\$*" == *platform.python_implementation* ]]; then
+  printf 'CPython\\t3.14.6\\n'
+  exit 0
+fi
+exec "$system_python" "\$@"
+PYTHON
+chmod 0755 "$private_data/python/cpython-3.14.6/bin/python3.14"
+ln -s "$private_data/python/cpython-3.14.6/bin/python3.14" \
+  "$private_data/bin/orichum-python"
 
 printf '[]\n' >"$fixture/fake-state/marketplaces.json"
 printf '[]\n' >"$fixture/fake-state/plugins.json"
@@ -80,7 +96,7 @@ run_plugin() {
   PATH="$fixture/fake-bin:$PATH" \
     FAKE_CLAUDE_STATE="$fixture/fake-state" \
     ORICHUM_CONFIG_HOME="$checkout/config" \
-    ORICHUM_DATA_HOME="$fixture/private data" \
+    ORICHUM_DATA_HOME="$private_data" \
     "$checkout/bin/orichum-plugin" "$@"
 }
 

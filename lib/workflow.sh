@@ -30,6 +30,375 @@ workflow_data_dir() {
   esac
 }
 
+orichum_python_root() {
+  local data_root="$1"
+  [[ "$data_root" == /* && "$data_root" != / ]] || {
+    workflow_die "Orichum data root must be an absolute private path"
+    return 1
+  }
+  printf '%s/python' "${data_root%/}"
+}
+
+orichum_python_entrypoint() {
+  local data_root="$1"
+  [[ "$data_root" == /* && "$data_root" != / ]] || {
+    workflow_die "Orichum data root must be an absolute private path"
+    return 1
+  }
+  printf '%s/bin/orichum-python' "${data_root%/}"
+}
+
+workflow_physical_path() {
+  local candidate="$1"
+  local link_target directory
+  [[ "$candidate" == /* ]] || return 1
+  while [[ -L "$candidate" ]]; do
+    link_target="$(readlink "$candidate")" || return 1
+    case "$link_target" in
+      /*) candidate="$link_target" ;;
+      *) candidate="$(dirname "$candidate")/$link_target" ;;
+    esac
+  done
+  directory="$(cd -P -- "$(dirname "$candidate")" && pwd)" || return 1
+  printf '%s/%s' "$directory" "$(basename "$candidate")"
+}
+
+path_uid() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%u' "$1" ;;
+    Linux) stat -c '%u' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_orichum_python() {
+  local data_root="$1"
+  local interpreter="$2"
+  local private_root private_root_real interpreter_real identity implementation version
+  local root_mode interpreter_mode current_uid current_dir current_mode
+  local entrypoint_dir="$data_root/bin"
+  private_root="$(orichum_python_root "$data_root")" || return 1
+  [[ -d "$private_root" && ! -L "$private_root" ]] || {
+    workflow_die "private Python root is missing or unsafe: $private_root"
+    return 1
+  }
+  private_root_real="$(workflow_physical_path "$private_root")" || return 1
+  interpreter_real="$(workflow_physical_path "$interpreter")" || {
+    workflow_die "private Python interpreter could not be resolved"
+    return 1
+  }
+  case "$interpreter_real" in
+    "$private_root_real"/*) ;;
+    *)
+      workflow_die "Python interpreter is outside private Python root"
+      return 1
+      ;;
+  esac
+  [[ -f "$interpreter_real" && ! -L "$interpreter_real" && \
+     -x "$interpreter_real" ]] || {
+    workflow_die "private Python interpreter is not a regular executable"
+    return 1
+  }
+  current_uid="$(id -u)"
+  [[ -d "$entrypoint_dir" && ! -L "$entrypoint_dir" && \
+     "$(path_uid "$entrypoint_dir")" == "$current_uid" && \
+     "$(path_uid "$private_root")" == "$current_uid" && \
+     "$(path_uid "$interpreter_real")" == "$current_uid" ]] || {
+    workflow_die "private Python runtime is not owned by the current user"
+    return 1
+  }
+  root_mode="$(path_mode "$private_root")" || return 1
+  interpreter_mode="$(path_mode "$interpreter_real")" || return 1
+  (( (8#$root_mode & 0022) == 0 && \
+     (8#$interpreter_mode & 0022) == 0 )) || {
+    workflow_die "private Python runtime is writable by group or others"
+    return 1
+  }
+  current_mode="$(path_mode "$entrypoint_dir")" || return 1
+  (( (8#$current_mode & 0022) == 0 )) || {
+    workflow_die "private Python runtime is writable by group or others"
+    return 1
+  }
+  current_dir="$(dirname "$interpreter_real")"
+  while [[ "$current_dir" != "$private_root_real" ]]; do
+    [[ -d "$current_dir" && ! -L "$current_dir" && \
+       "$(path_uid "$current_dir")" == "$current_uid" ]] || {
+      workflow_die "private Python runtime is not owned by the current user"
+      return 1
+    }
+    current_mode="$(path_mode "$current_dir")" || return 1
+    (( (8#$current_mode & 0022) == 0 )) || {
+      workflow_die "private Python runtime is writable by group or others"
+      return 1
+    }
+    current_dir="$(dirname "$current_dir")"
+  done
+  identity="$(
+    "$interpreter_real" -I -B -c \
+      'import platform,sys; print(f"{platform.python_implementation()}\t{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")'
+  )" || {
+    workflow_die "private Python interpreter identity probe failed"
+    return 1
+  }
+  IFS=$'\t' read -r implementation version <<<"$identity"
+  [[ "$implementation" == CPython && "$version" == 3.14.* ]] || {
+    workflow_die "Orichum requires CPython 3.14.x, found ${implementation:-unknown} ${version:-unknown}"
+    return 1
+  }
+  printf '%s\t%s\n' "$version" "$interpreter_real"
+}
+
+resolve_orichum_python() {
+  local data_root="$1"
+  local entrypoint
+  entrypoint="$(orichum_python_entrypoint "$data_root")" || return 1
+  validate_orichum_python "$data_root" "$entrypoint" >/dev/null || return 1
+  printf '%s' "$entrypoint"
+}
+
+workflow_python() {
+  local data_root interpreter
+  if [[ "${ORICHUM_INSTALL_BOOTSTRAP:-false}" == true && \
+        -z "${ORICHUM_PYTHON:-}" ]]; then
+    python3 "$@"
+    return
+  fi
+  data_root="$(workflow_data_dir)" || return 1
+  interpreter="${ORICHUM_PYTHON:-$(orichum_python_entrypoint "$data_root")}"
+  if [[ "${ORICHUM_PYTHON_VALIDATED:-}" != "$interpreter" ]]; then
+    validate_orichum_python "$data_root" "$interpreter" >/dev/null || return 1
+    ORICHUM_PYTHON_VALIDATED="$interpreter"
+    export ORICHUM_PYTHON_VALIDATED
+  fi
+  "$interpreter" "$@"
+}
+
+python_version_is_at_least() {
+  local current="$1"
+  local available="$2"
+  jq -en --arg current "$current" --arg available "$available" '
+    def version_parts:
+      split(".")
+      | if length == 3 and all(.[]; test("^[0-9]+$"))
+        then map(tonumber)
+        else error("invalid Python version")
+        end;
+    ($current | version_parts) >= ($available | version_parts)
+  ' >/dev/null
+}
+
+install_or_reuse_orichum_python() (
+  local data_root="$1"
+  local private_root entrypoint prior_identity prior_version=
+  local available_json latest_version stage_root stage_root_real candidate
+  local candidate_real
+  local relative generation_name generation destination identity version action
+  private_root="$(orichum_python_root "$data_root")" || return 1
+  entrypoint="$(orichum_python_entrypoint "$data_root")" || return 1
+  install -d -m 0700 \
+    "$data_root" "$data_root/bin" "$data_root/state" "$private_root" || return 1
+  if prior_identity="$(validate_orichum_python "$data_root" "$entrypoint" 2>/dev/null)"; then
+    IFS=$'\t' read -r prior_version candidate_real <<<"$prior_identity"
+  fi
+  if ! available_json="$(
+      uv python list --only-downloads --output-format json \
+        --no-config 3.14
+    )"; then
+    if [[ -n "$prior_version" ]]; then
+      printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
+      return 0
+    fi
+    workflow_die "uv could not resolve the latest private CPython 3.14"
+    return 1
+  fi
+  latest_version="$(
+    jq -er '
+      [
+        .[]
+        | select(
+            .version_parts.major == 3 and
+            .version_parts.minor == 14
+          )
+      ]
+      | sort_by([
+          .version_parts.major,
+          .version_parts.minor,
+          .version_parts.patch
+        ])
+      | last
+      | .version
+    ' <<<"$available_json"
+  )" || {
+    workflow_die "uv returned no downloadable CPython 3.14 runtime"
+    return 1
+  }
+  if [[ -n "$prior_version" ]] && \
+     python_version_is_at_least "$prior_version" "$latest_version"; then
+    printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
+    return 0
+  fi
+  stage_root="$(mktemp -d \
+    "$data_root/state/python-stage.XXXXXX")" || return 1
+  chmod 0700 "$stage_root" || return 1
+  stage_root_real="$(workflow_physical_path "$stage_root")" || return 1
+  trap 'rm -rf -- "$stage_root"' EXIT
+  if ! uv python install --install-dir "$stage_root" \
+      --no-bin --no-config "$latest_version" 1>&2; then
+    if [[ -n "$prior_version" ]]; then
+      printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
+      return 0
+    fi
+    workflow_die "uv could not install private CPython $latest_version"
+    return 1
+  fi
+  candidate="$(
+    UV_PYTHON_INSTALL_DIR="$stage_root" \
+      uv python find --managed-python --no-project --no-python-downloads \
+        --resolve-links --no-config "$latest_version"
+  )" || {
+    workflow_die "uv could not resolve staged CPython $latest_version"
+    return 1
+  }
+  candidate_real="$(workflow_physical_path "$candidate")" || return 1
+  case "$candidate_real" in
+    "$stage_root_real"/*) ;;
+    *)
+      workflow_die "uv staged Python outside the private staging root"
+      return 1
+      ;;
+  esac
+  relative="${candidate_real#"$stage_root_real"/}"
+  generation_name="${relative%%/*}"
+  [[ "$generation_name" == cpython-* && \
+     "$relative" != "$generation_name" ]] || {
+    workflow_die "uv staged Python has an unexpected layout"
+    return 1
+  }
+  generation="$stage_root_real/$generation_name"
+  destination="$private_root/$generation_name"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    candidate="$destination/${relative#*/}"
+    if identity="$(validate_orichum_python \
+        "$data_root" "$candidate" 2>/dev/null)"; then
+      generation=
+    else
+      remove_orichum_python_generation \
+        "$data_root" "$destination" || return 1
+      mv -- "$generation" "$destination" || return 1
+      generation="$destination"
+      candidate="$destination/${relative#*/}"
+      if ! identity="$(validate_orichum_python "$data_root" "$candidate")"; then
+        remove_orichum_python_generation \
+          "$data_root" "$destination" || true
+        return 1
+      fi
+    fi
+  else
+    mv -- "$generation" "$destination" || return 1
+    generation="$destination"
+    candidate="$destination/${relative#*/}"
+    if ! identity="$(validate_orichum_python "$data_root" "$candidate")"; then
+      rm -rf -- "$destination"
+      return 1
+    fi
+  fi
+  IFS=$'\t' read -r version candidate_real <<<"$identity"
+  if [[ -z "$prior_version" ]]; then
+    action=installed
+  elif [[ "$prior_version" == "$version" ]]; then
+    action=reused
+  else
+    action=upgraded
+  fi
+  printf '%s\t%s\t%s\t%s\n' \
+    "$action" "$version" "$candidate_real" "$generation"
+)
+
+remove_orichum_python_generation() {
+  local data_root="$1"
+  local generation="$2"
+  local private_root private_root_real generation_parent generation_real
+  [[ -n "$generation" ]] || return 0
+  private_root="$(orichum_python_root "$data_root")" || return 1
+  private_root_real="$(workflow_physical_path "$private_root")" || return 1
+  [[ -d "$generation" && ! -L "$generation" && \
+     "$(path_uid "$generation")" == "$(id -u)" ]] || return 1
+  generation_parent="$(workflow_physical_path "$(dirname "$generation")")" || \
+    return 1
+  generation_real="$(workflow_physical_path "$generation")" || return 1
+  [[ "$generation_parent" == "$private_root_real" && \
+     "$generation_real" == "$private_root_real"/cpython-* && \
+     "$(path_uid "$generation_parent")" == "$(id -u)" ]] || {
+    workflow_die "refusing unsafe private Python generation removal"
+    return 1
+  }
+  rm -rf -- "$generation_real"
+}
+
+activate_orichum_python() {
+  local data_root="$1"
+  local interpreter="$2"
+  local entrypoint identity interpreter_real temporary
+  entrypoint="$(orichum_python_entrypoint "$data_root")" || return 1
+  identity="$(validate_orichum_python "$data_root" "$interpreter")" || return 1
+  IFS=$'\t' read -r _ interpreter_real <<<"$identity"
+  [[ -d "$data_root/bin" && ! -L "$data_root/bin" && \
+     "$(path_uid "$data_root/bin")" == "$(id -u)" ]] || {
+    workflow_die "private Python entry-point directory is unsafe"
+    return 1
+  }
+  temporary="$data_root/bin/.orichum-python.$$.$RANDOM"
+  rm -f -- "$temporary"
+  ln -s "$interpreter_real" "$temporary" || return 1
+  if ! mv -f -- "$temporary" "$entrypoint"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  resolve_orichum_python "$data_root" >/dev/null
+}
+
+preflight_orichum_python_runtime() (
+  local interpreter="$1"
+  local workflow_root="$2"
+  local data_root="$3"
+  local port pid= ready=false
+  local route_runner
+  [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
+  install -d -m 0700 "$data_root/state" || return 1
+  port="$(
+    "$interpreter" -I -B -c \
+      'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  )" || return 1
+  valid_service_port "$port" || return 1
+  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
+  cleanup_python_preflight() {
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_python_preflight EXIT
+  ORICHUM_WORKFLOW_ROOT="$workflow_root" \
+    "$interpreter" -I -B -c "$route_runner" \
+      --port "$port" --upstream-port 65535 \
+      --state-home "$data_root/state" --data-home "$data_root" \
+      >/dev/null 2>&1 &
+  pid=$!
+  for _ in {1..50}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    if "$interpreter" -I -B -c \
+        'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),0.2); s.close()' \
+        "$port" >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 0.02
+  done
+  [[ "$ready" == true ]]
+)
+
 service_ports_file() {
   printf '%s/service-ports.json' "$1"
 }
@@ -46,34 +415,74 @@ read_service_ports() {
   local ports_file
   ports_file="$(service_ports_file "$data_root")"
   if [[ ! -e "$ports_file" ]]; then
-    printf '8317\t8787\t13456\n'
+    printf '8317\t8787\t13456\t13457\n'
     return 0
   fi
   [[ -f "$ports_file" && ! -L "$ports_file" ]] || return 1
   jq -er '
+    def next_port($used):
+      first(
+        range(13456; 65536) as $candidate |
+        select(($used | index($candidate)) == null) |
+        $candidate
+      );
     select(type == "object") |
     if keys == ["cliproxyPort", "headroomPort"] then
-      . + {routeProxyPort:
-        (if .cliproxyPort != 13456 and .headroomPort != 13456 then 13456
-         elif .cliproxyPort != 13457 and .headroomPort != 13457 then 13457
-         else 13458
-         end)}
+      . as $legacy |
+      ($legacy + {routeProxyPort:
+        next_port([
+          $legacy.cliproxyPort,
+          $legacy.headroomPort,
+          13456
+        ])}) |
+      . + {claudexProxyPort:
+        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])}
     elif keys == ["claudexProxyPort", "cliproxyPort", "headroomPort"] then
-      {routeProxyPort: .claudexProxyPort, cliproxyPort, headroomPort}
-    elif keys == ["cliproxyPort", "headroomPort", "routeProxyPort"] then .
+      {
+        routeProxyPort: .claudexProxyPort,
+        cliproxyPort,
+        headroomPort
+      } |
+      . + {claudexProxyPort:
+        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])}
+    elif keys == ["cliproxyPort", "headroomPort", "routeProxyPort"] then
+      . + {claudexProxyPort:
+        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])}
+    elif keys == [
+      "claudexProxyPort",
+      "cliproxyPort",
+      "headroomPort",
+      "routeProxyPort"
+    ] then .
     else
       empty
     end |
-    select(keys == ["cliproxyPort", "headroomPort", "routeProxyPort"]) |
+    select(keys == [
+      "claudexProxyPort",
+      "cliproxyPort",
+      "headroomPort",
+      "routeProxyPort"
+    ]) |
     select(.cliproxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
     select(.headroomPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
+    select(.claudexProxyPort | type == "number" and floor == . and
+      . >= 1024 and . <= 65535) |
     select(.routeProxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
-    select(([.cliproxyPort, .headroomPort, .routeProxyPort] |
-      unique | length) == 3) |
-    [.cliproxyPort, .headroomPort, .routeProxyPort] | @tsv
+    select(([
+      .cliproxyPort,
+      .headroomPort,
+      .claudexProxyPort,
+      .routeProxyPort
+    ] | unique | length) == 4) |
+    [
+      .cliproxyPort,
+      .headroomPort,
+      .claudexProxyPort,
+      .routeProxyPort
+    ] | @tsv
   ' "$ports_file"
 }
 
@@ -81,13 +490,18 @@ write_service_ports() {
   local data_root="$1"
   local cliproxy_port="$2"
   local headroom_port="$3"
-  local route_proxy_port="$4"
+  local claudex_proxy_port="$4"
+  local route_proxy_port="$5"
   local ports_file temporary
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$headroom_port" || return 1
+  valid_service_port "$claudex_proxy_port" || return 1
   valid_service_port "$route_proxy_port" || return 1
   [[ "$cliproxy_port" != "$headroom_port" && \
+     "$cliproxy_port" != "$claudex_proxy_port" && \
      "$cliproxy_port" != "$route_proxy_port" && \
+     "$headroom_port" != "$claudex_proxy_port" && \
+     "$claudex_proxy_port" != "$route_proxy_port" && \
      "$headroom_port" != "$route_proxy_port" ]] || return 1
   install -d -m 0700 "$data_root" || return 1
   ports_file="$(service_ports_file "$data_root")"
@@ -95,9 +509,14 @@ write_service_ports() {
   temporary="$(mktemp "$data_root/.service-ports.XXXXXX")" || return 1
   if ! jq -n --argjson cliproxy "$cliproxy_port" \
       --argjson headroom "$headroom_port" \
+      --argjson claudex_proxy "$claudex_proxy_port" \
       --argjson route_proxy "$route_proxy_port" \
-      '{routeProxyPort: $route_proxy, cliproxyPort: $cliproxy,
-        headroomPort: $headroom}' >"$temporary" || \
+      '{
+        claudexProxyPort: $claudex_proxy,
+        cliproxyPort: $cliproxy,
+        headroomPort: $headroom,
+        routeProxyPort: $route_proxy
+      }' >"$temporary" || \
      ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$ports_file"; then
     rm -f -- "$temporary"
     return 1
@@ -107,7 +526,7 @@ write_service_ports() {
 port_is_available() {
   local port="$1"
   valid_service_port "$port" || return 1
-  python3 - "$port" <<'PY'
+  workflow_python - "$port" <<'PY'
 import socket
 import sys
 
@@ -130,7 +549,7 @@ next_available_port() {
   for reserved_port in "$@"; do
     valid_service_port "$reserved_port" || return 1
   done
-  python3 - "$occupied_port" "$@" <<'PY'
+  workflow_python - "$occupied_port" "$@" <<'PY'
 import itertools
 import socket
 import sys
@@ -240,7 +659,12 @@ print_install_summary() {
   local headroom_action="${14}"
   local claudex_proxy_service_file="${15}"
   local claudex_proxy_port="${16}"
-  local claudex_proxy_action="${17}"
+  local route_proxy_port="${17}"
+  local claudex_proxy_action="${18}"
+  local python_entrypoint="${19}"
+  local python_version="${20}"
+  local python_realpath="${21}"
+  local python_action="${22}"
 
   printf '%s\n' \
     '' \
@@ -254,12 +678,19 @@ print_install_summary() {
     "  MemPalace MCP:     $mempalace_binary" \
     "  Graphify MCP:      $graphify_binary" \
     '' \
+    'Python runtime' \
+    '  Python request: 3.14.x' \
+    "  Python version: $python_version" \
+    "  Python runtime: $python_entrypoint -> $python_realpath" \
+    "  Python action:  $python_action" \
+    '' \
     'Services' \
     "  CLIProxyAPI: $cliproxy_action at 127.0.0.1:$cliproxy_port" \
     "    $cliproxy_service_file" \
     "  Headroom:    $headroom_action at 127.0.0.1:$headroom_port" \
     "    $headroom_service_file" \
-    "  Route proxy: $claudex_proxy_action at 127.0.0.1:$claudex_proxy_port" \
+    "  Claudex:     per-session from 127.0.0.1:$claudex_proxy_port" \
+    "  Route proxy: $claudex_proxy_action at 127.0.0.1:$route_proxy_port" \
     "    $claudex_proxy_service_file"
 }
 
@@ -268,8 +699,10 @@ service_definition_is_owned() {
   local data_root="$2"
   local service_kind="$3"
   local ownership_mode="${4:-either}"
+  local workflow_root="${5:-}"
   [[ -f "$service_file" && ! -L "$service_file" ]] || return 1
-  python3 - "$service_file" "$data_root" "$service_kind" "$ownership_mode" <<'PY'
+  workflow_python - "$service_file" "$data_root" "$service_kind" "$ownership_mode" \
+    "$workflow_root" <<'PY'
 import os
 import plistlib
 import shlex
@@ -280,6 +713,13 @@ path = Path(sys.argv[1])
 data_root = sys.argv[2]
 kind = sys.argv[3]
 mode = sys.argv[4]
+workflow_root = sys.argv[5]
+route_runner = (
+    'import os,sys; '
+    'sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); '
+    'from integrations.common.route_proxy import main; '
+    'raise SystemExit(main())'
+)
 
 
 def valid_port(value):
@@ -337,24 +777,49 @@ def headroom_arguments_owned(arguments):
 
 
 def claudex_proxy_arguments_owned(arguments):
-    if not isinstance(arguments, list) or len(arguments) != 9:
+    if isinstance(arguments, list) and len(arguments) == 9:
+        if mode not in ("legacy", "either"):
+            return False
+        port = arguments[2]
+        upstream = arguments[4]
+        return (
+            valid_port(port)
+            and valid_port(upstream)
+            and port != upstream
+            and arguments == [
+                f"{data_root}/bin/orichum-route-proxy",
+                "--port",
+                port,
+                "--upstream-port",
+                upstream,
+                "--state-home",
+                f"{data_root}/state",
+                "--data-home",
+                data_root,
+            ]
+        )
+    if not isinstance(arguments, list) or len(arguments) != 13:
         return False
-    port = arguments[2]
-    upstream = arguments[4]
+    port = arguments[6]
+    upstream = arguments[8]
     return (
         valid_port(port)
         and valid_port(upstream)
         and port != upstream
         and arguments == [
-        f"{data_root}/bin/orichum-route-proxy",
-        "--port",
-        port,
-        "--upstream-port",
-        upstream,
-        "--state-home",
-        f"{data_root}/state",
-        "--data-home",
-        data_root,
+            f"{data_root}/bin/orichum-python",
+            "-I",
+            "-B",
+            "-c",
+            route_runner,
+            "--port",
+            port,
+            "--upstream-port",
+            upstream,
+            "--state-home",
+            f"{data_root}/state",
+            "--data-home",
+            data_root,
         ]
     )
 
@@ -374,11 +839,20 @@ if b"<plist" in raw[:500]:
         )
     elif kind == "claudex-proxy":
         environment = document.get("EnvironmentVariables")
+        legacy = isinstance(arguments, list) and len(arguments) == 9
         owned = (
             document.get("Label") == "io.orichum.route-proxy"
             and claudex_proxy_arguments_owned(arguments)
             and isinstance(environment, dict)
             and environment.get("HOME") == os.environ.get("HOME")
+            and (
+                legacy
+                or (
+                    environment.get("ORICHUM_WORKFLOW_ROOT") == workflow_root
+                    and environment.get("ORICHUM_PYTHON")
+                    == f"{data_root}/bin/orichum-python"
+                )
+            )
         )
     else:
         labels = {
@@ -455,29 +929,72 @@ for line in lines:
             environment[key] = item
 
 if kind == "claudex-proxy":
-    port = arguments[2] if len(arguments) == 9 else ""
-    upstream = arguments[4] if len(arguments) == 9 else ""
-    expected_exec = " ".join([
-        systemd_quote(f"{data_root}/bin/orichum-route-proxy"),
-        "--port",
-        port,
-        "--upstream-port",
-        upstream,
-        "--state-home",
-        systemd_quote(f"{data_root}/state"),
-        "--data-home",
-        systemd_quote(data_root),
-    ])
+    legacy = len(arguments) == 9
+    port = arguments[2] if legacy else arguments[6] if len(arguments) == 13 else ""
+    upstream = (
+        arguments[4] if legacy else arguments[8] if len(arguments) == 13 else ""
+    )
+    if legacy:
+        expected_exec = " ".join([
+            systemd_quote(f"{data_root}/bin/orichum-route-proxy"),
+            "--port",
+            port,
+            "--upstream-port",
+            upstream,
+            "--state-home",
+            systemd_quote(f"{data_root}/state"),
+            "--data-home",
+            systemd_quote(data_root),
+        ])
+    else:
+        expected_exec = " ".join([
+            systemd_quote(f"{data_root}/bin/orichum-python"),
+            "-I",
+            "-B",
+            "-c",
+            systemd_quote(route_runner),
+            "--port",
+            port,
+            "--upstream-port",
+            upstream,
+            "--state-home",
+            systemd_quote(f"{data_root}/state"),
+            "--data-home",
+            systemd_quote(data_root),
+        ])
     environment_lines = [line for line in lines if line.startswith("Environment=")]
     expected_environment = "Environment=" + systemd_quote(
         f"HOME={os.environ.get('HOME', '')}", escape_dollar=False
+    )
+    expected_workflow_environment = "Environment=" + systemd_quote(
+        f"ORICHUM_WORKFLOW_ROOT={workflow_root}", escape_dollar=False
+    )
+    expected_python_environment = "Environment=" + systemd_quote(
+        f"ORICHUM_PYTHON={data_root}/bin/orichum-python",
+        escape_dollar=False,
     )
     owned = (
         descriptions == ["Description=Orichum same-family recovery proxy"]
         and claudex_proxy_arguments_owned(arguments)
         and exec_lines[0] == expected_exec
-        and environment_lines == [expected_environment]
+        and environment_lines == (
+            [expected_environment]
+            if legacy
+            else [
+                expected_environment,
+                expected_workflow_environment,
+                expected_python_environment,
+            ]
+        )
         and environment.get("HOME") == os.environ.get("HOME")
+        and (
+            legacy
+            or (
+                environment.get("ORICHUM_WORKFLOW_ROOT") == workflow_root
+                and environment.get("ORICHUM_PYTHON")
+                == f"{data_root}/bin/orichum-python"
+            )
+        )
     )
     raise SystemExit(0 if owned else 1)
 
@@ -513,7 +1030,7 @@ headroom_service_is_owned() {
 }
 
 claudex_proxy_service_is_owned() {
-  service_definition_is_owned "$1" "$2" claudex-proxy
+  service_definition_is_owned "$1" "$2" claudex-proxy either "${3:-}"
 }
 
 claudex_proxy_service_identity() {
@@ -641,7 +1158,7 @@ pid_owns_loopback_listener() {
     Linux)
       command -v ss >/dev/null 2>&1 || return 1
       output="$(ss -H -ltnp "sport = :$port" 2>/dev/null)" || return 1
-      python3 - "$service_pid" "$port" "$output" <<'PY'
+      workflow_python - "$service_pid" "$port" "$output" <<'PY'
 import re
 import sys
 
@@ -689,7 +1206,7 @@ pid_owns_loopback_connection() {
       output="$(ss -H -tnp \
         "( sport = :$service_port and dport = :$client_port )" \
         2>/dev/null)" || return 1
-      python3 - "$service_pid" "$service_port" "$client_port" "$output" <<'PY'
+      workflow_python - "$service_pid" "$service_port" "$client_port" "$output" <<'PY'
 import re
 import sys
 
@@ -745,7 +1262,7 @@ claudex_config_default_model() {
 validated_workflow_data_dir() {
   local checkout_root="$1"
   local data_root="${ORICHUM_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/orichum}"
-  python3 - "$data_root" "$HOME" "$checkout_root" <<'PY'
+  workflow_python - "$data_root" "$HOME" "$checkout_root" <<'PY'
 import os
 import stat
 import sys
@@ -1346,7 +1863,7 @@ acquire_endpoint_config_lock() {
   local lock_token="$2"
   local lock_path
   lock_path="$(endpoint_config_lock_path "$data_root")"
-  if ! python3 - "$lock_token" "$lock_path" 2>/dev/null <<'PY'
+  if ! workflow_python - "$lock_token" "$lock_path" 2>/dev/null <<'PY'
 import os
 import sys
 os.symlink(sys.argv[1], sys.argv[2])
@@ -1375,7 +1892,7 @@ acquire_model_publication_lock() {
   local lock_token="$2"
   local lock_dir
   lock_dir="$(model_config_root "$data_root")/publication.lock"
-  if ! python3 - "$lock_token" "$lock_dir" 2>/dev/null <<'PY'
+  if ! workflow_python - "$lock_token" "$lock_dir" 2>/dev/null <<'PY'
 import os
 import sys
 os.symlink(sys.argv[1], sys.argv[2])
@@ -1403,7 +1920,7 @@ release_model_publication_lock() {
 }
 
 atomic_replace_path() {
-  python3 - "$1" "$2" <<'PY'
+  workflow_python - "$1" "$2" <<'PY'
 import os
 import sys
 os.replace(sys.argv[1], sys.argv[2])
@@ -1766,7 +2283,7 @@ assert_owned_session() {
   local effective_models_sha256="$5"
   (
     cd "$workflow_root" || exit 1
-    python3 -m integrations.common.session_config verify \
+    workflow_python -m integrations.common.session_config verify \
       --workflow-root "$workflow_root" \
       --data-root "$data_root" \
       --run-dir "$run_dir" \
@@ -1795,13 +2312,18 @@ render_claudex_config() {
   local cliproxy_port="${10:-8317}"
   local headroom_port="${11:-8787}"
   local claudex_proxy_port="${12:-13456}"
+  local route_proxy_port="${13:-13457}"
 
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$headroom_port" || return 1
   valid_service_port "$claudex_proxy_port" || return 1
+  valid_service_port "$route_proxy_port" || return 1
   [[ "$cliproxy_port" != "$headroom_port" && \
      "$cliproxy_port" != "$claudex_proxy_port" && \
-     "$headroom_port" != "$claudex_proxy_port" ]] || return 1
+     "$cliproxy_port" != "$route_proxy_port" && \
+     "$headroom_port" != "$claudex_proxy_port" && \
+     "$headroom_port" != "$route_proxy_port" && \
+     "$claudex_proxy_port" != "$route_proxy_port" ]] || return 1
 
   if [[ -z "$claude_binary" ]]; then
     claude_binary="$(command -v claude)" || {
@@ -1837,7 +2359,7 @@ render_claudex_config() {
     "opus = \"$opus_model\"" \
     '' \
     '[profiles.custom_headers]' \
-    "X-Headroom-Base-Url = \"http://127.0.0.1:$claudex_proxy_port\"" \
+    "X-Headroom-Base-Url = \"http://127.0.0.1:$route_proxy_port\"" \
     'X-Orichum-Session-ID = "unbound"' \
     '' \
     '[router]' \
@@ -1969,7 +2491,7 @@ workflow_role_surface_is_exact() (
   local declared_roles role
 
   cd "$workflow_root" || exit 1
-  declared_roles="$(python3 -B - "$plugin_root" <<'PY'
+  declared_roles="$(workflow_python -B - "$plugin_root" <<'PY'
 import sys
 from pathlib import Path
 from integrations.common.model_routing import ROLES
@@ -2048,6 +2570,7 @@ render_discovered_claudex_config() {
   local cliproxy_port="${3:-8317}"
   local headroom_port="${4:-8787}"
   local claudex_proxy_port="${5:-13456}"
+  local route_proxy_port="${6:-13457}"
   local controller_model
   local fast_model balanced_model powerful_model
   local haiku_model sonnet_model opus_model
@@ -2068,7 +2591,8 @@ render_discovered_claudex_config() {
   render_claudex_config "$output_file" \
     "$controller_model" "$fast_model" "$balanced_model" "$powerful_model" \
     "$haiku_model" "$sonnet_model" "$opus_model" "" \
-    "$cliproxy_port" "$headroom_port" "$claudex_proxy_port"
+    "$cliproxy_port" "$headroom_port" "$claudex_proxy_port" \
+    "$route_proxy_port"
 }
 
 extract_semver() {
@@ -2226,7 +2750,7 @@ activate_private_file_atomic() {
   local staged_path="$1"
   local destination="$2"
   local mode="$3"
-  python3 - "$staged_path" "$destination" "$mode" <<'PY'
+  workflow_python - "$staged_path" "$destination" "$mode" <<'PY'
 import os
 from pathlib import Path
 import secrets
@@ -2440,20 +2964,30 @@ render_systemd_user_unit() {
 render_claudex_proxy_launch_agent() {
   local output_file="$1"
   local data_root="$2"
-  local port="${3:-13456}"
-  local upstream_port="${4:-8317}"
+  local workflow_root="$3"
+  local port="${4:-13456}"
+  local upstream_port="${5:-8317}"
+  local runtime_digest="${6:-}"
+  local route_runner
   local escaped_binary escaped_state escaped_data escaped_log escaped_home
+  local escaped_workflow escaped_runner
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
-  escaped_binary="$(xml_escape "$data_root/bin/orichum-route-proxy")"
+  [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+  [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
+  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
+  escaped_binary="$(xml_escape "$data_root/bin/orichum-python")"
   escaped_state="$(xml_escape "$data_root/state")"
   escaped_data="$(xml_escape "$data_root")"
   escaped_log="$(xml_escape "$data_root/logs/route-proxy.log")"
   escaped_home="$(xml_escape "$HOME")"
+  escaped_workflow="$(xml_escape "$workflow_root")"
+  escaped_runner="$(xml_escape "$route_runner")"
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+    "<!-- Orichum route runtime SHA-256: $runtime_digest -->" \
     '<plist version="1.0">' \
     '<dict>' \
     '  <key>Label</key>' \
@@ -2461,6 +2995,10 @@ render_claudex_proxy_launch_agent() {
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
+    '    <string>-I</string>' \
+    '    <string>-B</string>' \
+    '    <string>-c</string>' \
+    "    <string>$escaped_runner</string>" \
     '    <string>--port</string>' \
     "    <string>$port</string>" \
     '    <string>--upstream-port</string>' \
@@ -2486,6 +3024,10 @@ render_claudex_proxy_launch_agent() {
     '  <dict>' \
     '    <key>HOME</key>' \
     "    <string>$escaped_home</string>" \
+    '    <key>ORICHUM_WORKFLOW_ROOT</key>' \
+    "    <string>$escaped_workflow</string>" \
+    '    <key>ORICHUM_PYTHON</key>' \
+    "    <string>$escaped_binary</string>" \
     '  </dict>' \
     '</dict>' \
     '</plist>' >"$output_file"
@@ -2494,17 +3036,32 @@ render_claudex_proxy_launch_agent() {
 render_claudex_proxy_systemd_user_unit() {
   local output_file="$1"
   local data_root="$2"
-  local port="${3:-13456}"
-  local upstream_port="${4:-8317}"
-  local executable state data home_environment
+  local workflow_root="$3"
+  local port="${4:-13456}"
+  local upstream_port="${5:-8317}"
+  local runtime_digest="${6:-}"
+  local route_runner executable state data home_environment
+  local workflow_environment python_environment runner
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
-  executable="$(systemd_quote "$data_root/bin/orichum-route-proxy")"
+  [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+  [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
+  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
+  executable="$(systemd_quote "$data_root/bin/orichum-python")"
+  runner="$(systemd_quote "$route_runner")"
   state="$(systemd_quote "$data_root/state")"
   data="$(systemd_quote "$data_root")"
   home_environment="$(systemd_environment_quote "HOME=$HOME")"
+  workflow_environment="$(
+    systemd_environment_quote "ORICHUM_WORKFLOW_ROOT=$workflow_root"
+  )"
+  python_environment="$(
+    systemd_environment_quote \
+      "ORICHUM_PYTHON=$data_root/bin/orichum-python"
+  )"
   printf '%s\n' \
+    "# Orichum route runtime SHA-256: $runtime_digest" \
     '[Unit]' \
     'Description=Orichum same-family recovery proxy' \
     'Wants=orichum-cliproxy.service' \
@@ -2512,10 +3069,12 @@ render_claudex_proxy_systemd_user_unit() {
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
+    "ExecStart=$executable -I -B -c $runner --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
     'Restart=always' \
     'RestartSec=3' \
     "Environment=$home_environment" \
+    "Environment=$workflow_environment" \
+    "Environment=$python_environment" \
     'StandardOutput=journal' \
     'StandardError=journal' \
     '' \

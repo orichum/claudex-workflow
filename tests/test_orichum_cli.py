@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -674,6 +675,152 @@ class OrichumCliTests(unittest.TestCase):
             self.root / "data", "athevar-xebia"
         )
 
+    def test_session_claudex_ports_are_distinct_and_exclude_services(self) -> None:
+        state = self.root / "data" / "state"
+        state.mkdir(parents=True, mode=0o700)
+        first_run = state / "sessions" / "run.first"
+        second_run = state / "sessions" / "run.second"
+        first_run.mkdir(parents=True, mode=0o700)
+        second_run.mkdir(mode=0o700)
+
+        first = orichum_cli._reserve_session_claudex_port(
+            state,
+            first_run,
+            "oc-s-0000000000000001",
+            13456,
+            frozenset({8317, 8787, 13457}),
+        )
+        second = orichum_cli._reserve_session_claudex_port(
+            state,
+            second_run,
+            "oc-s-0000000000000002",
+            13456,
+            frozenset({8317, 8787, 13457}),
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertNotIn(first, {8317, 8787, 13457})
+        self.assertNotIn(second, {8317, 8787, 13457})
+        self.assertEqual(
+            (first_run / "claudex-proxy-port").read_text(
+                encoding="ascii"
+            ),
+            f"{first}\n",
+        )
+        self.assertEqual(
+            (second_run / "claudex-proxy-port").read_text(
+                encoding="ascii"
+            ),
+            f"{second}\n",
+        )
+
+    def test_session_claudex_config_isolates_proxy_and_restores_user_env(
+        self,
+    ) -> None:
+        source = self.root / "shared.toml"
+        source.write_text(
+            "\n".join(
+                (
+                    'claude_binary = "/usr/bin/claude"',
+                    "proxy_port = 13456",
+                    "",
+                    "[[profiles]]",
+                    'name = "gpt"',
+                    "",
+                    "[profiles.custom_headers]",
+                    'X-Orichum-Session-ID = "unbound"',
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        source.chmod(0o600)
+        run_dir = self.root / "run"
+        run_dir.mkdir(mode=0o700)
+        prepared = SimpleNamespace(
+            logical=SimpleNamespace(id="oc-s-0000000000000001"),
+            physical=SimpleNamespace(run_dir=run_dir),
+        )
+
+        output = orichum_cli._materialize_session_claudex_config(
+            source,
+            prepared,
+            14567,
+            {
+                "HOME": "/Users/example",
+                "XDG_CACHE_HOME": "/var/cache/example",
+                "XDG_RUNTIME_DIR": "/var/run/example",
+            },
+        )
+
+        rendered = output.read_text(encoding="utf-8")
+        self.assertIn("proxy_port = 14567", rendered)
+        self.assertNotIn("proxy_port = 13456", rendered)
+        self.assertIn(
+            'X-Orichum-Session-ID = "oc-s-0000000000000001"',
+            rendered,
+        )
+        self.assertIn("[profiles.extra_env]", rendered)
+        self.assertIn('HOME = "/Users/example"', rendered)
+        self.assertIn(
+            'XDG_CACHE_HOME = "/var/cache/example"', rendered
+        )
+        self.assertIn(
+            'XDG_RUNTIME_DIR = "/var/run/example"', rendered
+        )
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_runtime_verifier_timeout_is_reported_as_cli_error(self) -> None:
+        with mock.patch.object(
+            orichum_cli.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(
+                ["orichum-runtime-ready"], 30
+            ),
+        ):
+            with self.assertRaisesRegex(
+                orichum_cli.CliError,
+                "runtime health verification timed out",
+            ):
+                orichum_cli._verify_runtime(
+                    {
+                        "data": self.root / "data",
+                        "config": self.root / "config",
+                    }
+                )
+
+    def test_live_model_catalogue_uses_verified_cliproxy_endpoint(self) -> None:
+        response = SimpleNamespace(
+            status=200,
+            read=lambda _maximum: json.dumps(
+                {"data": [{"id": "gpt-5.6-sol"}]}
+            ).encode("utf-8"),
+        )
+        connection = mock.MagicMock()
+        connection.getresponse.return_value = response
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "_runtime_service_ports",
+                return_value={
+                    "claudexProxyPort": 13457,
+                    "cliproxyPort": 8317,
+                    "headroomPort": 8787,
+                    "routeProxyPort": 13456,
+                },
+            ),
+            mock.patch.object(
+                orichum_cli.http.client,
+                "HTTPConnection",
+                return_value=connection,
+            ) as connect,
+        ):
+            models = orichum_cli._live_models(
+                {"data": self.root / "data"}
+            )
+        connect.assert_called_once_with("127.0.0.1", 8317, timeout=3)
+        self.assertEqual(models, frozenset({"gpt-5.6-sol"}))
+
     def test_session_environment_scrubs_token_identity_overrides(self) -> None:
         physical = SimpleNamespace(
             mcp_file=self.root / "mcp.json",
@@ -687,19 +834,38 @@ class OrichumCliTests(unittest.TestCase):
             logical=SimpleNamespace(id="oc-s-0000000000000001"),
             physical=physical,
         )
+        physical.run_dir.mkdir(mode=0o700)
         paths = {
             "state": self.root / "data" / "state",
             "config": self.root / "config",
             "data": self.root / "data",
         }
-        with mock.patch.dict(
-            os.environ,
-            {
-                "GH_TOKEN": "wrong-account",
-                "GITHUB_TOKEN": "wrong-account",
-                "GH_HOST": "enterprise.example",
-            },
-            clear=False,
+        managed_python = (
+            paths["data"] / "python" / "cpython-3.14.6" / "bin" / "python3.14"
+        )
+        managed_python.parent.mkdir(mode=0o700, parents=True)
+        managed_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        managed_python.chmod(0o700)
+        (paths["data"] / "bin").mkdir(mode=0o700)
+        (paths["data"] / "bin" / "orichum-python").symlink_to(managed_python)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": "/Users/example",
+                    "XDG_CACHE_HOME": "/var/cache/example",
+                    "XDG_RUNTIME_DIR": "/var/run/example",
+                    "GH_TOKEN": "wrong-account",
+                    "GITHUB_TOKEN": "wrong-account",
+                    "GH_HOST": "enterprise.example",
+                    "ORICHUM_PYTHON": "/tmp/caller-python",
+                    "ORICHUM_PYTHON_VALIDATED": "/tmp/caller-python",
+                },
+                clear=False,
+            ),
+            mock.patch.object(
+                orichum_cli.sys, "executable", str(managed_python)
+            ),
         ):
             environment = orichum_cli._session_environment(
                 prepared,
@@ -719,6 +885,26 @@ class OrichumCliTests(unittest.TestCase):
             environment["GH_CONFIG_DIR"],
             str(self.root / "github" / "work"),
         )
+        self.assertEqual(
+            environment["HOME"],
+            str(physical.run_dir / "claudex-home"),
+        )
+        self.assertEqual(
+            environment["XDG_CACHE_HOME"],
+            str(physical.run_dir / "claudex-home" / "cache"),
+        )
+        self.assertEqual(
+            environment["XDG_RUNTIME_DIR"],
+            str(physical.run_dir / "claudex-home" / "runtime"),
+        )
+        self.assertEqual(
+            environment["ORICHUM_PYTHON"],
+            str(paths["data"] / "bin" / "orichum-python"),
+        )
+        self.assertEqual(
+            environment["ORICHUM_PYTHON_VALIDATED"],
+            environment["ORICHUM_PYTHON"],
+        )
 
     def test_session_without_selected_identity_preserves_github_environment(
         self,
@@ -735,19 +921,33 @@ class OrichumCliTests(unittest.TestCase):
             logical=SimpleNamespace(id="oc-s-0000000000000001"),
             physical=physical,
         )
+        physical.run_dir.mkdir(mode=0o700)
         paths = {
             "state": self.root / "data" / "state",
             "config": self.root / "config",
             "data": self.root / "data",
         }
-        with mock.patch.dict(
-            os.environ,
-            {
-                "GH_TOKEN": "caller-token",
-                "GH_HOST": "github.example",
-                "GH_CONFIG_DIR": "/caller/github-config",
-            },
-            clear=False,
+        managed_python = (
+            paths["data"] / "python" / "cpython-3.14.6" / "bin" / "python3.14"
+        )
+        managed_python.parent.mkdir(mode=0o700, parents=True)
+        managed_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        managed_python.chmod(0o700)
+        (paths["data"] / "bin").mkdir(mode=0o700)
+        (paths["data"] / "bin" / "orichum-python").symlink_to(managed_python)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "GH_TOKEN": "caller-token",
+                    "GH_HOST": "github.example",
+                    "GH_CONFIG_DIR": "/caller/github-config",
+                },
+                clear=False,
+            ),
+            mock.patch.object(
+                orichum_cli.sys, "executable", str(managed_python)
+            ),
         ):
             environment = orichum_cli._session_environment(
                 prepared,

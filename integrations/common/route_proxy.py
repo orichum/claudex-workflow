@@ -294,6 +294,21 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.send_error(status, message)
 
+    def _health(self) -> None:
+        body = json.dumps(
+            {"ready": True, "service": "orichum-route-proxy"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response_only(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
+
     def _handle(self) -> None:
         self._response_started = False
         self.connection.settimeout(CLIENT_READ_TIMEOUT_SECONDS)
@@ -339,7 +354,13 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             self._safe_error(502, "Orichum upstream connection failed")
 
     do_DELETE = _handle
-    do_GET = _handle
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self._health()
+        else:
+            self._handle()
+
     do_PATCH = _handle
     do_POST = _handle
     do_PUT = _handle

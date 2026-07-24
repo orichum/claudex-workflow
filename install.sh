@@ -4,6 +4,7 @@ set -euo pipefail
 WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
+export ORICHUM_INSTALL_BOOTSTRAP=true
 
 USER_BIN_DIR="${USER_BIN_DIR:-$HOME/.local/bin}"
 WORKFLOW_DATA_ROOT="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || \
@@ -133,6 +134,59 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/headroom/state" \
   "$WORKFLOW_DATA_ROOT/headroom/tools"
 
+installer_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-install.XXXXXX")"
+register_cleanup_path "$installer_temp"
+snapshot_dir="$installer_temp/snapshots"
+install -d -m 0700 "$snapshot_dir"
+python_entrypoint="$(orichum_python_entrypoint "$WORKFLOW_DATA_ROOT")"
+snapshot_path "$python_entrypoint" "$snapshot_dir" orichum-python
+python_transaction_active=false
+python_candidate_generation=
+rollback_python_activation() {
+  [[ "${python_transaction_active:-false}" == true ]] || return 0
+  restore_snapshot "$python_entrypoint" \
+    "$snapshot_dir" orichum-python || return 1
+  snapshot_path_matches "$python_entrypoint" \
+    "$snapshot_dir" orichum-python || return 1
+  remove_orichum_python_generation \
+    "$WORKFLOW_DATA_ROOT" "${python_candidate_generation:-}"
+}
+python_transaction_active=true
+WORKFLOW_ROLLBACK_HANDLER=rollback_python_activation
+WORKFLOW_TRANSACTION_ACTIVE=true
+IFS=$'\t' read -r \
+  orichum_python_action orichum_python_version orichum_python_candidate \
+  python_candidate_generation < <(
+    install_or_reuse_orichum_python "$WORKFLOW_DATA_ROOT"
+  ) || workflow_die "private Orichum Python could not be provisioned"
+(
+  cd "$WORKFLOW_ROOT"
+  PYTHONDONTWRITEBYTECODE=1 "$orichum_python_candidate" -I -B - \
+    "$WORKFLOW_ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+import integrations.common.orichum_cli  # noqa: F401
+import integrations.common.route_proxy  # noqa: F401
+
+for source in sorted((root / "integrations" / "common").glob("*.py")):
+    compile(source.read_text(encoding="utf-8"), str(source), "exec")
+PY
+) || workflow_die "private Orichum Python failed module validation"
+preflight_orichum_python_runtime \
+  "$orichum_python_candidate" "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" || \
+  workflow_die "private Orichum Python failed recovery-proxy preflight"
+activate_orichum_python \
+  "$WORKFLOW_DATA_ROOT" "$orichum_python_candidate" || \
+  workflow_die "private Orichum Python could not be activated"
+ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
+export ORICHUM_PYTHON
+ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
+export ORICHUM_PYTHON_VALIDATED
+export ORICHUM_INSTALL_BOOTSTRAP=false
+
 for control_file in \
     model-stacks.json projects.json providers.json plugins.json runtime.json \
     controller-policy.md; do
@@ -152,7 +206,7 @@ ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
   workflow_die "installed Orichum control plane is invalid"
 (
   cd "$WORKFLOW_ROOT"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - \
+  PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B - \
     "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT/projects.json" <<'PY'
 import json
 import sys
@@ -176,13 +230,13 @@ PY
 management_key_file="$WORKFLOW_DATA_ROOT/cliproxy-management.key"
 if [[ ! -e "$management_key_file" ]]; then
   umask 077
-  python3 -c 'import secrets; print(secrets.token_urlsafe(48))' \
+  "$ORICHUM_PYTHON" -c 'import secrets; print(secrets.token_urlsafe(48))' \
     >"$management_key_file"
   chmod 0600 "$management_key_file"
 fi
 [[ -f "$management_key_file" && ! -L "$management_key_file" ]] || \
   workflow_die "CLIProxyAPI management key is unsafe"
-python3 - "$management_key_file" <<'PY' || \
+"$ORICHUM_PYTHON" - "$management_key_file" <<'PY' || \
   workflow_die "CLIProxyAPI management key is unsafe"
 import os
 import stat
@@ -215,8 +269,6 @@ if [[ -x "$headroom_prior_binary" ]]; then
     workflow_die "installed Headroom distribution version could not be read"
 fi
 
-installer_temp="$(mktemp -d "${TMPDIR:-/tmp}/claudex-install.XXXXXX")"
-register_cleanup_path "$installer_temp"
 cliproxy_state="$(stage_latest_github_binary \
   router-for-me/CLIProxyAPI 'CLIProxyAPI_' "_${cliproxy_os}_${cliproxy_arch}.tar.gz" \
   cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$installer_temp/cliproxy")"
@@ -229,7 +281,7 @@ curl --fail --location --silent --show-error \
   --output "$headroom_models_registry"
 (
   cd "$WORKFLOW_ROOT"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+  PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
     -m integrations.common.headroom_models generate \
     --registry "$headroom_models_registry" \
     --repository router-for-me/CLIProxyAPI \
@@ -351,7 +403,8 @@ if [[ -e "$claudex_proxy_service_file" || \
       -L "$claudex_proxy_service_file" ]]; then
   claudex_proxy_service_was_present=true
   claudex_proxy_service_is_owned \
-    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" || \
+    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT" || \
     workflow_die \
       "refusing to overwrite unknown service file: $claudex_proxy_service_file"
   claudex_proxy_service_owned=true
@@ -374,23 +427,31 @@ fi
 
 if ! IFS=$'\t' read -r \
     CLIPROXY_PORT HEADROOM_PORT PERSISTED_CLAUDEX_PROXY_PORT \
+    PERSISTED_ROUTE_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   workflow_die "service port configuration is invalid"
 fi
 PRIOR_CLIPROXY_PORT="$CLIPROXY_PORT"
 PRIOR_HEADROOM_PORT="$HEADROOM_PORT"
-PRIOR_CLAUDEX_PROXY_PORT="$PERSISTED_CLAUDEX_PROXY_PORT"
+PRIOR_ROUTE_PROXY_PORT="$PERSISTED_ROUTE_PROXY_PORT"
 CLIPROXY_PORT="${ORICHUM_CLIPROXY_PORT:-$CLIPROXY_PORT}"
 HEADROOM_PORT="${ORICHUM_HEADROOM_PORT:-$HEADROOM_PORT}"
-CLAUDEX_PROXY_LISTEN_PORT="${ORICHUM_ROUTE_PROXY_PORT:-$PERSISTED_CLAUDEX_PROXY_PORT}"
+CLAUDEX_PROXY_PORT="${ORICHUM_CLAUDEX_PROXY_PORT:-$PERSISTED_CLAUDEX_PROXY_PORT}"
+ROUTE_PROXY_LISTEN_PORT="${ORICHUM_ROUTE_PROXY_PORT:-$PERSISTED_ROUTE_PROXY_PORT}"
 valid_service_port "$CLIPROXY_PORT" || workflow_die "invalid CLIProxyAPI port"
 valid_service_port "$HEADROOM_PORT" || workflow_die "invalid Headroom port"
-valid_service_port "$CLAUDEX_PROXY_LISTEN_PORT" || \
+valid_service_port "$CLAUDEX_PROXY_PORT" || \
+  workflow_die "invalid Claudex proxy port"
+valid_service_port "$ROUTE_PROXY_LISTEN_PORT" || \
   workflow_die "invalid Orichum route proxy port"
 [[ "$CLIPROXY_PORT" != "$HEADROOM_PORT" && \
-   "$CLIPROXY_PORT" != "$CLAUDEX_PROXY_LISTEN_PORT" && \
-   "$HEADROOM_PORT" != "$CLAUDEX_PROXY_LISTEN_PORT" ]] || \
-  workflow_die "CLIProxyAPI, Headroom, and route proxy ports must differ"
+   "$CLIPROXY_PORT" != "$CLAUDEX_PROXY_PORT" && \
+   "$CLIPROXY_PORT" != "$ROUTE_PROXY_LISTEN_PORT" && \
+   "$HEADROOM_PORT" != "$CLAUDEX_PROXY_PORT" && \
+   "$HEADROOM_PORT" != "$ROUTE_PROXY_LISTEN_PORT" && \
+   "$CLAUDEX_PROXY_PORT" != "$ROUTE_PROXY_LISTEN_PORT" ]] || \
+  workflow_die \
+    "CLIProxyAPI, Headroom, Claudex, and route proxy ports must differ"
 
 cliproxy_endpoint_ready_at() {
   curl -fsS --connect-timeout 1 --max-time 2 \
@@ -439,7 +500,8 @@ wait_for_claudex_proxy() {
 claudex_proxy_loaded_target_is_expected() {
   local loaded_definition target_state
   claudex_proxy_service_is_owned \
-    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" || return 1
+    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT" || return 1
   target_state="$(managed_service_target_state \
     "$platform" "$claudex_proxy_service_label" \
     "$claudex_proxy_service_unit")" || return 1
@@ -463,7 +525,7 @@ claudex_proxy_prior_runtime_safe_to_stop() {
     "$claudex_proxy_service_unit" 2>/dev/null)" || return 1
   [[ "$current_pid" == 0 ]] && return 0
   pid_owns_loopback_listener \
-    "$current_pid" "$PRIOR_CLAUDEX_PROXY_PORT"
+    "$current_pid" "$PRIOR_ROUTE_PROXY_PORT"
 }
 
 managed_target_matches_definition_or_absent() {
@@ -551,15 +613,15 @@ if [[ "$claudex_proxy_service_owned" == true ]]; then
   if [[ "$claudex_proxy_prior_manager_pid" =~ ^[1-9][0-9]*$ ]]; then
     if pid_owns_loopback_listener \
         "$claudex_proxy_prior_manager_pid" \
-        "$PRIOR_CLAUDEX_PROXY_PORT"; then
-      if [[ "$CLAUDEX_PROXY_LISTEN_PORT" == \
-            "$PRIOR_CLAUDEX_PROXY_PORT" ]]; then
+        "$PRIOR_ROUTE_PROXY_PORT"; then
+      if [[ "$ROUTE_PROXY_LISTEN_PORT" == \
+            "$PRIOR_ROUTE_PROXY_PORT" ]]; then
         claudex_proxy_port_owned=true
       fi
       if [[ "$claudex_proxy_port_owned" == true ]] && \
          [[ -n "$prior_controller_model" ]] && \
          claudex_proxy_endpoint_ready_at \
-           "$PRIOR_CLAUDEX_PROXY_PORT" "$prior_controller_model"; then
+           "$PRIOR_ROUTE_PROXY_PORT" "$prior_controller_model"; then
         claudex_proxy_listener_owned=true
       fi
     else
@@ -586,14 +648,15 @@ HEADROOM_PORT="$(select_service_port \
   Headroom ORICHUM_HEADROOM_PORT "$HEADROOM_PORT" \
   "$headroom_listener_owned" "$interactive_install" \
   "$CLIPROXY_PORT")" || exit 1
-CLAUDEX_PROXY_LISTEN_PORT="$(select_service_port \
-  'Orichum route proxy' ORICHUM_ROUTE_PROXY_PORT "$CLAUDEX_PROXY_LISTEN_PORT" \
+ROUTE_PROXY_LISTEN_PORT="$(select_service_port \
+  'Orichum route proxy' ORICHUM_ROUTE_PROXY_PORT "$ROUTE_PROXY_LISTEN_PORT" \
   "$claudex_proxy_port_owned" "$interactive_install" \
-  "$CLIPROXY_PORT" "$HEADROOM_PORT")" || exit 1
+  "$CLIPROXY_PORT" "$HEADROOM_PORT" "$CLAUDEX_PROXY_PORT")" || exit 1
 ports_changed=false
 if [[ "$CLIPROXY_PORT" != "$PRIOR_CLIPROXY_PORT" ]] || \
    [[ "$HEADROOM_PORT" != "$PRIOR_HEADROOM_PORT" ]] || \
-   [[ "$CLAUDEX_PROXY_LISTEN_PORT" != "$PRIOR_CLAUDEX_PROXY_PORT" ]]; then
+   [[ "$CLAUDEX_PROXY_PORT" != "$PERSISTED_CLAUDEX_PROXY_PORT" ]] || \
+   [[ "$ROUTE_PROXY_LISTEN_PORT" != "$PRIOR_ROUTE_PROXY_PORT" ]]; then
   ports_changed=true
 fi
 service_ports_path="$(service_ports_file "$WORKFLOW_DATA_ROOT")"
@@ -617,7 +680,8 @@ probe_cliproxy_management() (
   local probe_root probe_port probe_pid= probe_binary
   probe_root="$installer_temp/cliproxy-management-probe"
   probe_port="$(next_available_port \
-    "$CLIPROXY_PORT" "$HEADROOM_PORT" "$CLAUDEX_PROXY_LISTEN_PORT")" || \
+    "$CLIPROXY_PORT" "$HEADROOM_PORT" "$CLAUDEX_PROXY_PORT" \
+    "$ROUTE_PROXY_LISTEN_PORT")" || \
     return 1
   install -d -m 0700 "$probe_root/auth"
   printf '{"type":"codex","disabled":true}\n' \
@@ -641,7 +705,7 @@ probe_cliproxy_management() (
   "$probe_binary" --config "$probe_root/config.yaml" \
     >"$probe_root/probe.log" 2>&1 &
   probe_pid=$!
-  python3 - "$probe_port" "$management_key" \
+  "$ORICHUM_PYTHON" - "$probe_port" "$management_key" \
     "$probe_root/auth/orichum-capability-probe.json" <<'PY'
 import http.client
 import json
@@ -709,18 +773,45 @@ PY
 )
 probe_cliproxy_management || workflow_die \
   "CLIProxyAPI failed the required management PATCH/readback capability probe"
+route_proxy_runtime_digest="$(
+  "$ORICHUM_PYTHON" -I -B - \
+    "$orichum_python_candidate" "$orichum_python_version" \
+    "$WORKFLOW_ROOT/integrations/common" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+digest = hashlib.sha256()
+for value in sys.argv[1:3]:
+    digest.update(value.encode("utf-8"))
+    digest.update(b"\0")
+root = Path(sys.argv[3])
+for path in sorted(root.glob("*.py")):
+    digest.update(path.name.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+)" || workflow_die "Orichum route runtime could not be fingerprinted"
+[[ "$route_proxy_runtime_digest" =~ ^[a-f0-9]{64}$ ]] || \
+  workflow_die "Orichum route runtime fingerprint is invalid"
 if [[ "$platform" == darwin ]]; then
   render_launch_agent "$desired_service_file" "$WORKFLOW_DATA_ROOT"
   plutil -lint "$desired_service_file" >/dev/null
   render_claudex_proxy_launch_agent \
     "$claudex_proxy_desired_service_file" "$WORKFLOW_DATA_ROOT" \
-    "$CLAUDEX_PROXY_LISTEN_PORT" "$CLIPROXY_PORT"
+    "$WORKFLOW_ROOT" \
+    "$ROUTE_PROXY_LISTEN_PORT" "$CLIPROXY_PORT" \
+    "$route_proxy_runtime_digest"
   plutil -lint "$claudex_proxy_desired_service_file" >/dev/null
 else
   render_systemd_user_unit "$desired_service_file" "$WORKFLOW_DATA_ROOT"
   render_claudex_proxy_systemd_user_unit \
     "$claudex_proxy_desired_service_file" "$WORKFLOW_DATA_ROOT" \
-    "$CLAUDEX_PROXY_LISTEN_PORT" "$CLIPROXY_PORT"
+    "$WORKFLOW_ROOT" \
+    "$ROUTE_PROXY_LISTEN_PORT" "$CLIPROXY_PORT" \
+    "$route_proxy_runtime_digest"
 fi
 
 cliproxy_config_changed="$(file_change_state \
@@ -731,7 +822,7 @@ claudex_proxy_service_changed="$(file_change_state \
 headroom_models_changed="$(private_file_change_state \
   "$desired_headroom_models" "$headroom_models_file" 600)"
 claudex_proxy_port_changed=false
-if [[ "$CLAUDEX_PROXY_LISTEN_PORT" != "$PRIOR_CLAUDEX_PROXY_PORT" ]]; then
+if [[ "$ROUTE_PROXY_LISTEN_PORT" != "$PRIOR_ROUTE_PROXY_PORT" ]]; then
   claudex_proxy_port_changed=true
 fi
 
@@ -763,8 +854,6 @@ if [[ "$cliproxy_binary_changed" == true ]] || \
   cliproxy_restart_required=true
 fi
 
-snapshot_dir="$installer_temp/snapshots"
-install -d -m 0700 "$snapshot_dir"
 model_config_root_path="$(model_config_root "$WORKFLOW_DATA_ROOT")"
 prior_model_generation=
 prior_model_generation_snapshot=
@@ -942,7 +1031,7 @@ restore_claudex_proxy_service() {
     fi
     if [[ "$recovery_ready" == true ]]; then
       wait_for_claudex_proxy \
-        "$PRIOR_CLAUDEX_PROXY_PORT" "$restored_model" || recovery_ready=false
+        "$PRIOR_ROUTE_PROXY_PORT" "$restored_model" || recovery_ready=false
     fi
   elif [[ "$platform" == systemd ]]; then
     systemctl --user disable "$claudex_proxy_service_unit" \
@@ -968,6 +1057,10 @@ rollback_install_transaction() {
     else
       rollback_ready=false
     fi
+  fi
+
+  if [[ "${python_transaction_active:-false}" == true ]]; then
+    rollback_python_activation || rollback_ready=false
   fi
 
   if [[ "${private_tools_transaction_active:-false}" == true ]]; then
@@ -1072,7 +1165,7 @@ if ! mempalace_mcp="$(command -v mempalace-mcp)"; then
   workflow_die "Mempalace installation did not provide mempalace-mcp"
 fi
 install -d -m 0700 "$installer_temp/mempalace-probe"
-if ! PYTHONDONTWRITEBYTECODE=1 python3 -B \
+if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
   "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
   --require-tool mempalace_get_taxonomy \
   --require-tool mempalace_search \
@@ -1090,7 +1183,7 @@ jq -n '{
   directed: false, multigraph: false, graph: {},
   nodes: [{id: "claudex-audit", label: "claudex-audit"}], links: []
 }' >"$graphify_probe_graph"
-if ! PYTHONDONTWRITEBYTECODE=1 python3 -B \
+if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
   "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
   --require-tool query_graph \
   --require-tool graph_stats \
@@ -1201,7 +1294,8 @@ preflight_claudex_proxy() (
   local preflight_port preflight_pid= preflight_ready=false
   local response_file="$installer_temp/claudex-proxy-preflight-models.json"
   preflight_port="$(next_available_port \
-    "$CLAUDEX_PROXY_LISTEN_PORT" "$CLIPROXY_PORT" "$HEADROOM_PORT")" || \
+    "$ROUTE_PROXY_LISTEN_PORT" "$CLAUDEX_PROXY_PORT" \
+    "$CLIPROXY_PORT" "$HEADROOM_PORT")" || \
     return 1
   cleanup_claudex_preflight() {
     if [[ -n "$preflight_pid" ]] && \
@@ -1240,6 +1334,57 @@ preflight_claudex_proxy() (
   fi
 )
 
+preflight_claudex_translation_proxy() (
+  local config_file="$1"
+  local probe_home="$installer_temp/claudex-translation-home"
+  local preflight_port preflight_pid='' preflight_ready=false
+  local response_file="$installer_temp/claudex-translation-models.json"
+  install -d -m 0700 \
+    "$probe_home" "$probe_home/cache" "$probe_home/runtime"
+  preflight_port="$(next_available_port \
+    "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
+    "$CLIPROXY_PORT" "$HEADROOM_PORT")" || \
+    return 1
+  cleanup_claudex_translation_preflight() {
+    if [[ -n "$preflight_pid" ]] && \
+       kill -0 "$preflight_pid" 2>/dev/null; then
+      kill "$preflight_pid" 2>/dev/null || true
+      wait "$preflight_pid" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_claudex_translation_preflight EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  HOME="$probe_home" \
+  XDG_CACHE_HOME="$probe_home/cache" \
+  XDG_RUNTIME_DIR="$probe_home/runtime" \
+    "$WORKFLOW_DATA_ROOT/bin/claudex" \
+      --config "$config_file" proxy start --port "$preflight_port" \
+      >"$installer_temp/claudex-translation-preflight.log" 2>&1 &
+  preflight_pid=$!
+  for _ in {1..30}; do
+    kill -0 "$preflight_pid" 2>/dev/null || break
+    if curl -fsS --connect-timeout 1 --max-time 2 \
+        "http://127.0.0.1:$preflight_port/health" 2>/dev/null | \
+        rg -Fxq ok && \
+       curl -fsS --connect-timeout 1 --max-time 2 \
+        "http://127.0.0.1:$preflight_port/v1/models" \
+        >"$response_file" 2>/dev/null && \
+       claudex_proxy_models_response_is_ready \
+         "$response_file" "$active_controller_model"; then
+      preflight_ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$preflight_ready" != true ]]; then
+    sed -n '1,160p' \
+      "$installer_temp/claudex-translation-preflight.log" >&2 || true
+    return 1
+  fi
+)
+
 require_activation_port_available() {
   local service_name="$1"
   local port="$2"
@@ -1251,13 +1396,13 @@ if [[ "$platform" == darwin ]]; then
   render_headroom_launch_agent \
     "$headroom_desired_service_file" "$WORKFLOW_DATA_ROOT" \
     "$headroom_binary" "$headroom_ca_bundle" "$HEADROOM_PORT" \
-    "$CLAUDEX_PROXY_LISTEN_PORT"
+    "$ROUTE_PROXY_LISTEN_PORT"
   plutil -lint "$headroom_desired_service_file" >/dev/null
 else
   render_headroom_systemd_user_unit \
     "$headroom_desired_service_file" "$WORKFLOW_DATA_ROOT" \
     "$headroom_binary" "$headroom_ca_bundle" "$HEADROOM_PORT" \
-    "$CLAUDEX_PROXY_LISTEN_PORT"
+    "$ROUTE_PROXY_LISTEN_PORT"
 fi
 
 headroom_service_changed="$(file_change_state \
@@ -1374,7 +1519,8 @@ for launcher in orichum; do
 done
 
 write_service_ports "$WORKFLOW_DATA_ROOT" \
-  "$CLIPROXY_PORT" "$HEADROOM_PORT" "$CLAUDEX_PROXY_LISTEN_PORT" || \
+  "$CLIPROXY_PORT" "$HEADROOM_PORT" "$CLAUDEX_PROXY_PORT" \
+  "$ROUTE_PROXY_LISTEN_PORT" || \
   workflow_die "service port configuration could not be saved"
 
 source "$WORKFLOW_ROOT/discover-models.sh"
@@ -1404,8 +1550,6 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
 fi
 
 claudex_proxy_action=pending-provider-login
-claudex_proxy_binary_changed="$claudex_binary_changed"
-claudex_proxy_config_changed=unchanged
 claudex_proxy_readiness_drifted=false
 if [[ "$model_discovery_succeeded" == true || \
       -n "$prior_model_generation" ]]; then
@@ -1414,30 +1558,26 @@ if [[ "$model_discovery_succeeded" == true || \
   active_controller_model="$(claudex_config_default_model \
     "$active_claudex_config")" || \
     workflow_die "active Claudex controller model could not be resolved"
+  preflight_claudex_translation_proxy "$active_claudex_config" || \
+    workflow_die \
+      "Claudex translation proxy failed isolated bind and catalogue preflight"
 
-  if [[ -z "$prior_model_generation_snapshot" ]] || \
-     ! cmp -s "$prior_model_generation_snapshot/claudex.toml" \
-       "$active_claudex_config"; then
-    claudex_proxy_config_changed=changed
-  fi
   if [[ "$claudex_proxy_service_owned" != true ]] || \
      ! claudex_proxy_runtime_is_owned \
-       "$CLAUDEX_PROXY_LISTEN_PORT" "$active_controller_model"; then
+       "$ROUTE_PROXY_LISTEN_PORT" "$active_controller_model"; then
     claudex_proxy_readiness_drifted=true
   fi
 
   claudex_proxy_restart_required=false
-  if [[ "$claudex_proxy_binary_changed" == true ]] || \
-     [[ "$claudex_proxy_service_changed" == changed ]] || \
+  if [[ "$claudex_proxy_service_changed" == changed ]] || \
      [[ "$claudex_proxy_port_changed" == true ]] || \
-     [[ "$claudex_proxy_config_changed" == changed ]] || \
      [[ "$claudex_proxy_readiness_drifted" == true ]]; then
     claudex_proxy_restart_required=true
   fi
 
   if [[ "$claudex_proxy_restart_required" == true ]]; then
     preflight_claudex_proxy || workflow_die \
-      "Claudex translation proxy failed isolated preflight; the existing service was left running"
+      "Orichum recovery proxy failed isolated preflight; the existing service was left running"
     if [[ "$claudex_proxy_service_was_present" == true ]]; then
       claudex_proxy_prior_runtime_safe_to_stop || workflow_die \
         "refusing to stop ownership-drifted Orichum route proxy runtime"
@@ -1449,7 +1589,8 @@ if [[ "$model_discovery_succeeded" == true || \
         "$claudex_proxy_service_file" "$claudex_proxy_service_mode"
     fi
     claudex_proxy_service_is_owned \
-      "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" || \
+      "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+      "$WORKFLOW_ROOT" || \
       workflow_die "installed Orichum route proxy service definition is not owned"
     if [[ "$claudex_proxy_service_was_present" == true ]]; then
       claudex_proxy_runtime_mutated=true
@@ -1463,15 +1604,15 @@ if [[ "$model_discovery_succeeded" == true || \
       fi
     fi
     activation_port_ready=false
-    for _ in {1..30}; do
-      if port_is_available "$CLAUDEX_PROXY_LISTEN_PORT"; then
+    for _ in {1..150}; do
+      if port_is_available "$ROUTE_PROXY_LISTEN_PORT"; then
         activation_port_ready=true
         break
       fi
       sleep 0.1
     done
     [[ "$activation_port_ready" == true ]] || workflow_die \
-      "Orichum route proxy activation port $CLAUDEX_PROXY_LISTEN_PORT is occupied; prior state will be restored"
+      "Orichum route proxy activation port $ROUTE_PROXY_LISTEN_PORT is occupied; prior state will be restored"
     if [[ "$platform" == darwin ]]; then
       claudex_proxy_loaded_target_is_expected || workflow_die \
         "Orichum route proxy definition ownership drifted before start"
@@ -1489,7 +1630,7 @@ if [[ "$model_discovery_succeeded" == true || \
       systemctl --user start "$claudex_proxy_service_unit"
     fi
     wait_for_claudex_proxy \
-      "$CLAUDEX_PROXY_LISTEN_PORT" "$active_controller_model" || \
+      "$ROUTE_PROXY_LISTEN_PORT" "$active_controller_model" || \
       workflow_die \
         "Orichum route proxy failed ownership or readiness checks; previous state will be restored"
     if [[ "$claudex_proxy_service_was_present" == true ]]; then
@@ -1524,6 +1665,7 @@ claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=false
 private_tools_transaction_active=false
+python_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
@@ -1563,8 +1705,11 @@ print_install_summary \
   "$mempalace_mcp" "$graphify_mcp" "$service_file" \
   "$headroom_service_file" "$CLIPROXY_PORT" "$HEADROOM_PORT" \
   "$cliproxy_action" "$headroom_action" \
-  "$claudex_proxy_service_file" "$CLAUDEX_PROXY_LISTEN_PORT" \
-  "$claudex_proxy_action"
+  "$claudex_proxy_service_file" "$CLAUDEX_PROXY_PORT" \
+  "$ROUTE_PROXY_LISTEN_PORT" \
+  "$claudex_proxy_action" \
+  "$ORICHUM_PYTHON" "$orichum_python_version" \
+  "$orichum_python_candidate" "$orichum_python_action"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"

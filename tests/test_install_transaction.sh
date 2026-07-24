@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
+export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-transaction.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
@@ -207,6 +208,7 @@ rg -Fq 'orichum_launcher_mutated=true' "$ROOT/install.sh"
 rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
+rg -Fq 'remove_orichum_python_generation' "$ROOT/install.sh"
 rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
 rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
 settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
@@ -224,6 +226,7 @@ end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
 rollback = source[start:end]
 
 stop_route = rollback.index("claudex_proxy_runtime_mutated")
+restore_python = rollback.index("rollback_python_activation")
 restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
     'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
@@ -233,6 +236,7 @@ restore_route = rollback.index("restore_claudex_proxy_service")
 restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
+    < restore_python
     < restore_private_tools
     < restore_cliproxy
     < restore_endpoint
@@ -245,10 +249,16 @@ if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in sou
     raise SystemExit("final Headroom readiness is not tied to usable route state")
 
 snapshot_private_tools = source.index("snapshot_private_tool_state")
+python_transaction = source.index("python_transaction_active=true")
+provision_python = source.index("install_or_reuse_orichum_python")
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
 upgrade_headroom = source.index("upgrade_headroom_distribution")
 if not (
+    python_transaction
+    < provision_python
+    < snapshot_private_tools
+    and
     snapshot_private_tools
     < upgrade_mempalace
     < upgrade_graphify

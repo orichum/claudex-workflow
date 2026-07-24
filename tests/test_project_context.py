@@ -1223,8 +1223,26 @@ raise SystemExit(0)
         installed = self.root / "bin" / "orichum-context"
         installed.parent.mkdir()
         installed.symlink_to(REPO_ROOT / "bin" / "orichum-context")
+        data_home = self.root / "data"
+        managed_python = (
+            data_home / "python" / "cpython-3.14.6" / "bin" / "python3.14"
+        )
+        managed_python.parent.mkdir(mode=0o700, parents=True)
+        managed_python.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "$*" == *platform.python_implementation* ]]; then\n'
+            "  printf 'CPython\\t3.14.6\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f'exec "{sys.executable}" "$@"\n',
+            encoding="utf-8",
+        )
+        managed_python.chmod(0o700)
+        (data_home / "bin").mkdir(mode=0o700)
+        (data_home / "bin" / "orichum-python").symlink_to(managed_python)
         environment = os.environ.copy()
         environment["ORICHUM_CONFIG_HOME"] = str(REPO_ROOT / "config")
+        environment["ORICHUM_DATA_HOME"] = str(data_home)
         completed = subprocess.run(
             [str(installed), "list"],
             cwd=self.root,

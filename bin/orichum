@@ -11,9 +11,13 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
+export ORICHUM_PYTHON
+ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
+export ORICHUM_PYTHON_VALIDATED
 export PATH="$WORKFLOW_DATA_ROOT/headroom/bin:$PATH"
 python_entrypoint=(
-  python3 -I -B -c
+  "$ORICHUM_PYTHON" -I -B -c
   'import sys; sys.path.insert(0, sys.argv.pop(1)); import runpy; runpy.run_module("integrations.common.orichum_cli", run_name="__main__")'
   "$WORKFLOW_ROOT"
 )

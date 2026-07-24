@@ -8,5 +8,12 @@ while [[ -L "$launcher_source" ]]; do
   [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
 done
 workflow_root="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$workflow_root/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
+export ORICHUM_PYTHON
+ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
+export ORICHUM_PYTHON_VALIDATED
 cd "$workflow_root"
-exec python3 -B -m integrations.common.route_proxy "$@"
+exec "$ORICHUM_PYTHON" -B -m integrations.common.route_proxy "$@"

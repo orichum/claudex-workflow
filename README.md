@@ -31,9 +31,11 @@ The default stack is deliberately strong without using ultra effort:
 - Linux on arm64 or x86-64 with a systemd user manager
 - WSL2 with systemd enabled
 
-Required commands: `bash`, `curl`, `gh`, `git`, `jq`, `python3` 3.10+, `rg`,
-`tar`, `uv`, and Claude Code. Linux and WSL also require `ss`, normally
-provided by `iproute2`. Authenticate every GitHub account referenced by
+Required commands: `bash`, `curl`, `gh`, `git`, `jq`, a bootstrap `python3`
+3.10+, `rg`, `tar`, `uv`, and Claude Code. Linux and WSL also require `ss`,
+normally provided by `iproute2`. The host Python is used only to begin the
+installer; installed Orichum commands and services run on an isolated
+uv-managed CPython 3.14.x. Authenticate every GitHub account referenced by
 `projects.json` with `gh auth login` before installation.
 
 ### Install or upgrade
@@ -47,12 +49,16 @@ cd orichum
 Every installer run is an upgrade and reconciliation pass. It:
 
 1. validates the control plane and controller plugin;
-2. installs or upgrades CLIProxyAPI, Claudex, Headroom, Mempalace, and
+2. installs or upgrades the newest CPython 3.14 patch under Orichum's data
+   directory, preserving the previous patch for transactional recovery;
+3. installs or upgrades CLIProxyAPI, Claudex, Headroom, Mempalace, and
    Graphify without pinning them to an old release;
-3. verifies required CLIProxyAPI management behavior in an isolated probe;
-4. creates or reconciles three Orichum-owned loopback services;
-5. preserves valid existing configuration and authentication;
-6. prints every binary, data directory, service definition, and selected port.
+4. verifies required CLIProxyAPI management behavior in an isolated probe;
+5. creates or reconciles three Orichum-owned resident loopback services and
+   validates the private Claudex proxy used by each session;
+6. preserves valid existing configuration and authentication;
+7. runs `orichum doctor` and prints every binary, Python runtime, data
+   directory, service definition, and selected port.
 
 Linux and WSL services log to the user journal. Inspect them with:
 
@@ -62,10 +68,13 @@ journalctl --user -u orichum-cliproxy.service
 journalctl --user -u orichum-route-proxy.service
 ```
 
-If a preferred port belongs to an existing Orichum service, that service is
-reconciled and reused. If an unknown process owns it, Orichum does not replace
-the process: an interactive install offers another port, while a non-interactive
-install selects the next available port.
+If a preferred resident-service port belongs to an existing Orichum service,
+that service is reconciled and reused. If an unknown process owns it, Orichum
+does not replace the process: an interactive install offers another port, while
+a non-interactive install selects the next available port. Each session also
+reserves its own Claudex translation-proxy port from a persisted preferred
+starting point. This keeps simultaneous sessions isolated without installing a
+fourth resident service.
 
 Default locations:
 
@@ -74,12 +83,19 @@ Default locations:
 | Command | `~/.local/bin/orichum` |
 | Editable configuration | `~/.config/orichum/` |
 | Binaries, auth, logs, service state | `~/.local/share/orichum/` |
+| Managed CPython versions | `~/.local/share/orichum/python/` |
+| Stable private Python | `~/.local/share/orichum/bin/orichum-python` |
 | Logical session state | `~/.local/share/orichum/state/` |
 
 Use `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and `ORICHUM_CACHE_HOME` to
 relocate them. Logical session state always lives under
 `$ORICHUM_DATA_HOME/state` so the CLI and route service cannot diverge. Paths
 must be absolute.
+
+Re-running the installer upgrades Python only within the 3.14 line. It never
+changes Homebrew Python, distribution Python, global symlinks, shell profiles,
+or another project's environment. Mempalace, Graphify, and Headroom retain
+their own separate `uv tool` environments.
 
 Verify the finished installation:
 
@@ -236,18 +252,22 @@ into each immutable physical session; it is not managed as an optional plugin.
 ```mermaid
 flowchart LR
     U["You"] --> O["orichum CLI"]
-    O --> C["Claudex + Claude Code"]
-    C --> H["Headroom<br/>lossless optimization"]
+    O --> C["Claude Code"]
+    C --> X["Private Claudex proxy<br/>one port per session"]
+    X --> H["Headroom<br/>lossless optimization"]
     H --> R["Orichum route proxy<br/>session-bound recovery"]
     R --> P["CLIProxyAPI"]
     P --> A["Named provider account"]
     A --> M["GPT / Claude / Google / Kimi"]
 ```
 
-All services bind to `127.0.0.1`. Before a session starts, Orichum verifies the
-service definition, loaded service target, owning process, loopback listener,
-health endpoint, and live model catalogue. The route proxy also attests its
-exact upstream CLIProxyAPI connection before forwarding request data.
+All endpoints bind to `127.0.0.1`. CLIProxyAPI, Headroom, and the Orichum route
+proxy are resident services. The Claudex translation proxy is owned by one
+physical session and stops with that session. Before launch, Orichum verifies
+the resident service definitions, loaded targets, owning processes, loopback
+listeners, health endpoints, and live model catalogue. Session startup then
+checks its private Claudex proxy as well. The route proxy also attests its exact
+upstream CLIProxyAPI connection before forwarding request data.
 
 ### Session and failover flow
 

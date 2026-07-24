@@ -13,6 +13,10 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 
 PLUGIN_MANIFEST="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}/plugins.json"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
+export ORICHUM_PYTHON
+ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
+export ORICHUM_PYTHON_VALIDATED
 CLAUDEX_CLAUDE_CONFIG="$WORKFLOW_DATA_ROOT/claude-config"
 
 usage() {
@@ -150,7 +154,7 @@ list_plugins() {
   local installed
   installed="$(read_installed_plugins)" || die "could not list installed Claude plugins"
   printf 'Orichum plugin config: %s\n\n' "$CLAUDEX_CLAUDE_CONFIG"
-  python3 - "$PLUGIN_MANIFEST" "$installed" <<'PY'
+  "$ORICHUM_PYTHON" - "$PLUGIN_MANIFEST" "$installed" <<'PY'
 import json
 import sys
 

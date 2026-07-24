@@ -11,6 +11,10 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
+export ORICHUM_PYTHON
+ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
+export ORICHUM_PYTHON_VALIDATED
 
 if [[ "$#" -eq 0 || "$1" == -* ]]; then
   workflow_die "usage: orichum provider login <installed-oauth-provider> [arguments...]"
@@ -35,7 +39,7 @@ find "$WORKFLOW_DATA_ROOT/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
 if [[ "$login_status" -eq 0 ]]; then
   if ! (
     cd "$WORKFLOW_ROOT"
-    python3 -B -m integrations.common.provider_credentials \
+    "$ORICHUM_PYTHON" -B -m integrations.common.provider_credentials \
       --auth-dir "$WORKFLOW_DATA_ROOT/auth" default-for "$provider"
   ); then
     workflow_die \
