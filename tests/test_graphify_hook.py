@@ -47,7 +47,7 @@ class GraphifyHookTests(unittest.TestCase):
                 self.workflow,
                 self.repo,
                 config,
-                routing_path=REPOSITORY_ROOT / "controller" / "model-routing.json",
+                routing_path=REPOSITORY_ROOT / "config" / "model-stacks.json",
                 models_path=models,
                 plugin_source=REPOSITORY_ROOT / "controller" / "plugin",
             )

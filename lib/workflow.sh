@@ -5,15 +5,28 @@ workflow_die() {
   return 1
 }
 
+linux_environment_kind() {
+  local osrelease_path="${1:-/proc/sys/kernel/osrelease}"
+  if rg -qi microsoft "$osrelease_path" 2>/dev/null; then
+    if rg -qi 'wsl2|microsoft-standard' "$osrelease_path" 2>/dev/null; then
+      printf 'wsl2\n'
+    else
+      printf 'wsl1\n'
+    fi
+  else
+    printf 'linux\n'
+  fi
+}
+
 physical_pwd() {
   pwd -P
 }
 
 workflow_data_dir() {
-  local data_root="${CLAUDEX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow}"
+  local data_root="${ORICHUM_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/orichum}"
   case "$data_root" in
     /*) printf '%s' "$data_root" ;;
-    *) workflow_die "CLAUDEX_DATA_DIR must be an absolute path" ;;
+    *) workflow_die "ORICHUM_DATA_HOME must be an absolute path" ;;
   esac
 }
 
@@ -40,26 +53,27 @@ read_service_ports() {
   jq -er '
     select(type == "object") |
     if keys == ["cliproxyPort", "headroomPort"] then
-      . + {claudexProxyPort:
+      . + {routeProxyPort:
         (if .cliproxyPort != 13456 and .headroomPort != 13456 then 13456
          elif .cliproxyPort != 13457 and .headroomPort != 13457 then 13457
          else 13458
          end)}
     elif keys == ["claudexProxyPort", "cliproxyPort", "headroomPort"] then
-      .
+      {routeProxyPort: .claudexProxyPort, cliproxyPort, headroomPort}
+    elif keys == ["cliproxyPort", "headroomPort", "routeProxyPort"] then .
     else
       empty
     end |
-    select(keys == ["claudexProxyPort", "cliproxyPort", "headroomPort"]) |
+    select(keys == ["cliproxyPort", "headroomPort", "routeProxyPort"]) |
     select(.cliproxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
     select(.headroomPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
-    select(.claudexProxyPort | type == "number" and floor == . and
+    select(.routeProxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
-    select(([.cliproxyPort, .headroomPort, .claudexProxyPort] |
+    select(([.cliproxyPort, .headroomPort, .routeProxyPort] |
       unique | length) == 3) |
-    [.cliproxyPort, .headroomPort, .claudexProxyPort] | @tsv
+    [.cliproxyPort, .headroomPort, .routeProxyPort] | @tsv
   ' "$ports_file"
 }
 
@@ -67,22 +81,22 @@ write_service_ports() {
   local data_root="$1"
   local cliproxy_port="$2"
   local headroom_port="$3"
-  local claudex_proxy_port="$4"
+  local route_proxy_port="$4"
   local ports_file temporary
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$headroom_port" || return 1
-  valid_service_port "$claudex_proxy_port" || return 1
+  valid_service_port "$route_proxy_port" || return 1
   [[ "$cliproxy_port" != "$headroom_port" && \
-     "$cliproxy_port" != "$claudex_proxy_port" && \
-     "$headroom_port" != "$claudex_proxy_port" ]] || return 1
+     "$cliproxy_port" != "$route_proxy_port" && \
+     "$headroom_port" != "$route_proxy_port" ]] || return 1
   install -d -m 0700 "$data_root" || return 1
   ports_file="$(service_ports_file "$data_root")"
   [[ ! -L "$ports_file" ]] || return 1
   temporary="$(mktemp "$data_root/.service-ports.XXXXXX")" || return 1
   if ! jq -n --argjson cliproxy "$cliproxy_port" \
       --argjson headroom "$headroom_port" \
-      --argjson claudex_proxy "$claudex_proxy_port" \
-      '{claudexProxyPort: $claudex_proxy, cliproxyPort: $cliproxy,
+      --argjson route_proxy "$route_proxy_port" \
+      '{routeProxyPort: $route_proxy, cliproxyPort: $cliproxy,
         headroomPort: $headroom}' >"$temporary" || \
      ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$ports_file"; then
     rm -f -- "$temporary"
@@ -172,7 +186,7 @@ select_service_port() {
   }
   collision_reason=occupied
   if [[ "$desired_is_reserved" == true ]]; then
-    collision_reason='reserved by another Claudex service'
+    collision_reason='reserved by another Orichum service'
   fi
   if [[ "$interactive" != true ]]; then
     printf 'NOTICE: %s port %s is %s; using %s.\n' \
@@ -193,7 +207,7 @@ select_service_port() {
     fi
     for reserved_port do
       if [[ "$selected_port" == "$reserved_port" ]]; then
-        printf 'Port %s is reserved by another Claudex service.\n' \
+        printf 'Port %s is reserved by another Orichum service.\n' \
           "$selected_port" >&2
         selected_port=
         break
@@ -233,7 +247,7 @@ print_install_summary() {
     'Installation locations' \
     "  Workflow checkout: $workflow_root" \
     "  Workflow data:     $data_root" \
-    "  Launcher links:    $user_bin_dir -> $workflow_root/bin" \
+    "  Launcher:          $user_bin_dir/orichum -> $workflow_root/bin/orichum" \
     "  Claudex runtime:   $claudex_binary" \
     "  CLIProxyAPI:       $cliproxy_binary" \
     "  Headroom:          $headroom_binary" \
@@ -245,7 +259,7 @@ print_install_summary() {
     "    $cliproxy_service_file" \
     "  Headroom:    $headroom_action at 127.0.0.1:$headroom_port" \
     "    $headroom_service_file" \
-    "  Claudex:     $claudex_proxy_action at 127.0.0.1:$claudex_proxy_port" \
+    "  Route proxy: $claudex_proxy_action at 127.0.0.1:$claudex_proxy_port" \
     "    $claudex_proxy_service_file"
 }
 
@@ -277,15 +291,19 @@ def valid_port(value):
 
 
 def headroom_arguments_owned(arguments):
-    if not isinstance(arguments, list) or len(arguments) != 12:
+    if not isinstance(arguments, list) or len(arguments) not in (12, 13, 14, 15):
         return False
+    normalized = list(arguments)
+    if normalized[-1:] == ["--disable-kompress"]:
+        normalized.pop()
+    arguments = normalized
     executable = arguments[0]
     if not os.path.isabs(executable) or os.path.basename(executable) != "headroom":
         return False
     if mode == "new" and executable != f"{data_root}/headroom/bin/headroom":
         return False
     port = arguments[5]
-    return valid_port(port) and arguments[1:] == [
+    legacy = [
         "proxy",
         "--host", "127.0.0.1",
         "--port", port,
@@ -295,21 +313,50 @@ def headroom_arguments_owned(arguments):
         "--lossless",
         "--code-aware",
     ]
+    if arguments[1:] == legacy:
+        return valid_port(port)
+    upstream = arguments[7]
+    prefix = "http://127.0.0.1:"
+    upstream_port = upstream[len(prefix):] if upstream.startswith(prefix) else ""
+    return (
+        valid_port(port)
+        and valid_port(upstream_port)
+        and port != upstream_port
+        and arguments[1:] == [
+            "proxy",
+            "--host", "127.0.0.1",
+            "--port", port,
+            "--anthropic-api-url", f"{prefix}{upstream_port}",
+            "--mode", "token",
+            "--no-cache",
+            "--intercept-tool-results",
+            "--lossless",
+            "--code-aware",
+        ]
+    )
 
 
 def claudex_proxy_arguments_owned(arguments):
-    if not isinstance(arguments, list) or len(arguments) != 7:
+    if not isinstance(arguments, list) or len(arguments) != 9:
         return False
-    port = arguments[6]
-    return valid_port(port) and arguments == [
-        f"{data_root}/bin/claudex",
-        "--config",
-        f"{data_root}/model-config/current/claudex.toml",
-        "proxy",
-        "start",
+    port = arguments[2]
+    upstream = arguments[4]
+    return (
+        valid_port(port)
+        and valid_port(upstream)
+        and port != upstream
+        and arguments == [
+        f"{data_root}/bin/orichum-route-proxy",
         "--port",
         port,
-    ]
+        "--upstream-port",
+        upstream,
+        "--state-home",
+        f"{data_root}/state",
+        "--data-home",
+        data_root,
+        ]
+    )
 
 
 raw = path.read_bytes()
@@ -318,7 +365,7 @@ if b"<plist" in raw[:500]:
     arguments = document.get("ProgramArguments")
     if kind == "cliproxy":
         owned = (
-            document.get("Label") == "com.user.claudex-cliproxy"
+            document.get("Label") == "io.orichum.cliproxy"
             and arguments == [
                 f"{data_root}/bin/cli-proxy-api",
                 "--config",
@@ -328,16 +375,23 @@ if b"<plist" in raw[:500]:
     elif kind == "claudex-proxy":
         environment = document.get("EnvironmentVariables")
         owned = (
-            document.get("Label") == "com.user.claudex-translation-proxy"
+            document.get("Label") == "io.orichum.route-proxy"
             and claudex_proxy_arguments_owned(arguments)
             and isinstance(environment, dict)
             and environment.get("HOME") == os.environ.get("HOME")
         )
     else:
         labels = {
-            "new": {"com.user.claudex-headroom"},
-            "legacy": {"com.user.headroom-proxy"},
-            "either": {"com.user.claudex-headroom", "com.user.headroom-proxy"},
+            "new": {"io.orichum.headroom"},
+            "legacy": {
+                "com.user.claudex-headroom",
+                "com.user.headroom-proxy",
+            },
+            "either": {
+                "io.orichum.headroom",
+                "com.user.claudex-headroom",
+                "com.user.headroom-proxy",
+            },
         }
         environment = document.get("EnvironmentVariables")
         owned = (
@@ -401,22 +455,25 @@ for line in lines:
             environment[key] = item
 
 if kind == "claudex-proxy":
-    port = arguments[6] if len(arguments) == 7 else ""
+    port = arguments[2] if len(arguments) == 9 else ""
+    upstream = arguments[4] if len(arguments) == 9 else ""
     expected_exec = " ".join([
-        systemd_quote(f"{data_root}/bin/claudex"),
-        "--config",
-        systemd_quote(f"{data_root}/model-config/current/claudex.toml"),
-        "proxy",
-        "start",
+        systemd_quote(f"{data_root}/bin/orichum-route-proxy"),
         "--port",
         port,
+        "--upstream-port",
+        upstream,
+        "--state-home",
+        systemd_quote(f"{data_root}/state"),
+        "--data-home",
+        systemd_quote(data_root),
     ])
     environment_lines = [line for line in lines if line.startswith("Environment=")]
     expected_environment = "Environment=" + systemd_quote(
         f"HOME={os.environ.get('HOME', '')}", escape_dollar=False
     )
     owned = (
-        descriptions == ["Description=Claudex translation proxy"]
+        descriptions == ["Description=Orichum same-family recovery proxy"]
         and claudex_proxy_arguments_owned(arguments)
         and exec_lines[0] == expected_exec
         and environment_lines == [expected_environment]
@@ -425,9 +482,13 @@ if kind == "claudex-proxy":
     raise SystemExit(0 if owned else 1)
 
 expected_descriptions = {
-    "new": {"Description=Claudex Headroom proxy"},
-    "legacy": {"Description=Headroom proxy for Claudex"},
+    "new": {"Description=Orichum Headroom proxy"},
+    "legacy": {
+        "Description=Claudex Headroom proxy",
+        "Description=Headroom proxy for Claudex",
+    },
     "either": {
+        "Description=Orichum Headroom proxy",
         "Description=Claudex Headroom proxy",
         "Description=Headroom proxy for Claudex",
     },
@@ -460,13 +521,13 @@ claudex_proxy_service_identity() {
   case "$platform" in
     darwin)
       printf '%s\t%s\t%s\n' \
-        "$HOME/Library/LaunchAgents/com.user.claudex-translation-proxy.plist" \
-        'com.user.claudex-translation-proxy' '-'
+        "$HOME/Library/LaunchAgents/io.orichum.route-proxy.plist" \
+        'io.orichum.route-proxy' '-'
       ;;
     systemd)
       printf '%s\t%s\t%s\n' \
-        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-translation-proxy.service" \
-        '-' 'claudex-translation-proxy.service'
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-route-proxy.service" \
+        '-' 'orichum-route-proxy.service'
       ;;
     *) return 1 ;;
   esac
@@ -603,6 +664,56 @@ PY
   esac
 }
 
+pid_owns_loopback_connection() {
+  local service_pid="$1"
+  local service_port="$2"
+  local client_port="$3"
+  local platform output
+  [[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  valid_service_port "$service_port" || return 1
+  valid_service_port "$client_port" || return 1
+  platform="$(uname -s)" || return 1
+  case "$platform" in
+    Darwin)
+      command -v lsof >/dev/null 2>&1 || return 1
+      output="$(lsof -nP -a -p "$service_pid" -iTCP \
+        -sTCP:ESTABLISHED -Fn 2>/dev/null)" || return 1
+      printf '%s\n' "$output" | awk \
+        -v expected="n127.0.0.1:${service_port}->127.0.0.1:${client_port}" '
+          $0 == expected {found = 1}
+          END {exit(found ? 0 : 1)}
+        '
+      ;;
+    Linux)
+      command -v ss >/dev/null 2>&1 || return 1
+      output="$(ss -H -tnp \
+        "( sport = :$service_port and dport = :$client_port )" \
+        2>/dev/null)" || return 1
+      python3 - "$service_pid" "$service_port" "$client_port" "$output" <<'PY'
+import re
+import sys
+
+pid, service_port, client_port, output = sys.argv[1:]
+expected_local = f"127.0.0.1:{service_port}"
+expected_peer = f"127.0.0.1:{client_port}"
+pid_pattern = re.compile(rf"(?:^|[,()])pid={re.escape(pid)}(?:,|[)])")
+for line in output.splitlines():
+    fields = line.split()
+    if (
+        len(fields) >= 5
+        and fields[0] == "ESTAB"
+        and fields[3] == expected_local
+        and fields[4] == expected_peer
+        and pid_pattern.search(line)
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 claudex_proxy_models_response_is_ready() {
   local response_file="$1"
   local expected_model="$2"
@@ -633,7 +744,7 @@ claudex_config_default_model() {
 
 validated_workflow_data_dir() {
   local checkout_root="$1"
-  local data_root="${CLAUDEX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow}"
+  local data_root="${ORICHUM_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/orichum}"
   python3 - "$data_root" "$HOME" "$checkout_root" <<'PY'
 import os
 import stat
@@ -642,7 +753,7 @@ from pathlib import Path
 
 raw, home_raw, checkout_raw = sys.argv[1:]
 if not os.path.isabs(raw):
-    raise SystemExit("CLAUDEX_DATA_DIR must be an absolute path")
+    raise SystemExit("ORICHUM_DATA_HOME must be an absolute path")
 
 normalized = Path(os.path.normpath(raw))
 cursor = Path(normalized.anchor)
@@ -654,11 +765,11 @@ for index, component in enumerate(parts):
     except FileNotFoundError:
         break
     except OSError as error:
-        raise SystemExit("CLAUDEX_DATA_DIR existing ancestor is inaccessible") from error
+        raise SystemExit("ORICHUM_DATA_HOME existing ancestor is inaccessible") from error
     if stat.S_ISLNK(value.st_mode):
-        raise SystemExit("CLAUDEX_DATA_DIR existing ancestors must not be symlinks")
+        raise SystemExit("ORICHUM_DATA_HOME existing ancestors must not be symlinks")
     if index < len(parts) - 1 and not stat.S_ISDIR(value.st_mode):
-        raise SystemExit("CLAUDEX_DATA_DIR existing ancestor is not a directory")
+        raise SystemExit("ORICHUM_DATA_HOME existing ancestor is not a directory")
 
 candidate = normalized.resolve(strict=False)
 home = Path(home_raw).resolve(strict=False)
@@ -671,7 +782,7 @@ except ValueError:
 else:
     inside_checkout = True
 if candidate in (root, home) or inside_checkout:
-    raise SystemExit("refusing unsafe CLAUDEX_DATA_DIR")
+    raise SystemExit("refusing unsafe ORICHUM_DATA_HOME")
 print(candidate, end="")
 PY
 }
@@ -1021,9 +1132,9 @@ upgrade_headroom_distribution() {
   headroom_transaction_active=true
   if [[ -n "$tool_dir" && -n "$bin_dir" ]]; then
     PATH="$bin_dir:$PATH" UV_TOOL_DIR="$tool_dir" UV_TOOL_BIN_DIR="$bin_dir" \
-      uv tool install --upgrade 'headroom-ai[all]'
+      uv tool install --upgrade 'headroom-ai[proxy,code]'
   else
-    uv tool install --upgrade 'headroom-ai[all]'
+    uv tool install --upgrade 'headroom-ai[proxy,code]'
   fi
 }
 
@@ -1048,6 +1159,126 @@ run_rollback_if_active() {
   local rollback_handler="$2"
   [[ "$transaction_active" == true ]] || return 0
   "$rollback_handler"
+}
+
+private_tool_layout_is_owned() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local data_physical headroom_physical tool_physical bin_physical
+  [[ "$data_root" == /* && "$data_root" != / ]] && \
+    [[ "$tool_dir" == "$data_root/headroom/tools" ]] && \
+    [[ "$bin_dir" == "$data_root/headroom/bin" ]] || return 1
+  [[ -d "$data_root" && ! -L "$data_root" ]] && \
+    [[ -d "$data_root/headroom" && ! -L "$data_root/headroom" ]] && \
+    [[ -d "$tool_dir" && ! -L "$tool_dir" ]] && \
+    [[ -d "$bin_dir" && ! -L "$bin_dir" ]] || return 1
+  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
+  headroom_physical="$(
+    cd -P -- "$data_root/headroom" && pwd
+  )" || return 1
+  tool_physical="$(cd -P -- "$tool_dir" && pwd)" || return 1
+  bin_physical="$(cd -P -- "$bin_dir" && pwd)" || return 1
+  [[ "$headroom_physical" == "$data_physical/headroom" ]] && \
+    [[ "$tool_physical" == "$data_physical/headroom/tools" ]] && \
+    [[ "$bin_physical" == "$data_physical/headroom/bin" ]]
+}
+
+snapshot_private_tree() {
+  local source_path="$1"
+  local snapshot_dir="$2"
+  local snapshot_name="$3"
+  rm -rf -- "$snapshot_dir/$snapshot_name.data"
+  rm -f -- \
+    "$snapshot_dir/$snapshot_name.present" \
+    "$snapshot_dir/$snapshot_name.absent"
+  if [[ -e "$source_path" || -L "$source_path" ]]; then
+    cp -pPR "$source_path" "$snapshot_dir/$snapshot_name.data"
+    : >"$snapshot_dir/$snapshot_name.present"
+  else
+    : >"$snapshot_dir/$snapshot_name.absent"
+  fi
+}
+
+restore_private_tree() {
+  local destination="$1"
+  local snapshot_dir="$2"
+  local snapshot_name="$3"
+  rm -rf -- "$destination"
+  if [[ -f "$snapshot_dir/$snapshot_name.present" ]]; then
+    cp -pPR "$snapshot_dir/$snapshot_name.data" "$destination"
+  elif [[ ! -f "$snapshot_dir/$snapshot_name.absent" ]]; then
+    workflow_die "missing private tool snapshot state for $destination"
+    return 1
+  fi
+}
+
+private_tree_matches_snapshot() {
+  local destination="$1"
+  local snapshot_dir="$2"
+  local snapshot_name="$3"
+  if [[ -f "$snapshot_dir/$snapshot_name.present" ]]; then
+    [[ -e "$destination" || -L "$destination" ]] && \
+      [[ "$(path_mode "$snapshot_dir/$snapshot_name.data")" == \
+         "$(path_mode "$destination")" ]] && \
+      diff -qr -- "$snapshot_dir/$snapshot_name.data" "$destination" \
+        >/dev/null
+  elif [[ -f "$snapshot_dir/$snapshot_name.absent" ]]; then
+    [[ ! -e "$destination" && ! -L "$destination" ]]
+  else
+    workflow_die "missing private tool snapshot state for $destination"
+  fi
+}
+
+snapshot_private_tool_state() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local snapshot_dir="$4"
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
+    workflow_die "refusing unsafe private tool snapshot layout"
+    return 1
+  }
+  [[ "$snapshot_dir" == /* && "$snapshot_dir" != / ]] || {
+    workflow_die "refusing unsafe private tool snapshot directory"
+    return 1
+  }
+  install -d -m 0700 "$snapshot_dir"
+  snapshot_private_tree "$tool_dir/mempalace" \
+    "$snapshot_dir" mempalace-environment
+  snapshot_private_tree "$tool_dir/graphifyy" \
+    "$snapshot_dir" graphify-environment
+  snapshot_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
+}
+
+restore_private_tool_state() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local snapshot_dir="$4"
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
+    workflow_die "refusing unsafe private tool restore layout"
+    return 1
+  }
+  restore_private_tree "$tool_dir/mempalace" \
+    "$snapshot_dir" mempalace-environment
+  restore_private_tree "$tool_dir/graphifyy" \
+    "$snapshot_dir" graphify-environment
+  restore_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
+}
+
+private_tool_state_matches() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local snapshot_dir="$4"
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || return 1
+  private_tree_matches_snapshot "$tool_dir/mempalace" \
+    "$snapshot_dir" mempalace-environment &&
+    private_tree_matches_snapshot "$tool_dir/graphifyy" \
+      "$snapshot_dir" graphify-environment &&
+    private_tree_matches_snapshot "$bin_dir" \
+      "$snapshot_dir" private-tool-bin
 }
 
 snapshot_path() {
@@ -1095,11 +1326,11 @@ snapshot_path_matches() {
 }
 
 path_mode() {
-  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
-    stat -f '%Lp' "$1"
-  else
-    stat -c '%a' "$1"
-  fi
+  case "$(uname -s)" in
+    Darwin) stat -f '%Lp' "$1" ;;
+    Linux) stat -c '%a' "$1" ;;
+    *) return 1 ;;
+  esac
 }
 
 model_config_root() {
@@ -1606,7 +1837,8 @@ render_claudex_config() {
     "opus = \"$opus_model\"" \
     '' \
     '[profiles.custom_headers]' \
-    "X-Headroom-Base-Url = \"http://127.0.0.1:$cliproxy_port\"" \
+    "X-Headroom-Base-Url = \"http://127.0.0.1:$claudex_proxy_port\"" \
+    'X-Orichum-Session-ID = "unbound"' \
     '' \
     '[router]' \
     'enabled = false' \
@@ -1625,8 +1857,15 @@ render_cliproxy_config() {
   local output_file="$1"
   local auth_dir="$2"
   local cliproxy_port="${3:-8317}"
+  local management_key="${4:-}"
 
   valid_service_port "$cliproxy_port" || return 1
+  if [[ "$management_key" =~ ^\$2[a-z]\$[0-9]{2}\$.{53}$ ]]; then
+    :
+  elif (( ${#management_key} < 32 || ${#management_key} > 256 )) || \
+       [[ ! "$management_key" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+    return 1
+  fi
 
   printf '%s\n' \
     'host: "127.0.0.1"' \
@@ -1635,7 +1874,7 @@ render_cliproxy_config() {
     '  enable: false' \
     'remote-management:' \
     '  allow-remote: false' \
-    '  secret-key: ""' \
+    "  secret-key: \"$management_key\"" \
     '  disable-control-panel: true' \
     "auth-dir: \"$auth_dir\"" \
     'api-keys: []' \
@@ -1649,8 +1888,13 @@ render_cliproxy_config() {
     'usage-statistics-enabled: false' \
     'passthrough-headers: true' \
     'request-retry: 1' \
-    'max-retry-credentials: 1' \
-    'max-retry-interval: 10' >"$output_file"
+    'max-retry-credentials: 0' \
+    'max-retry-interval: 10' \
+    'quota-exceeded:' \
+    '  antigravity-credits: true' \
+    'routing:' \
+    '  strategy: "fill-first"' \
+    '  session-affinity: true' >"$output_file"
 }
 
 sha256_file() {
@@ -1851,10 +2095,10 @@ restore_headroom_distribution() {
   local restored_binary restored_version
   if [[ -n "$tool_dir" && -n "$bin_dir" ]]; then
     UV_TOOL_DIR="$tool_dir" UV_TOOL_BIN_DIR="$bin_dir" \
-      uv tool install --force "headroom-ai[all]==$prior_version" || return 1
+      uv tool install --force "headroom-ai[proxy,code]==$prior_version" || return 1
     restored_binary="$bin_dir/headroom"
   else
-    uv tool install --force "headroom-ai[all]==$prior_version" || return 1
+    uv tool install --force "headroom-ai[proxy,code]==$prior_version" || return 1
     restored_binary="$(command -v headroom)" || return 1
   fi
   restored_version="$(headroom_distribution_version "$restored_binary")" || return 1
@@ -1907,6 +2151,18 @@ remove_managed_symlink() {
   fi
 }
 
+fetch_latest_github_release() {
+  local repository="$1"
+  local output_file="$2"
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    gh api "repos/$repository/releases/latest" >"$output_file"
+  else
+    curl --fail --location --silent --show-error \
+      "https://api.github.com/repos/$repository/releases/latest" \
+      --output "$output_file"
+  fi
+}
+
 stage_latest_github_binary() {
   local repository="$1"
   local prefix="$2"
@@ -1920,8 +2176,7 @@ stage_latest_github_binary() {
   metadata="$staging_dir/release.json"
   archive="$staging_dir/release.tar.gz"
   staged_binary="$staging_dir/$archive_binary"
-  curl --fail --location --silent --show-error \
-    "https://api.github.com/repos/$repository/releases/latest" --output "$metadata"
+  fetch_latest_github_release "$repository" "$metadata"
   row="$(jq -er --arg prefix "$prefix" --arg suffix "$suffix" '
     [.assets[] | select(.name | startswith($prefix) and endswith($suffix))] |
     if length == 1 then .[0] else error("expected exactly one release asset") end |
@@ -2104,7 +2359,7 @@ render_launch_agent() {
     '<plist version="1.0">' \
     '<dict>' \
     '  <key>Label</key>' \
-    '  <string>com.user.claudex-cliproxy</string>' \
+    '  <string>io.orichum.cliproxy</string>' \
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
@@ -2161,13 +2416,12 @@ xml_escape() {
 render_systemd_user_unit() {
   local output_file="$1"
   local data_root="$2"
-  local executable config log
+  local executable config
   executable="$(systemd_quote "$data_root/bin/cli-proxy-api")"
   config="$(systemd_quote "$data_root/cliproxy.yaml")"
-  log="$(systemd_quote "append:$data_root/logs/cliproxy.log")"
   printf '%s\n' \
     '[Unit]' \
-    'Description=Claudex CLIProxyAPI' \
+    'Description=Orichum CLIProxyAPI' \
     'StartLimitIntervalSec=60' \
     'StartLimitBurst=3' \
     '' \
@@ -2176,8 +2430,8 @@ render_systemd_user_unit() {
     "ExecStart=$executable --config $config" \
     'Restart=on-failure' \
     'RestartSec=5' \
-    "StandardOutput=$log" \
-    "StandardError=$log" \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
     '' \
     '[Install]' \
     'WantedBy=default.target' >"$output_file"
@@ -2187,12 +2441,15 @@ render_claudex_proxy_launch_agent() {
   local output_file="$1"
   local data_root="$2"
   local port="${3:-13456}"
-  local escaped_binary escaped_config escaped_log escaped_home
+  local upstream_port="${4:-8317}"
+  local escaped_binary escaped_state escaped_data escaped_log escaped_home
   valid_service_port "$port" || return 1
-  escaped_binary="$(xml_escape "$data_root/bin/claudex")"
-  escaped_config="$(xml_escape \
-    "$data_root/model-config/current/claudex.toml")"
-  escaped_log="$(xml_escape "$data_root/logs/claudex-proxy.log")"
+  valid_service_port "$upstream_port" || return 1
+  [[ "$port" != "$upstream_port" ]] || return 1
+  escaped_binary="$(xml_escape "$data_root/bin/orichum-route-proxy")"
+  escaped_state="$(xml_escape "$data_root/state")"
+  escaped_data="$(xml_escape "$data_root")"
+  escaped_log="$(xml_escape "$data_root/logs/route-proxy.log")"
   escaped_home="$(xml_escape "$HOME")"
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -2200,16 +2457,18 @@ render_claudex_proxy_launch_agent() {
     '<plist version="1.0">' \
     '<dict>' \
     '  <key>Label</key>' \
-    '  <string>com.user.claudex-translation-proxy</string>' \
+    '  <string>io.orichum.route-proxy</string>' \
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
-    '    <string>--config</string>' \
-    "    <string>$escaped_config</string>" \
-    '    <string>proxy</string>' \
-    '    <string>start</string>' \
     '    <string>--port</string>' \
     "    <string>$port</string>" \
+    '    <string>--upstream-port</string>' \
+    "    <string>$upstream_port</string>" \
+    '    <string>--state-home</string>' \
+    "    <string>$escaped_state</string>" \
+    '    <string>--data-home</string>' \
+    "    <string>$escaped_data</string>" \
     '  </array>' \
     '  <key>RunAtLoad</key>' \
     '  <true/>' \
@@ -2236,27 +2495,29 @@ render_claudex_proxy_systemd_user_unit() {
   local output_file="$1"
   local data_root="$2"
   local port="${3:-13456}"
-  local executable config log home_environment
+  local upstream_port="${4:-8317}"
+  local executable state data home_environment
   valid_service_port "$port" || return 1
-  executable="$(systemd_quote "$data_root/bin/claudex")"
-  config="$(systemd_quote \
-    "$data_root/model-config/current/claudex.toml")"
-  log="$(systemd_quote "append:$data_root/logs/claudex-proxy.log")"
+  valid_service_port "$upstream_port" || return 1
+  [[ "$port" != "$upstream_port" ]] || return 1
+  executable="$(systemd_quote "$data_root/bin/orichum-route-proxy")"
+  state="$(systemd_quote "$data_root/state")"
+  data="$(systemd_quote "$data_root")"
   home_environment="$(systemd_environment_quote "HOME=$HOME")"
   printf '%s\n' \
     '[Unit]' \
-    'Description=Claudex translation proxy' \
-    'Wants=claudex-headroom.service claudex-cliproxy.service' \
-    'After=claudex-headroom.service claudex-cliproxy.service' \
+    'Description=Orichum same-family recovery proxy' \
+    'Wants=orichum-cliproxy.service' \
+    'After=orichum-cliproxy.service' \
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable --config $config proxy start --port $port" \
+    "ExecStart=$executable --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
     'Restart=always' \
     'RestartSec=3' \
     "Environment=$home_environment" \
-    "StandardOutput=$log" \
-    "StandardError=$log" \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
     '' \
     '[Install]' \
     'WantedBy=default.target' >"$output_file"
@@ -2268,22 +2529,25 @@ render_headroom_launch_agent() {
   local headroom_binary="$3"
   local ca_bundle="$4"
   local headroom_port="${5:-8787}"
+  local route_proxy_port="${6:-13456}"
   local escaped_binary escaped_log escaped_home
-  local escaped_config escaped_workspace escaped_ca
+  local escaped_config escaped_workspace escaped_ca escaped_upstream
   escaped_binary="$(xml_escape "$headroom_binary")"
   escaped_log="$(xml_escape "$data_root/logs/headroom.log")"
   escaped_home="$(xml_escape "$HOME")"
   escaped_config="$(xml_escape "$data_root/headroom/config")"
   escaped_workspace="$(xml_escape "$data_root/headroom/state")"
   escaped_ca="$(xml_escape "$ca_bundle")"
+  escaped_upstream="$(xml_escape "http://127.0.0.1:$route_proxy_port")"
   valid_service_port "$headroom_port" || return 1
+  valid_service_port "$route_proxy_port" || return 1
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
     '<plist version="1.0">' \
     '<dict>' \
     '  <key>Label</key>' \
-    '  <string>com.user.claudex-headroom</string>' \
+    '  <string>io.orichum.headroom</string>' \
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
@@ -2292,12 +2556,15 @@ render_headroom_launch_agent() {
     '    <string>127.0.0.1</string>' \
     '    <string>--port</string>' \
     "    <string>$headroom_port</string>" \
+    '    <string>--anthropic-api-url</string>' \
+    "    <string>$escaped_upstream</string>" \
     '    <string>--mode</string>' \
     '    <string>token</string>' \
     '    <string>--no-cache</string>' \
     '    <string>--intercept-tool-results</string>' \
     '    <string>--lossless</string>' \
     '    <string>--code-aware</string>' \
+    '    <string>--disable-kompress</string>' \
     '  </array>' \
     '  <key>RunAtLoad</key>' \
     '  <true/>' \
@@ -2336,23 +2603,24 @@ render_headroom_systemd_user_unit() {
   local headroom_binary="$3"
   local ca_bundle="$4"
   local headroom_port="${5:-8787}"
-  local executable log config_environment workspace_environment ca_environment
+  local route_proxy_port="${6:-13456}"
+  local executable config_environment workspace_environment ca_environment
   executable="$(systemd_quote "$headroom_binary")"
-  log="$(systemd_quote "append:$data_root/logs/headroom.log")"
   config_environment="$(systemd_environment_quote \
     "HEADROOM_CONFIG_DIR=$data_root/headroom/config")"
   workspace_environment="$(systemd_environment_quote \
     "HEADROOM_WORKSPACE_DIR=$data_root/headroom/state")"
   ca_environment="$(systemd_environment_quote "SSL_CERT_FILE=$ca_bundle")"
   valid_service_port "$headroom_port" || return 1
+  valid_service_port "$route_proxy_port" || return 1
   printf '%s\n' \
     '[Unit]' \
-    'Description=Claudex Headroom proxy' \
+    'Description=Orichum Headroom proxy' \
     'After=network-online.target' \
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable proxy --host 127.0.0.1 --port $headroom_port --mode token --no-cache --intercept-tool-results --lossless --code-aware" \
+    "ExecStart=$executable proxy --host 127.0.0.1 --port $headroom_port --anthropic-api-url http://127.0.0.1:$route_proxy_port --mode token --no-cache --intercept-tool-results --lossless --code-aware --disable-kompress" \
     'Restart=on-failure' \
     'RestartSec=3' \
     "Environment=$config_environment" \
@@ -2364,8 +2632,8 @@ render_headroom_systemd_user_unit() {
     'Environment="HEADROOM_VERBOSITY_AUTOTUNE=0"' \
     'Environment="HEADROOM_EFFORT_ROUTER=0"' \
     'Environment="HEADROOM_LOG_MESSAGES=0"' \
-    "StandardOutput=$log" \
-    "StandardError=$log" \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
     '' \
     '[Install]' \
     'WantedBy=default.target' >"$output_file"

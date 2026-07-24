@@ -28,6 +28,10 @@ WING_TOOLS = {
     "mempalace_diary_read",
 }
 
+GLOBAL_TOOLS = {
+    "mempalace_get_taxonomy",
+}
+
 
 def emit(payload: dict) -> None:
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
@@ -37,7 +41,7 @@ def deny() -> int:
     emit({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": "MemPalace call is not bound to a verified Claudex project context",
+        "permissionDecisionReason": "MemPalace call is not bound to a verified Orichum project context",
     }})
     return 0
 
@@ -91,6 +95,10 @@ def main() -> int:
         if isinstance(diary, dict):
             diary["wing"] = wing
             changed = True
+    elif short_name in GLOBAL_TOOLS:
+        return 0
+    else:
+        return deny()
 
     if changed:
         emit({"hookSpecificOutput": {

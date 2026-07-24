@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "controller": {
+    "effort": "high",
+    "maxToolUseConcurrency": 3,
+    "maxSubagentsPerSession": 24
+  }
+}

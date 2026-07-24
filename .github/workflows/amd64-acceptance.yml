@@ -1,0 +1,190 @@
+name: Native AMD64 acceptance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd64-acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Prepare native runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+          sudo npm install --global @anthropic-ai/claude-code
+          export ORICHUM_DATA_HOME="$RUNNER_TEMP/orichum-data"
+          export ORICHUM_CONFIG_HOME="$RUNNER_TEMP/orichum-config"
+          export USER_BIN_DIR="$RUNNER_TEMP/orichum-bin"
+          export UV_TOOL_DIR="$RUNNER_TEMP/uv-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/orichum-bin"
+          printf '%s\n' \
+            "ORICHUM_DATA_HOME=$ORICHUM_DATA_HOME" \
+            "ORICHUM_CONFIG_HOME=$ORICHUM_CONFIG_HOME" \
+            "USER_BIN_DIR=$USER_BIN_DIR" \
+            "UV_TOOL_DIR=$UV_TOOL_DIR" \
+            "UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR" >>"$GITHUB_ENV"
+          printf '%s\n' "$USER_BIN_DIR" >>"$GITHUB_PATH"
+          runtime_dir="/run/user/$(id -u)"
+          printf 'XDG_RUNTIME_DIR=%s\n' "$runtime_dir" >>"$GITHUB_ENV"
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          XDG_RUNTIME_DIR="$runtime_dir" systemctl --user show-environment >/dev/null
+          claude --version
+          uv --version
+
+      - name: Run repository test suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          for test_script in \
+              tests/test_smoke.sh \
+              tests/test_plugins.sh \
+              tests/test_installer.sh \
+              tests/test_install_transaction.sh; do
+            bash "$test_script"
+          done
+
+      - name: Fresh install without providers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./install.sh
+          test "$(systemctl --user is-active orichum-cliproxy.service)" = active
+          test "$(systemctl --user is-active orichum-headroom.service)" = active
+          test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
+          curl -fsS "http://127.0.0.1:$(jq -r .cliproxyPort "$ORICHUM_DATA_HOME/service-ports.json")/v1/models" |
+            jq -e '.data | type == "array"' >/dev/null
+          systemctl --user show orichum-headroom.service --property=ExecStart --value |
+            rg -Fq -- '--disable-kompress'
+          curl -fsS "http://127.0.0.1:$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")/health" |
+            jq -e '.service == "headroom-proxy"' >/dev/null
+          set +e
+          doctor_output="$(
+            PATH="$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              orichum doctor 2>&1
+          )"
+          doctor_rc=$?
+          set -e
+          test "$doctor_rc" -eq 1
+          test "$(grep -c '^FAIL ' <<<"$doctor_output")" -eq 1
+          grep -Fq 'provider login is pending' <<<"$doctor_output"
+
+      - name: Activate disposable multi-family routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - "$ORICHUM_DATA_HOME/auth" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          auth = Path(sys.argv[1])
+          auth.mkdir(mode=0o700, parents=True, exist_ok=True)
+          for name, provider in (
+              ("codex-amd64.json", "codex"),
+              ("claude-amd64.json", "claude"),
+          ):
+              target = auth / name
+              target.write_text(
+                  json.dumps(
+                      {
+                          "type": provider,
+                          "email": "amd64-acceptance@example.invalid",
+                          "access_token": "acceptance-placeholder-not-a-secret",
+                          "refresh_token": "acceptance-placeholder-not-a-secret",
+                          "disabled": False,
+                      }
+                  ),
+                  encoding="utf-8",
+              )
+              os.chmod(target, 0o600)
+          PY
+          orichum provider account add \
+            "AMD64 GPT" openai codex-amd64.json shared --priority primary
+          orichum provider account add \
+            "AMD64 Claude" anthropic claude-amd64.json shared --priority primary
+          ./install.sh
+          for unit in \
+              orichum-cliproxy.service \
+              orichum-headroom.service \
+              orichum-route-proxy.service; do
+            test "$(systemctl --user is-enabled "$unit")" = enabled
+            test "$(systemctl --user is-active "$unit")" = active
+          done
+          route_port="$(jq -r .routeProxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
+          curl -fsS "http://127.0.0.1:$route_port/v1/models" |
+            jq -e '
+              [.data[].id] as $ids |
+              ($ids | index("gpt-5.6-sol")) != null and
+              ($ids | index("gpt-5.6-terra")) != null and
+              ($ids | index("claude-sonnet-5")) != null and
+              ($ids | index("claude-opus-4-8")) != null
+            ' >/dev/null
+          headroom_port="$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")"
+          curl -fsS "http://127.0.0.1:$headroom_port/health" |
+            jq -e '
+              .service == "headroom-proxy" and
+              .status == "healthy" and
+              .ready == true and
+              .checks.kompress.enabled == false
+            ' >/dev/null
+          orichum doctor
+
+      - name: Verify idempotent upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
+          ./install.sh | tee "$RUNNER_TEMP/orichum-upgrade.log"
+          after_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
+          test "$before_ports" = "$after_ports"
+          grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          grep -Fq 'Headroom:    reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          orichum doctor
+
+      - name: Print bounded diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          for unit in \
+              orichum-cliproxy.service \
+              orichum-headroom.service \
+              orichum-route-proxy.service; do
+            systemctl --user status "$unit" --no-pager
+            journalctl --user -u "$unit" --no-pager -n 80
+          done
+          ports_file="$ORICHUM_DATA_HOME/service-ports.json"
+          if [[ -f "$ports_file" ]]; then
+            for field_and_path in \
+                'cliproxyPort /v1/models' \
+                'headroomPort /health' \
+                'routeProxyPort /v1/models'; do
+              read -r field endpoint <<<"$field_and_path"
+              port="$(jq -r --arg field "$field" '.[$field]' "$ports_file")"
+              curl -fsS --max-time 3 "http://127.0.0.1:$port$endpoint" |
+                jq '{service, status, ready, object, modelCount: (.data | length)}'
+            done
+          fi

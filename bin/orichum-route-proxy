@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+workflow_root="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+cd "$workflow_root"
+exec python3 -B -m integrations.common.route_proxy "$@"

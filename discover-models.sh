@@ -7,13 +7,13 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 MODEL_DISCOVERY_LOGIN_INCOMPLETE=42
 
 print_model_discovery_instruction() {
-  printf 'Next: claudex-login <installed-oauth-provider>; %s/install.sh\n' \
+  printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT" >&2
 }
 
 discover_models_main_core() {
   local data_root generation_root candidate_dir models_file effective_file
-  local config_file active_generation routing_file
+  local config_file active_generation routing_file config_root
   local resolver_status
   local cliproxy_port headroom_port claudex_proxy_port
   data_root="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || return 1
@@ -38,7 +38,8 @@ discover_models_main_core() {
   models_file="$candidate_dir/models.json"
   effective_file="$candidate_dir/effective-models.json"
   config_file="$candidate_dir/claudex.toml"
-  routing_file="$WORKFLOW_ROOT/controller/model-routing.json"
+  config_root="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
+  routing_file="$config_root/model-stacks.json"
 
   if ! curl --fail --silent --show-error \
     --connect-timeout 1 --max-time 4 \
@@ -57,9 +58,9 @@ discover_models_main_core() {
     python3 -B - "$routing_file" <<'PY'
 import sys
 from pathlib import Path
-from integrations.common.model_routing import load_routing
+from integrations.common.model_routing import load_routing_view
 
-load_routing(Path(sys.argv[1]))
+load_routing_view(Path(sys.argv[1]))
 PY
   ) >/dev/null 2>&1; then
     rm -rf -- "$candidate_dir"

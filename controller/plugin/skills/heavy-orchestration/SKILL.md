@@ -1,6 +1,6 @@
 ---
 name: heavy-orchestration
-description: Automatically route only tasks needing at least two independent investigations, the same analysis across at least eight items, or cross-checking before a high-impact decision to an audited read-only Claudex Workflow. Do not use for small, clear, latency-sensitive, or merely multi-step work.
+description: Automatically route only tasks needing at least two independent investigations, the same analysis across at least eight items, or cross-checking before a high-impact decision to an audited read-only Orichum Workflow. Do not use for small, clear, latency-sensitive, or merely multi-step work.
 when_to_use: Use only for independently parallelizable investigation or review that meets a numeric threshold above.
 user-invocable: false
 ---

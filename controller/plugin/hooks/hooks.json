@@ -1,5 +1,5 @@
 {
-  "description": "Allow only audited Claudex Agent types and saved Workflow paths",
+  "description": "Allow only audited Orichum Agent types and saved Workflow paths",
   "hooks": {
     "PreToolUse": [
       {
@@ -40,7 +40,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/check-local-services.sh\"",
-            "timeout": 3
+            "timeout": 6
           }
         ]
       }

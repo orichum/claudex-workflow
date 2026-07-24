@@ -7,7 +7,7 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 if ! IFS=$'\t' read -r CLIPROXY_PORT HEADROOM_PORT CLAUDEX_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
-  jq -cn '{systemMessage:"Claudex health warning: service port configuration is invalid."}'
+  jq -cn '{systemMessage:"Orichum health warning: service port configuration is invalid."}'
   exit 0
 fi
 
@@ -50,11 +50,11 @@ emit_warning() {
 }
 
 if ! tmp_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/claudex-health.XXXXXX" 2>/dev/null)"; then
-  emit_warning "Claudex health warning: local service health check could not create private temporary state."
+  emit_warning "Orichum health warning: local service health check could not create private temporary state."
   exit 0
 fi
 if ! chmod 0700 "$tmp_dir" 2>/dev/null; then
-  emit_warning "Claudex health warning: local service health check could not secure private temporary state."
+  emit_warning "Orichum health warning: local service health check could not secure private temporary state."
   exit 0
 fi
 
@@ -76,19 +76,19 @@ if ! (umask 077
     "$models_response" "$models_error" \
     "$claudex_response" "$claudex_error"
 ) 2>/dev/null; then
-  emit_warning "Claudex health warning: local service health check could not secure response files."
+  emit_warning "Orichum health warning: local service health check could not secure response files."
   exit 0
 fi
 
-curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   "http://127.0.0.1:$HEADROOM_PORT/health" \
   >"$headroom_response" 2>"$headroom_error" &
 headroom_pid=$!
-curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   "http://127.0.0.1:$CLIPROXY_PORT/v1/models" \
   >"$models_response" 2>"$models_error" &
 models_pid=$!
-curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   "http://127.0.0.1:$CLAUDEX_PROXY_PORT/v1/models" \
   >"$claudex_response" 2>"$claudex_error" &
 claudex_pid=$!
@@ -115,13 +115,13 @@ fi
 warning=""
 if [[ "$headroom_status" -ne 0 || "$models_status" -ne 0 || \
       "$claudex_status" -ne 0 ]]; then
-  warning="Claudex health warning: a bounded local Headroom, CLIProxyAPI, or Claudex proxy request failed."
+  warning="Orichum health warning: a bounded local Headroom, CLIProxyAPI, or Orichum proxy request failed."
 elif ! jq -e '
   .service == "headroom-proxy" and
   .status == "healthy" and
   .ready == true
 ' "$headroom_response" >/dev/null 2>&1; then
-  warning="Claudex health warning: Headroom is not healthy and ready."
+  warning="Orichum health warning: Headroom is not healthy and ready."
 else
   effective_models_file="${CLAUDEX_EFFECTIVE_MODELS_FILE:-}"
   effective_controller=""
@@ -157,7 +157,7 @@ else
        select(.) |
        $document.controller
      ' "$effective_models_file" 2>/dev/null)"; then
-    warning="Claudex health warning: immutable session effective model mapping is missing or invalid."
+    warning="Orichum health warning: immutable session effective model mapping is missing or invalid."
   elif ! jq -e '
     (.data | type == "array" and length > 0) and
     all(
@@ -166,7 +166,7 @@ else
       (.id | test("^[A-Za-z0-9][A-Za-z0-9._:/@+\\\\-]{0,254}$"))
     )
   ' "$models_response" >/dev/null 2>&1; then
-    warning="Claudex health warning: CLIProxyAPI model catalogue is invalid."
+    warning="Orichum health warning: CLIProxyAPI model catalogue is invalid."
   else
     missing_models="$(jq -r \
       --slurpfile effective "$effective_models_file" '
@@ -180,7 +180,7 @@ else
       join(", ")
     ' "$models_response" 2>/dev/null || true)"
     if [[ -n "$missing_models" ]]; then
-      warning="Claudex health warning: required effective model missing: $missing_models."
+      warning="Orichum health warning: required effective model missing: $missing_models."
     fi
   fi
 fi
@@ -189,7 +189,7 @@ if [[ -z "$warning" ]]; then
   if [[ -z "$effective_controller" ]] || \
      ! claudex_proxy_models_response_is_ready \
        "$claudex_response" "$effective_controller"; then
-    warning="Claudex health warning: persistent Claudex proxy does not expose the configured controller model."
+    warning="Orichum health warning: persistent Orichum proxy does not expose the configured controller model."
   fi
 fi
 

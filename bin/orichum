@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 launcher_source="${BASH_SOURCE[0]}"
 while [[ -L "$launcher_source" ]]; do
   launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
@@ -10,16 +11,17 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
-if ! IFS=$'\t' read -r _ HEADROOM_PORT _CLAUDEX_PROXY_PORT \
-    < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
-  printf 'ERROR: invalid Claudex service port configuration\n' >&2
-  exit 1
-fi
-export ANTHROPIC_BASE_URL="http://127.0.0.1:$HEADROOM_PORT"
-CLAUDE_BIN="$(command -v claude)" || {
-  printf 'ERROR: claude is not installed or not on PATH\n' >&2
-  exit 1
-}
-exec "$CLAUDE_BIN" \
-  --exclude-dynamic-system-prompt-sections \
-  "$@"
+export PATH="$WORKFLOW_DATA_ROOT/headroom/bin:$PATH"
+python_entrypoint=(
+  python3 -I -B -c
+  'import sys; sys.path.insert(0, sys.argv.pop(1)); import runpy; runpy.run_module("integrations.common.orichum_cli", run_name="__main__")'
+  "$WORKFLOW_ROOT"
+)
+case "${1:-}" in
+  -h|--help|config|context|models|provider|plugin|headroom|doctor|session|sessions|resume|fork|run)
+    exec "${python_entrypoint[@]}" "$@"
+    ;;
+  *)
+    exec "${python_entrypoint[@]}" run -- "$@"
+    ;;
+esac

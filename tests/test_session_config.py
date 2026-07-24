@@ -20,11 +20,13 @@ import integrations.common.session_config as session_config
 from integrations.common.session_config import (
     ContextBinding,
     SessionError,
+    create_resolved_session,
     create_session,
     sha256_file,
     verify_context_binding,
     verify_session,
 )
+from integrations.common.model_routing import EffectiveStack
 
 
 class SessionConfigTests(unittest.TestCase):
@@ -261,6 +263,52 @@ class SessionConfigTests(unittest.TestCase):
         self.assertNotEqual(first.controller_model, second.controller_model)
         self.assertTrue(first.plugin_dir.is_relative_to(first.run_dir))
         self.assertTrue(second.plugin_dir.is_relative_to(second.run_dir))
+
+    def test_resolved_session_uses_routed_models_and_existing_hardening(self) -> None:
+        data_root = self.fixture / "resolved-data"
+        data_root.mkdir(mode=0o700)
+        context = session_config.resolve_context(
+            session_config.load_config(self.config_path), self.launch_dir
+        )
+        effective = EffectiveStack(
+            "balanced",
+            "oc-r-0000000000000001/gpt-5.6-sol",
+            {
+                role: (f"oc-r-{index + 2:016x}/gpt-5.6-terra",)
+                for index, role in enumerate(session_config.ROLES)
+            },
+            {
+                role: f"oc-r-{index + 2:016x}/gpt-5.6-terra"
+                for index, role in enumerate(session_config.ROLES)
+            },
+        )
+
+        session = create_resolved_session(
+            self.workflow_root,
+            data_root=data_root,
+            context=context,
+            effective=effective,
+            plugin_source=self.plugin_source,
+        )
+
+        self.assertEqual(session.controller_model, effective.controller)
+        self.assertEqual(session.run_dir.parent, data_root / "state" / "sessions")
+        self.assertEqual(
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+                data_root=data_root,
+            ),
+            session,
+        )
+        for role in session_config.ROLES:
+            agent = session.plugin_dir / "agents" / f"{role}.md"
+            self.assertIn(
+                f"model: {effective.agents[role]}",
+                agent.read_text(encoding="utf-8"),
+            )
 
     def test_session_rejects_modified_effective_mapping(self) -> None:
         session = self.create()

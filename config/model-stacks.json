@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "defaultStack": "balanced",
+  "models": {
+    "gpt-5.6-sol": {
+      "provider": "openai",
+      "family": "gpt",
+      "upstream": "gpt-5.6-sol"
+    },
+    "gpt-5.6-terra": {
+      "provider": "openai",
+      "family": "gpt",
+      "upstream": "gpt-5.6-terra"
+    },
+    "claude-sonnet-5": {
+      "provider": "anthropic",
+      "family": "claude",
+      "upstream": "claude-sonnet-5"
+    },
+    "claude-opus-4-8": {
+      "provider": "anthropic",
+      "family": "claude",
+      "upstream": "claude-opus-4-8"
+    }
+  },
+  "stacks": {
+    "balanced": {
+      "controller": "gpt-5.6-sol",
+      "agents": {
+        "repository-explorer": ["gpt-5.6-terra"],
+        "repository-verifier": ["gpt-5.6-terra"],
+        "correctness-critic": ["claude-sonnet-5"],
+        "architecture-advisor": ["claude-opus-4-8"],
+        "implementation-worker": ["gpt-5.6-sol"]
+      }
+    }
+  }
+}

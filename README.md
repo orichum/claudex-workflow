@@ -1,428 +1,351 @@
-# Claudex workflow
+# Orichum
 
-A portable Claude Code daily driver that routes stable controller roles to any
-models exposed by CLIProxyAPI.
+> One local control plane for Claude Code, multiple model families, multiple
+> accounts, project-aware tools, and token-efficient subagents.
 
-**Supported:** macOS 13+ · glibc Linux · WSL2 with systemd
+Orichum keeps Claude Code as the interactive shell while letting each session
+use a validated model stack instead of one hard-coded provider. The controller,
+specialists, account order, project tools, memory, and recovery rules are
+declared in small JSON files. The command you use is simply:
 
-## Why use it
+```bash
+orichum
+```
 
-- **One entry point:** `claudex-gpt` starts the isolated controller and its project-aware tools.
-- **Provider-agnostic roles:** stable agent identities are resolved to the first
-  available model in the selected stack before launch.
-- **Automatic delegation:** the controller stays inline for ordinary work and selects bounded specialists only when they materially improve the result.
-- **Project-aware MCPs:** Docker MCP, MemPalace, and Graphify are exposed only when the current workspace needs them.
-- **Repeatable upgrades:** `./install.sh` stages and verifies workflow-owned updates before activation, with rollback on a failed transaction.
+The default stack is deliberately strong without using ultra effort:
 
-## How a request flows
+- high-effort controller;
+- cheaper read-only explorers and verifiers where appropriate;
+- specialized critics and architects only when the task justifies them;
+- one writer at a time;
+- automatic same-family account recovery;
+- explicit cross-family session handoff;
+- lossless structural and code-aware Headroom compression, with Kompress ML,
+  cache, memory, effort routing, and output shaping disabled.
 
-Every `claudex-gpt` process is a client of one persistent Claudex translation proxy
-owned by this workflow. The proxy outlives individual terminal sessions
-and forwards selected model calls through Headroom and CLIProxyAPI. Headroom
-runs with `--lossless` and `--code-aware`; `HEADROOM_OUTPUT_SHAPER=0`,
-`HEADROOM_VERBOSITY_AUTOTUNE=0`, and `HEADROOM_EFFORT_ROUTER=0` prevent it from
-lowering effort, reshaping output, or truncating workers.
+## Installation
+
+### Supported systems
+
+- macOS on Apple Silicon or x86-64
+- Linux on arm64 or x86-64 with a systemd user manager
+- WSL2 with systemd enabled
+
+Required commands: `bash`, `curl`, `gh`, `git`, `jq`, `python3` 3.10+, `rg`,
+`tar`, `uv`, and Claude Code. Linux and WSL also require `ss`, normally
+provided by `iproute2`. Authenticate every GitHub account referenced by
+`projects.json` with `gh auth login` before installation.
+
+### Install or upgrade
+
+```bash
+git clone https://github.com/arvind9981/claudex-workflow.git orichum
+cd orichum
+./install.sh
+```
+
+Every installer run is an upgrade and reconciliation pass. It:
+
+1. validates the control plane and controller plugin;
+2. installs or upgrades CLIProxyAPI, Claudex, Headroom, Mempalace, and
+   Graphify without pinning them to an old release;
+3. verifies required CLIProxyAPI management behavior in an isolated probe;
+4. creates or reconciles three Orichum-owned loopback services;
+5. preserves valid existing configuration and authentication;
+6. prints every binary, data directory, service definition, and selected port.
+
+Linux and WSL services log to the user journal. Inspect them with:
+
+```bash
+journalctl --user -u orichum-headroom.service
+journalctl --user -u orichum-cliproxy.service
+journalctl --user -u orichum-route-proxy.service
+```
+
+If a preferred port belongs to an existing Orichum service, that service is
+reconciled and reused. If an unknown process owns it, Orichum does not replace
+the process: an interactive install offers another port, while a non-interactive
+install selects the next available port.
+
+Default locations:
+
+| Purpose | Location |
+|---|---|
+| Command | `~/.local/bin/orichum` |
+| Editable configuration | `~/.config/orichum/` |
+| Binaries, auth, logs, service state | `~/.local/share/orichum/` |
+| Logical session state | `~/.local/share/orichum/state/` |
+
+Use `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and `ORICHUM_CACHE_HOME` to
+relocate them. Logical session state always lives under
+`$ORICHUM_DATA_HOME/state` so the CLI and route service cannot diverge. Paths
+must be absolute.
+
+Verify the finished installation:
+
+```bash
+orichum doctor
+orichum config paths
+```
+
+### Authenticate providers and name accounts
+
+CLIProxyAPI performs provider login. Orichum then gives each credential a
+stable display name, account pool, and priority.
+
+```bash
+orichum provider login codex
+orichum provider login claude
+orichum provider login antigravity
+orichum provider login kimi
+
+orichum config paths
+ls ~/.local/share/orichum/auth
+
+orichum provider account add \
+  "Personal GPT" openai CREDENTIAL_FILE shared --priority primary
+
+orichum provider account add \
+  "Work Claude" anthropic CREDENTIAL_FILE xebia --priority 100
+
+orichum provider accounts
+```
+
+Priority aliases are `primary` (100), `secondary` (50), and `reserve` (10);
+integers from 0 through 1000 are also accepted.
+
+```bash
+orichum provider account priority ACCOUNT_ID secondary
+orichum provider account rename ACCOUNT_ID "Work reserve"
+orichum provider account disable ACCOUNT_ID
+orichum provider account enable ACCOUNT_ID
+orichum provider account remove ACCOUNT_ID
+orichum provider account sync
+```
+
+Account names are shown only by the explicit account-management command.
+Credential filenames, routing prefixes, tokens, and secrets are never printed
+there.
+
+## Usage
+
+### Add a project context
+
+A context maps a parent directory to its model stack, account pools,
+MCP_DOCKER profile, Mempalace palace/wing, and repositories.
+
+```bash
+orichum context add ~/xebia \
+  --docker xebia --github-account athevar-xebia
+orichum context add ~/complion \
+  --docker realtime --github-account arvind9981
+orichum context add ~/personal --pool shared
+```
+
+`context add` is intentionally a one-time foreground operation. It:
+
+- discovers a Git repository at the root or all independent repositories below
+  it;
+- follows declared Git submodules;
+- skips duplicate linked worktrees of the same repository;
+- mines each repository into the selected Mempalace wing;
+- creates or updates Graphify graphs;
+- installs and verifies Graphify's Git hooks;
+- commits the project mapping only after population succeeds.
+
+Progress and elapsed time are visible by default. It is not installed as a
+background indexing service.
+
+```bash
+orichum context list
+orichum context validate
+orichum context populate ~/xebia
+orichum context update ~/personal \
+  --pool shared --no-docker --github-account arvind9981
+orichum context remove ~/personal       # asks for REMOVE
+orichum context remove ~/personal --yes
+```
+
+Run `context populate` again only when repositories were added after the
+context was created, or when you explicitly want a full refresh. Normal Git
+changes are maintained by the installed Graphify hooks.
+
+When a context names a GitHub account, Orichum derives a private,
+account-specific `GH_CONFIG_DIR` from an existing `gh auth` login. Each session
+uses its own isolated configuration, so concurrent work and personal sessions
+do not change the machine-wide active account.
+
+### Start, resume, and fork sessions
+
+From any repository below a configured project root:
+
+```bash
+orichum
+orichum --permission-mode acceptEdits
+```
+
+Orichum chooses the project, stack, account pool, controller, and subagent
+models automatically. You do not manually invoke the light or heavy workflow.
+
+```bash
+orichum sessions
+orichum session routes SESSION_ID
+orichum sessions routes SESSION_ID
+orichum resume oc-s-0123456789abcdef
+```
+
+Resume preserves the original logical model/account binding and Claude session
+identity. The current control plane and live services are validated again, but
+the session is not silently moved to another model family.
+
+To change family or stack, create an explicit child session:
+
+```bash
+orichum fork oc-s-0123456789abcdef --stack claude-heavy
+orichum fork oc-s-0123456789abcdef \
+  --stack google-heavy \
+  --handoff-file ./bounded-handoff.md
+```
+
+The parent stays resumable. The child receives only the explicit bounded
+handoff, not a replay of hidden provider state.
+
+### Models and plugins
+
+```bash
+orichum models list
+orichum models resolve
+orichum models resolve STACK
+orichum models validate
+
+orichum plugin list
+orichum plugin add PLUGIN@MARKETPLACE --source OWNER/REPOSITORY
+orichum plugin update
+orichum plugin sync
+orichum plugin remove PLUGIN@MARKETPLACE
+```
+
+Plugins are declared in `plugins.json` and synchronized into Orichum's private
+Claude configuration. The bundled `orichum-controller` plugin is always copied
+into each immutable physical session; it is not managed as an optional plugin.
+
+## Architecture
+
+### Request path
 
 ```mermaid
 flowchart LR
-    A["claudex-gpt"] --> B["Resolve project context"]
-    B --> C["Choose project modelStack or global defaultStack"]
-    C --> D["Read live CLIProxyAPI model catalogue"]
-    D --> E["Resolve controller and ordered agent candidates"]
-    E --> F["Create private run directory"]
-    F --> G["Write context.json, mcp.json, effective-models.json"]
-    G --> H["Generate session-private controller plugin"]
-    H --> I["Launch Claudex with selected controller"]
-    I --> J["Claude Code dispatches fixed role agents"]
-    J --> K["Anthropic wire request"]
-    K --> L["Headroom uses generated context limit"]
-    L --> M["CLIProxyAPI translates to selected provider"]
+    U["You"] --> O["orichum CLI"]
+    O --> C["Claudex + Claude Code"]
+    C --> H["Headroom<br/>lossless optimization"]
+    H --> R["Orichum route proxy<br/>session-bound recovery"]
+    R --> P["CLIProxyAPI"]
+    P --> A["Named provider account"]
+    A --> M["GPT / Claude / Google / Kimi"]
 ```
 
-<details>
-<summary>Plain-text flow</summary>
+All services bind to `127.0.0.1`. Before a session starts, Orichum verifies the
+service definition, loaded service target, owning process, loopback listener,
+health endpoint, and live model catalogue. The route proxy also attests its
+exact upstream CLIProxyAPI connection before forwarding request data.
 
-```text
-claudex-gpt
-  -> resolve project context
-  -> choose project modelStack or global defaultStack
-  -> read live CLIProxyAPI model catalogue
-  -> resolve controller and ordered agent candidates
-  -> create private run directory
-  -> write context.json, mcp.json, effective-models.json
-  -> generate session-private controller plugin
-  -> launch Claudex with selected controller
-  -> Claude Code dispatches fixed role agents
-  -> Anthropic wire request
-  -> Headroom uses generated context limit
-  -> CLIProxyAPI translates to selected provider
-```
-
-</details>
-
-The checked-in `balanced` stack preserves the familiar Sol, Terra, Sonnet, and
-Opus defaults. Those names are defaults, not routing logic: CLIProxyAPI routes
-each resolved model ID to its configured provider.
-
-## What happens automatically
-
-You describe the task normally; workflows are not manually invoked. Stable role
-IDs keep orchestration independent of provider branding, while delegation
-remains selective to avoid unnecessary token use.
+### Session and failover flow
 
 ```mermaid
 flowchart TD
-    Task["User task"] --> Decide{"Controller evaluates scope and risk"}
-    Decide -->|"Small or latency-sensitive"| Inline["Controller stays inline"]
-    Decide -->|"Repository reconnaissance"| Explore["repository-explorer"]
-    Decide -->|"Independent verification"| Verify["repository-verifier"]
-    Decide -->|"Correctness critique"| Critic["correctness-critic"]
-    Decide -->|"High-risk adjudication"| Advise["architecture-advisor"]
-    Decide -->|"Authorized isolated implementation"| Worker["implementation-worker"]
-    Inline --> Integrate["Controller integrates and verifies"]
-    Explore --> Integrate
-    Verify --> Integrate
-    Critic --> Integrate
-    Advise --> Integrate
-    Worker --> Integrate
+    D["Launch directory"] --> X["Longest matching project context"]
+    X --> S["Selected model stack"]
+    S --> B["Immutable logical session binding"]
+    B --> P["Primary account route"]
+    P -->|"success"| T["Stream response"]
+    P -->|"retryable failure before response bytes"| F["One same-family fallback"]
+    F --> T
+    P -->|"response/tool execution already started"| E["Surface failure; never replay"]
+    B -->|"explicit fork"| N["New family/stack + bounded handoff"]
 ```
 
-| Stable role | Portable default | Purpose and authority |
-| --- | --- | --- |
-| Controller | Sol (`gpt-5.6-sol`) | High-effort controller and normal writer; works inline by default. |
-| `repository-explorer` | Terra (`gpt-5.6-terra`) | Bounded read-only repository reconnaissance. |
-| `repository-verifier` | Terra (`gpt-5.6-terra`) | Bounded independent verification. |
-| `correctness-critic` | Sonnet (`claude-sonnet-5`) | Read-only model-diverse correctness and regression criticism. |
-| `architecture-advisor` | Opus (`claude-opus-4-8`) | Reserved for high-risk read-only adjudication of security, authentication, concurrency, migration, irreversible architecture, or conflicting evidence. |
-| `implementation-worker` | Sol (`gpt-5.6-sol`) | Isolated implementation only with explicit authorization, a written plan, a clean committed baseline, and an exact disjoint path boundary. |
+Same-family recovery is automatic and invisible, but tightly bounded:
 
-Heavy investigation and review workflows activate only for independent parallel investigations, repeated analysis across at least eight items, or a high-impact cross-check. They use bounded output schemas, never nest delegation, and report degraded or missing specialists instead of silently retrying.
+- only a fallback already frozen into that logical session is eligible;
+- one retry is allowed;
+- retries stop once response bytes or tool execution may have started;
+- invalid route configuration fails closed; an account-level authentication or
+  quota failure can use only the session's one preselected fallback;
+- cooldowns avoid repeatedly hitting a failing primary route.
 
-Bundled skills and Ultracode are disabled. Frontend Design is included locally and loaded only for new UI or material visual redesigns.
+This makes multiple concurrent Orichum sessions safe: every request carries its
+own logical session ID, so one session cannot borrow another session's route.
 
-## Install and upgrade
-
-Required: Claude Code, `curl`, `jq`, `git`, Python 3.10+, `rg`, `tar`, and
-`uv`. Docker with Docker MCP Toolkit is optional unless a workspace uses a
-Docker profile.
-
-| Platform | Supported host | Service manager |
-| --- | --- | --- |
-| macOS | macOS 13 or newer | per-user LaunchAgents |
-| Linux | glibc-based distribution | systemd user services |
-| WSL | WSL2 with systemd enabled | systemd user services |
-
-Linux and WSL also require `ss` from the `iproute2` package for loopback
-listener ownership checks.
-
-```bash
-git clone https://github.com/arvind9981/claudex-workflow.git
-cd claudex-workflow
-./install.sh
-claudex-login codex
-claudex-login claude
-./install.sh
-claudex-doctor
-```
-
-The first installer run lays down verified binaries and provider-login commands. After both logins, the second run deliberately discovers the available models, publishes one coherent generated configuration, and reconciles the persistent translation proxy. Only the installer may publish that configuration or change workflow-owned services.
-
-The installer resolves current Claudex and CLIProxyAPI releases, verifies their published SHA-256 digests, installs Headroom into the workflow's private data directory, upgrades the user-level MemPalace and Graphify tools through `uv`, synchronizes declared Claude Code plugins, and reconciles workflow-owned services. MemPalace and Graphify must complete real MCP initialization and expose the controller's required tools before installation can succeed. It does not patch upstream package source or installed package files.
-
-It also derives private `headroom/config/models.json` context limits from the
-registry in the exact CLIProxyAPI release being installed. Kimi, Google, and
-other provider limits are not pinned or hand-maintained here. When the registry
-contains the same model ID more than once, the lowest upstream context limit
-wins. Unchanged metadata does not restart Headroom. Changed metadata is
-preflighted with the staged runtime and is rolled back transactionally if
-activation fails.
-
-To update an existing checkout:
-
-```bash
-git pull --ff-only
-./install.sh
-```
-
-The installer is safe to rerun. An upgrade can restart a changed or unhealthy owned proxy and may interrupt active Claudex sessions; specifically, it may interrupt one in-flight request. Finish active sessions first when practical.
-
-Defaults are CLIProxyAPI `8317`, Headroom `8787`, and the shared Claudex translation proxy `13456`. A healthy service is reused only when its service definition, manager PID, loopback listener, and workflow data paths prove that this workflow owns it. If an unrelated listener occupies a requested port, an interactive installation shows the collision and prompts with an available alternative. Without an explicit override, a non-interactive installation logs the collision and automatically selects an available port. An occupied explicit override fails rather than being silently rewritten:
-
-```bash
-CLAUDEX_CLIPROXY_PORT=18317 \
-CLAUDEX_HEADROOM_PORT=18787 \
-CLAUDEX_PROXY_PORT=13457 \
-./install.sh
-```
-
-All three selected ports are saved privately in `service-ports.json` under `CLAUDEX_DATA_DIR` and used by every launcher, generated configuration, health hook, discovery command, and diagnostic. An unknown listener is never stopped or adopted: without an override the installer selects another port, while an occupied explicit override fails. A foreign service definition is never overwritten and always fails closed.
-
-| Service | macOS LaunchAgent | Linux/WSL systemd user unit |
-| --- | --- | --- |
-| Claudex translation proxy | `com.user.claudex-translation-proxy` | `claudex-translation-proxy.service` |
-| Headroom | `com.user.claudex-headroom` | `claudex-headroom.service` |
-| CLIProxyAPI | `com.user.claudex-cliproxy` | `claudex-cliproxy.service` |
-
-### Upgrade transaction
-
-Installer runs are serialized. Staged binaries, generated model mappings, service definitions, and upgraded Python tools are verified before active state is replaced.
-
-```mermaid
-flowchart LR
-    Run["Run install.sh"] --> Lock["Acquire installer lock"]
-    Lock --> Stage["Stage updates"]
-    Stage --> Verify{"Verify staged state"}
-    Verify -->|"Pass"| Publish["Publish ports and model config"]
-    Publish --> Activate["Reconcile persistent services"]
-    Activate --> Healthy["Owned PID + loopback + model ready"]
-    Verify -->|"Fail"| Restore["Restore prior state"]
-    Activate -->|"Failure"| Restore
-```
-
-Unchanged healthy services remain running. Before a Headroom cutover, the private runtime must become healthy on an unused loopback port, so cold initialization happens while the existing route still serves traffic. A legacy generic Headroom service is migrated only when its configuration and state paths match this workflow exactly. If activation fails, the installer restores the previous owned service, ports, generated model configuration, and private package state; it exits nonzero if recovery cannot be proven healthy. The Claudex proxy, Headroom, and CLIProxyAPI share this transactional boundary.
-
-`claudex-gpt` never starts, stops, or repairs the shared proxy. Before creating session state it requires the owned loaded definition, the service-manager PID on the exact loopback port, and the configured controller model in `/v1/models`. On failure it exits with `run claudex-doctor`; existing sessions do not own or terminate the proxy lifetime.
-
-After success, the **Installation locations** summary prints the checkout, data directory, launcher links, actual runtime binaries, service files, selected ports, and whether each service was installed, migrated, reconciled, or reused.
-
-Normal `HUP`, `INT`, and `TERM` interruptions release owned locks. An uncatchable `SIGKILL` can leave model publication fail-closed; inspect the exact `model-config/publication.lock` or `model-config/endpoint.lock` under the workflow data directory before removing it manually.
-
-There are no background auto-updaters and no repository-managed version pins. Rerun the installer whenever you want current compatible releases.
-
-## Daily use
-
-```bash
-claudex-gpt          # selected controller with bounded role-based specialists
-claude-headroom      # native Claude Code through Headroom
-claudex-headroom perf                       # workflow Headroom performance, last 7 days
-claudex-headroom perf --hours 24 --format json
-claudex-doctor       # configuration, dependency, model, and service checks
-```
-
-`claudex-headroom` reads only this workflow's private Headroom state and leaves
-any global Headroom installation untouched.
-
-Do not set `CLAUDE_CODE_SUBAGENT_MODEL` globally—the selected stack and
-session-private controller plugin own specialist selection.
-
-## Provider-agnostic model stacks
-
-All routing policy lives in one version-controlled file:
-`controller/model-routing.json`. A stack names one controller model and ordered
-candidate arrays for the five fixed roles shown above. Model IDs are opaque:
-copy the exact ID reported by the live CLIProxyAPI catalogue; do not infer or
-shorten it.
-
-To add Kimi or Google OAuth models:
-
-```bash
-claudex-login kimi
-claudex-models list          # copy the actual Kimi model ID
-
-claudex-login antigravity
-claudex-models list          # copy the actual Google model IDs
-
-$EDITOR controller/model-routing.json
-claudex-models validate
-./install.sh
-```
-
-Add each exact ID to the `controller` field or to one or more ordered candidate
-arrays in `controller/model-routing.json`. `claudex-models validate` fails if
-the controller is unavailable or if any role exhausts its candidates. Custom
-API-key and OpenAI-compatible providers remain configured in CLIProxyAPI; once
-their IDs appear in `claudex-models list`, routing treats them the same way.
-The list command always publishes every safe live catalogue ID, including
-unconfigured models. It also shows the resolved controller and role selections
-when the chosen stack is ready; if that stack cannot resolve, the catalogue is
-still listed with an `unresolved` status and warning. Credentials and provider
-tokens never belong in Git.
-
-Select a stack for one registered workspace root:
-
-```bash
-claudex-context update ROOT --model-stack NAME
-claudex-context update ROOT --inherit-model-stack
-```
-
-The first command writes the project `modelStack`. The second clears that
-override so the project inherits the global `defaultStack`. New launches and
-resumed processes reload project context, routing policy, and the live model
-catalogue. An already-running process keeps its immutable mapping. Each launch
-writes private `context.json`, `mcp.json`, and `effective-models.json` files and
-generates a session-private plugin, so multiple concurrent sessions can safely
-use different stacks.
-
-The controller does not fall back: if its configured model is absent, launch
-stops before session state is used. Agent candidates fall back in declared order
-only during pre-launch resolution; an already-running agent is never switched
-mid-request.
-
-## Manage Claudex plugins
-
-Claudex plugins are declared once in `controller/plugins.json` and installed in
-the workflow's isolated Claude configuration. The declaration is portable;
-marketplace checkouts, plugin packages, configuration, and credentials remain
-private under `CLAUDEX_DATA_DIR/claude-config`.
-
-```bash
-# The first plugin from a marketplace declares its portable source.
-claudex-plugin add github@claude-plugins-official \
-  --source anthropics/claude-plugins-official
-
-# Later plugins from the same marketplace do not need --source.
-claudex-plugin add another-plugin@claude-plugins-official
-
-claudex-plugin list
-claudex-plugin sync       # install missing plugins and upgrade existing ones
-claudex-plugin update     # explicit alias for sync
-claudex-plugin remove github@claude-plugins-official
-```
-
-`add` validates and atomically updates the repository declaration before
-synchronizing the isolated installation. `remove` targets only the exact
-declared plugin. `sync` registers or updates marketplaces, installs missing
-plugins, updates installed plugins to the marketplace's current release, and
-enables them. It does not silently uninstall undeclared machine-local plugins.
-An empty declaration performs no network work.
-
-Every `./install.sh` run performs the same sync, so a fresh clone converges and
-later installer runs upgrade declared plugins without repository version pins.
-Plugin code itself is never modified. Review a plugin before declaring it:
-always-loaded skills, hooks, agents, and schemas can increase token usage or
-change session behavior. All installed plugin agents remain subject to the
-orchestration allowlist, and plugin-provided MCP servers remain subject to
-strict per-session MCP configuration.
-
-## Manage workspace contexts
-
-Map a top-level parent such as `~/xebia` or `~/complion` once; every repository below it inherits that mapping. The parent itself does not need to be a Git repository.
-
-```bash
-claudex-context list
-claudex-context add ~/work/acme --docker acme
-claudex-context add ~/work/no-docker
-claudex-context populate ~/work/acme
-claudex-context update ~/work/acme --docker acme-prod --wing production
-claudex-context remove ~/work/acme       # prompts for REMOVE
-claudex-context remove ~/work/acme --yes
-claudex-context validate
-```
-
-`add` requires an existing root. `--docker` is optional; when omitted, Docker MCP is not added to that project's strict session configuration. Unless overridden, `add` creates `~/.mempalace/palaces/<root-name>` with `<root-name>` as the wing. It validates first, mines each outermost canonical repository into the configured MemPalace wing, initializes or updates code-only Graphify in every current repository and submodule, installs Graphify Git hooks, and commits the mapping only after success. If no Git repository exists, MemPalace mines the configured root. Context mutations are locked and written atomically; duplicate, overlapping, symlinked, or unsafe paths are rejected before filesystem changes.
-
-`populate` is the explicit, idempotent refresh for repositories cloned later. It uses Graphify `--code-only`; Graphify Git hooks then maintain current code after Git events. MemPalace is not mined on every commit, and population does not run as a service. During MemPalace mining, the workflow excludes `graphify-out/` in memory so generated graphs are not embedded back into project memory. It does not create or edit project ignore files or patch MemPalace. Existing contexts should run `claudex-context populate ~/work/acme` once after upgrading to this feature.
-
-Repository identity comes from Git's common directory, not just its filesystem path. Discovery skips linked worktrees when their primary checkout is already in the context root, preventing the same repository from being mined and graphified twice. A linked worktree remains eligible when it is the only checkout inside the configured root; if several linked checkouts are present without the primary, one deterministic checkout represents the repository. Real submodules remain separate repositories.
-
-Keep linked worktrees beside canonical repositories, as in `parent/.worktrees/repository-branch`, rather than inside a repository that MemPalace must scan. MemPalace has no dynamic CLI exclusion flag, so a skipped worktree nested inside a canonical memory source aborts before MemPalace starts. This fail-closed guard avoids duplicate drawers without editing the project's `.gitignore`, `mempalace.yaml`, or upstream package code.
-
-Repository discovery and elapsed heartbeats are visible by default; there is
-no `--verbose` mode to enable. Long operations identify their source, palace,
-wing, repository, planned action, and elapsed time, followed by graph and hook
-verification:
-
-```text
-[discover] found 2 repositories
-[discover] skipped linked worktree api-fix — same repository as api
-[mempalace 1/2] mining /home/me/work/acme/api into /home/me/.mempalace/palaces/acme; wing acme
-[mempalace 1/2] mining — 00:10 elapsed
-[graphify 1/2] updating api
-[graphify 1/2] graph validated
-[graphify 1/2] hooks installed and verified
-```
-
-Successful upstream tool output remains captured so project content does not
-spill into the terminal. A failed tool still returns its bounded diagnostic
-tail after the already completed stages.
+### Automatic subagent policy
 
 ```mermaid
 flowchart TD
-    Add["claudex-context add parent"] --> Validate["Validate context"]
-    Validate --> Repositories["Canonical repositories and submodules\nskip duplicate linked worktrees"]
-    Repositories --> Memory["Outermost repositories → MemPalace\nshared configured wing"]
-    Repositories --> Graphify["Per-repository Graphify init or update\n--code-only"]
-    Graphify --> Hooks["Install Graphify Git hooks"]
-    Memory --> Commit["Commit context mapping after success"]
-    Hooks --> Commit
+    Q["Task arrives"] --> L{"Bounded and clear?"}
+    L -->|"yes"| I["Controller works inline"]
+    L -->|"no"| H{"2+ independent investigations,<br/>8+ repeated review items,<br/>or high-impact cross-check?"}
+    H -->|"no"| I
+    H -->|"yes"| W["Audited read-only workflow"]
+    W --> E["Explorer / verifier / critic"]
+    E --> A{"Declared high risk?"}
+    A -->|"yes"| R["Architecture adjudication"]
+    A -->|"no"| Y["Controller synthesizes"]
+    R --> Y
+    Y --> Z["Controller remains sole writer"]
 ```
 
-The normal `claudex-gpt` session-routing flow below is unchanged.
+Generic agent and arbitrary workflow calls are denied. The controller chooses
+the audited workflow automatically. This preserves subagent strength while
+avoiding routine fan-out and transcript duplication.
 
-The bounded legacy migration is dry-run by default and never deletes its source:
+### Project-aware MCPs
+
+Each physical session receives a private, minimal MCP file:
+
+| MCP | Loaded when | Purpose |
+|---|---|---|
+| MCP_DOCKER | Project has a Docker profile | Project-specific Jira and other live tools, including writes subject to normal tool approval |
+| Mempalace | Palace exists and passes ownership/mode checks | Recall durable project decisions without remaking the project every session |
+| Graphify | Current Git repository has a valid graph | Query code structure before broad raw search |
+
+Mempalace calls are constrained to the resolved project palace and wing.
+Graphify output is excluded from Mempalace mining to avoid embedding generated
+graph data back into memory.
+
+### Control plane
+
+Orichum exposes these focused files as one strictly validated configuration:
+
+| File | Controls |
+|---|---|
+| `model-stacks.json` | Logical models, families, upstream IDs, controller, and role candidates |
+| `providers.json` | Provider adapters, auth types, account pools, and same-family fallback order |
+| `projects.json` | Parent-directory context, stack override, account pools, GitHub account, MCP_DOCKER profile, Mempalace |
+| `plugins.json` | Optional Claude marketplaces and plugins |
+| `runtime.json` | Controller effort and tool/subagent concurrency |
+| `controller-policy.md` | Sole-writer, delegation, memory, graph, and attribution policy |
+| `accounts.json` | Private named-account registry managed by `orichum provider account` |
+
+Edit the installed copies shown by `orichum config paths`, then validate:
 
 ```bash
-python3 integrations/mempalace_migration.py
-python3 integrations/mempalace_migration.py --execute
+orichum config validate
+orichum models resolve
+orichum context list
 ```
 
-It is intentionally specific to the approved Xebia and Complion split. It validates source and destination identities, rejects aliases or unsafe targets, and resumes item-by-item after a partial target write without duplicates.
+Adding Kimi, Google/Antigravity, another Claude source, or a future
+OpenAI-compatible model does not require changing Orichum code. Declare the
+provider/family route, model metadata, and stack candidates in the focused
+files, authenticate the provider, and register the named account.
 
-## Project MCP behavior
-
-Start `claudex-gpt` anywhere below a registered workspace root. The longest matching root determines the project context, and the launcher generates a strict MCP configuration for that session only.
-
-```mermaid
-flowchart LR
-    Cwd["Current directory"] --> Match["Longest workspace-root match"]
-    Match --> Session["Strict per-session MCP config"]
-    Session --> Docker["Mapped Docker profile (when configured)"]
-    Session --> Memory["Bound MemPalace wing"]
-    Session --> Graph{"graphify-out/graph.json exists?"}
-    Graph -->|"Yes"| Graphify["Graphify MCP"]
-    Graph -->|"No"| Skip["No Graphify schema"]
-```
-
-- **Docker MCP** runs the mapped `docker mcp gateway` profile when one is configured. Normal create, update, comment, delete, and transition tools remain available; Claude Code permissions still govern writes.
-- **MemPalace** is bound to the verified palace and wing for that workspace. The controller consults it when durable decisions or project conventions matter rather than loading memory for every request.
-- **Graphify** is exposed only when the current Git repository has `graphify-out/graph.json` and `graphify-mcp` is installed. Its official Git hook is checked automatically before the session.
-
-No matching workspace context means project-specific Docker MCP and MemPalace are not added. Normal Claude configuration is never edited globally.
-
-## State and safety
-
-OAuth credentials, downloaded binaries, generated configuration, model generation, logs, and private session state live outside the checkout under `CLAUDEX_DATA_DIR`, or by default:
-
-```text
-${XDG_DATA_HOME:-$HOME/.local/share}/claudex-workflow
-```
-
-`claudex-gpt` uses an isolated `CLAUDE_CONFIG_DIR`, so normal Claude settings, plugins, and claude.ai login configuration are not replaced. Declared plugin packages remain in the isolated configuration rather than the checkout. Headroom's executable and Python environment live below `CLAUDEX_DATA_DIR/headroom`; existing global Headroom installations are left untouched. LaunchAgent and systemd service definitions live in their OS configuration directories.
-
-The repository stores no credentials, generated archives, project memories, or Graphify graphs. There are no persistent backups. Destructive, production, authentication, and other high-impact external writes still require explicit authority.
-
-## Diagnose, test, and rollback
-
-Run `claudex-doctor` after installation or when a dependency, generated
-configuration, service, project context, strict MCP fixture, or controller
-contract needs checking. Install and doctor use only release metadata and a
-non-billable sentinel for the Headroom-to-CLIProxyAPI boundary; they never send
-a paid provider prompt. Run `claudex-context validate` after manually editing
-context configuration.
-
-Headroom applies compression at the generated context limit, but provider token
-accounting may remain approximate. This approximate token accounting does not
-mean the compression boundary is wrong. A real provider smoke request is always
-explicit:
-
-Trigger one only when you want end-to-end validation:
-
-```bash
-./smoke-test.sh provider
-./smoke-test.sh controller
-```
-
-The `provider` mode sends one minimal request through the session's routed
-controller and verifies positive usage for that exact effective model. The
-`controller` mode additionally exercises the audited multi-agent workflow.
-
-`./rollback.sh` disables only the workflow-owned `claudex-gpt` launcher link. It retains credentials, services, package data, project files, MemPalace data, and Graphify graphs.
-
-## Upstream projects
+## References
 
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-- [Claudex](https://github.com/StringKe/claudex)
-- [Claudex documentation](https://claudex.space/en/)
+- [Claudex](https://claudex.space/en/)
+- [Claude Code LLM gateway configuration](https://docs.anthropic.com/en/docs/claude-code/llm-gateway)
 - [Headroom](https://github.com/chopratejas/headroom)
-- [MemPalace](https://github.com/MemPalace/mempalace)
+- [Mempalace](https://github.com/MemPalace/mempalace)
 - [Graphify](https://github.com/Graphify-Labs/graphify)
+
+Orichum does not patch the source code of these projects. Integrations live in
+this repository and can be removed or upgraded independently.

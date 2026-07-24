@@ -4,16 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/lib/workflow.sh"
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/claudex-plugin-test.XXXXXX")"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
 checkout="$fixture/checkout"
-install -d "$checkout/bin" "$checkout/lib" "$checkout/controller" \
+install -d "$checkout/bin" "$checkout/lib" "$checkout/config" \
   "$fixture/fake-bin" "$fixture/fake-state"
 cp "$ROOT/lib/workflow.sh" "$checkout/lib/workflow.sh"
-cp "$ROOT/controller/plugins.json" "$checkout/controller/plugins.json"
-cp "$ROOT/bin/claudex-plugin" "$checkout/bin/claudex-plugin"
-chmod 0755 "$checkout/bin/claudex-plugin"
+cp "$ROOT/config/plugins.json" "$checkout/config/plugins.json"
+cp "$ROOT/bin/orichum-plugin" "$checkout/bin/orichum-plugin"
+chmod 0755 "$checkout/bin/orichum-plugin"
 
 printf '[]\n' >"$fixture/fake-state/marketplaces.json"
 printf '[]\n' >"$fixture/fake-state/plugins.json"
@@ -79,11 +79,12 @@ chmod 0755 "$fixture/fake-bin/claude"
 run_plugin() {
   PATH="$fixture/fake-bin:$PATH" \
     FAKE_CLAUDE_STATE="$fixture/fake-state" \
-    CLAUDEX_DATA_DIR="$fixture/private data" \
-    "$checkout/bin/claudex-plugin" "$@"
+    ORICHUM_CONFIG_HOME="$checkout/config" \
+    ORICHUM_DATA_HOME="$fixture/private data" \
+    "$checkout/bin/orichum-plugin" "$@"
 }
 
-[[ "$(jq -c . "$checkout/controller/plugins.json")" == \
+[[ "$(jq -c . "$checkout/config/plugins.json")" == \
   '{"schemaVersion":1,"marketplaces":[],"plugins":[]}' ]]
 
 empty_list="$(run_plugin list)"
@@ -96,8 +97,8 @@ run_plugin sync
 
 run_plugin add sample@acme --source example/acme
 jq -e '.marketplaces == [{"name":"acme","source":"example/acme"}]' \
-  "$checkout/controller/plugins.json" >/dev/null
-jq -e '.plugins == ["sample@acme"]' "$checkout/controller/plugins.json" >/dev/null
+  "$checkout/config/plugins.json" >/dev/null
+jq -e '.plugins == ["sample@acme"]' "$checkout/config/plugins.json" >/dev/null
 jq -e 'map(.id) == ["sample@acme"]' "$fixture/fake-state/plugins.json" >/dev/null
 grep -Fq "config=$fixture/private data/claude-config args=plugin marketplace add --scope user example/acme" \
   "$fixture/fake-state/calls.log"
@@ -116,9 +117,9 @@ fi
 
 run_plugin add formatter@acme
 jq -e '.plugins == ["formatter@acme", "sample@acme"]' \
-  "$checkout/controller/plugins.json" >/dev/null
+  "$checkout/config/plugins.json" >/dev/null
 
-manifest_digest="$(sha256_file "$checkout/controller/plugins.json")"
+manifest_digest="$(sha256_file "$checkout/config/plugins.json")"
 if run_plugin add invalid >/dev/null 2>&1; then
   printf 'invalid plugin identifier was accepted\n' >&2
   exit 1
@@ -127,11 +128,11 @@ if run_plugin add unknown@missing >/dev/null 2>&1; then
   printf 'undeclared marketplace without a source was accepted\n' >&2
   exit 1
 fi
-[[ "$(sha256_file "$checkout/controller/plugins.json")" == \
+[[ "$(sha256_file "$checkout/config/plugins.json")" == \
   "$manifest_digest" ]]
 
 run_plugin remove sample@acme
-jq -e '.plugins == ["formatter@acme"]' "$checkout/controller/plugins.json" >/dev/null
+jq -e '.plugins == ["formatter@acme"]' "$checkout/config/plugins.json" >/dev/null
 jq -e 'map(.id) == ["formatter@acme"]' "$fixture/fake-state/plugins.json" >/dev/null
 
 : >"$fixture/fake-state/calls.log"
@@ -143,13 +144,13 @@ listed="$(run_plugin list)"
 grep -Fq 'formatter@acme' <<<"$listed"
 grep -Fq 'installed' <<<"$listed"
 
-jq '.marketplaces = []' "$checkout/controller/plugins.json" \
-  >"$checkout/controller/plugins.next"
-mv "$checkout/controller/plugins.next" "$checkout/controller/plugins.json"
+jq '.marketplaces = []' "$checkout/config/plugins.json" \
+  >"$checkout/config/plugins.next"
+mv "$checkout/config/plugins.next" "$checkout/config/plugins.json"
 if run_plugin list >"$fixture/malformed.stdout" 2>"$fixture/malformed.stderr"; then
   printf 'plugin referencing an undeclared marketplace was accepted\n' >&2
   exit 1
 fi
 grep -Fq 'invalid plugin declaration' "$fixture/malformed.stderr"
 
-printf 'PASS: portable Claudex plugin management\n'
+printf 'PASS: portable Orichum plugin management\n'
