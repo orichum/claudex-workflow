@@ -279,6 +279,17 @@ for acceptance_workflow in \
   rg -Fq 'bash -x "$test_script"' "$acceptance_workflow"
   rg -Fq 'report_acceptance_failure()' "$acceptance_workflow"
   rg -Fq 'trap report_acceptance_failure ERR' "$acceptance_workflow"
+  python3 - "$acceptance_workflow" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+disable = source.index("trap - ERR", source.index("doctor_output=") - 300)
+capture = source.index("doctor_output=", disable)
+enable = source.index("trap report_acceptance_failure ERR", capture)
+if not disable < capture < enable:
+    raise SystemExit("expected doctor failure is not isolated from the ERR trap")
+PY
   rg -Fq 'Native acceptance failure' "$acceptance_workflow"
 done
 

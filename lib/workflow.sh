@@ -361,41 +361,33 @@ preflight_orichum_python_runtime() (
   local interpreter="$1"
   local workflow_root="$2"
   local data_root="$3"
-  local port pid= ready=false
-  local route_runner
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
   install -d -m 0700 "$data_root/state" || return 1
-  port="$(
-    "$interpreter" -I -B -c \
-      'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
-  )" || return 1
-  valid_service_port "$port" || return 1
-  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
-  cleanup_python_preflight() {
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-    fi
-  }
-  trap cleanup_python_preflight EXIT
-  ORICHUM_WORKFLOW_ROOT="$workflow_root" \
-    "$interpreter" -I -B -c "$route_runner" \
-      --port "$port" --upstream-port 65535 \
-      --state-home "$data_root/state" --data-home "$data_root" \
-      >/dev/null 2>&1 &
-  pid=$!
-  for _ in {1..100}; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      break
-    fi
-    if curl -fsS --connect-timeout 0.2 --max-time 1 \
-        "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-      ready=true
-      break
-    fi
-    sleep 0.05
-  done
-  [[ "$ready" == true ]]
+  "$interpreter" -I -B - "$workflow_root" "$data_root" <<'PY'
+from pathlib import Path
+import sys
+
+workflow_root = Path(sys.argv[1])
+data_root = Path(sys.argv[2])
+sys.path.insert(0, str(workflow_root))
+
+from integrations.common.route_proxy import ProxyConfig, RouteProxyServer
+
+server = RouteProxyServer(
+    ("127.0.0.1", 0),
+    ProxyConfig(
+        upstream_port=65535,
+        state_home=data_root / "state",
+        data_home=data_root,
+    ),
+)
+try:
+    host, port = server.server_address
+    assert host == "127.0.0.1"
+    assert 1024 <= port <= 65535
+finally:
+    server.server_close()
+PY
 )
 
 service_ports_file() {

@@ -130,6 +130,7 @@ jobs:
             .status == "unhealthy" and
             .ready == false
           ' "$headroom_health" >/dev/null
+          trap - ERR
           set +e
           poison_bin="$RUNNER_TEMP/poison-python"
           mkdir -p "$poison_bin"
@@ -141,6 +142,7 @@ jobs:
           )"
           doctor_rc=$?
           set -e
+          trap report_acceptance_failure ERR
           test "$doctor_rc" -eq 1
           test "$(grep -c '^FAIL ' <<<"$doctor_output")" -eq 1
           grep -Fq 'provider login is pending' <<<"$doctor_output"

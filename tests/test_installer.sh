@@ -44,12 +44,18 @@ IFS=$'\t' read -r managed_version managed_realpath < <(
 preflight_orichum_python_runtime \
   "$python_bin/python3.14" "$ROOT" "$python_data"
 preflight_source="$(
-  sed -n '/^preflight_orichum_python_runtime() (/,/^)/p' \
+  sed -n \
+    '/^preflight_orichum_python_runtime() (/,/^service_ports_file()/p' \
     "$ROOT/lib/workflow.sh"
 )"
-rg -Fq '"http://127.0.0.1:$port/health"' <<<"$preflight_source"
+rg -Fq 'RouteProxyServer' <<<"$preflight_source"
+rg -Fq 'server.server_close()' <<<"$preflight_source"
 if rg -Fq 'socket.create_connection' <<<"$preflight_source"; then
   printf 'Python runtime preflight still launches an interpreter per poll\n' >&2
+  exit 1
+fi
+if rg -Fq 'curl ' <<<"$preflight_source"; then
+  printf 'Python runtime preflight still depends on asynchronous polling\n' >&2
   exit 1
 fi
 chmod 0770 "$python_bin"
