@@ -73,6 +73,100 @@ private_tool_state_matches \
 [[ ! -e "$private_bin/graphify-future" ]]
 [[ "$(<"$host_bin/graphify-mcp")" == host-tool-unchanged ]]
 
+unsafe_snapshot_data="$fixture/unsafe-snapshot-data"
+unsafe_snapshot_external="$fixture/unsafe-snapshot-external"
+unsafe_snapshot_before="$fixture/unsafe-snapshot-before"
+install -d -m 0700 \
+  "$unsafe_snapshot_data" \
+  "$unsafe_snapshot_external/headroom/tools/mempalace" \
+  "$unsafe_snapshot_external/headroom/tools/graphifyy" \
+  "$unsafe_snapshot_external/headroom/bin"
+printf 'external-mempalace\n' \
+  >"$unsafe_snapshot_external/headroom/tools/mempalace/version"
+printf 'external-graphify\n' \
+  >"$unsafe_snapshot_external/headroom/tools/graphifyy/version"
+printf 'external-bin\n' \
+  >"$unsafe_snapshot_external/headroom/bin/graphify-mcp"
+cp -pPR "$unsafe_snapshot_external/headroom" "$unsafe_snapshot_before"
+ln -s "$unsafe_snapshot_external/headroom" \
+  "$unsafe_snapshot_data/headroom"
+set +e
+snapshot_private_tool_state \
+  "$unsafe_snapshot_data" \
+  "$unsafe_snapshot_data/headroom/tools" \
+  "$unsafe_snapshot_data/headroom/bin" \
+  "$fixture/unsafe-snapshot" \
+  2>"$fixture/unsafe-snapshot.stderr"
+unsafe_snapshot_rc=$?
+set -e
+unsafe_layout_rejected=true
+if [[ "$unsafe_snapshot_rc" -eq 0 ]]; then
+  printf 'symlinked private tool snapshot layout was accepted\n' >&2
+  unsafe_layout_rejected=false
+fi
+rg -Fq 'refusing unsafe private tool snapshot layout' \
+  "$fixture/unsafe-snapshot.stderr"
+if ! diff -qr -- \
+    "$unsafe_snapshot_before" "$unsafe_snapshot_external/headroom" \
+    >/dev/null; then
+  printf 'private tool snapshot changed an external target\n' >&2
+  unsafe_layout_rejected=false
+fi
+
+unsafe_restore_data="$fixture/unsafe-restore-data"
+unsafe_restore_tools="$unsafe_restore_data/headroom/tools"
+unsafe_restore_bin="$unsafe_restore_data/headroom/bin"
+unsafe_restore_snapshot="$fixture/unsafe-restore-snapshot"
+unsafe_restore_external="$fixture/unsafe-restore-external"
+unsafe_restore_before="$fixture/unsafe-restore-before"
+install -d -m 0700 \
+  "$unsafe_restore_tools/mempalace" \
+  "$unsafe_restore_tools/graphifyy" \
+  "$unsafe_restore_bin"
+printf 'owned-mempalace\n' >"$unsafe_restore_tools/mempalace/version"
+printf 'owned-graphify\n' >"$unsafe_restore_tools/graphifyy/version"
+printf 'owned-bin\n' >"$unsafe_restore_bin/graphify-mcp"
+snapshot_private_tool_state \
+  "$unsafe_restore_data" "$unsafe_restore_tools" "$unsafe_restore_bin" \
+  "$unsafe_restore_snapshot"
+mv "$unsafe_restore_data/headroom" \
+  "$unsafe_restore_data/headroom-owned"
+install -d -m 0700 \
+  "$unsafe_restore_external/headroom/tools/mempalace" \
+  "$unsafe_restore_external/headroom/tools/graphifyy" \
+  "$unsafe_restore_external/headroom/bin"
+printf 'external-mempalace\n' \
+  >"$unsafe_restore_external/headroom/tools/mempalace/version"
+printf 'external-graphify\n' \
+  >"$unsafe_restore_external/headroom/tools/graphifyy/version"
+printf 'external-bin\n' \
+  >"$unsafe_restore_external/headroom/bin/graphify-mcp"
+cp -pPR "$unsafe_restore_external/headroom" "$unsafe_restore_before"
+ln -s "$unsafe_restore_external/headroom" \
+  "$unsafe_restore_data/headroom"
+set +e
+restore_private_tool_state \
+  "$unsafe_restore_data" \
+  "$unsafe_restore_data/headroom/tools" \
+  "$unsafe_restore_data/headroom/bin" \
+  "$unsafe_restore_snapshot" \
+  2>"$fixture/unsafe-restore.stderr"
+unsafe_restore_rc=$?
+set -e
+if [[ "$unsafe_restore_rc" -eq 0 ]]; then
+  printf 'symlinked private tool restore layout was accepted\n' >&2
+  unsafe_layout_rejected=false
+fi
+rg -Fq 'refusing unsafe private tool restore layout' \
+  "$fixture/unsafe-restore.stderr"
+if ! diff -qr -- \
+    "$unsafe_restore_before" "$unsafe_restore_external/headroom" \
+    >/dev/null; then
+  printf 'private tool restore changed an external target\n' >&2
+  unsafe_layout_rejected=false
+fi
+[[ "$unsafe_layout_rejected" == true ]]
+
 python3 - "$fixture/occupied.port" <<'PY' &
 import socket
 import sys

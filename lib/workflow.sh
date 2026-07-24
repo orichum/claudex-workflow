@@ -1165,9 +1165,23 @@ private_tool_layout_is_owned() {
   local data_root="$1"
   local tool_dir="$2"
   local bin_dir="$3"
+  local data_physical headroom_physical tool_physical bin_physical
   [[ "$data_root" == /* && "$data_root" != / ]] && \
     [[ "$tool_dir" == "$data_root/headroom/tools" ]] && \
-    [[ "$bin_dir" == "$data_root/headroom/bin" ]]
+    [[ "$bin_dir" == "$data_root/headroom/bin" ]] || return 1
+  [[ -d "$data_root" && ! -L "$data_root" ]] && \
+    [[ -d "$data_root/headroom" && ! -L "$data_root/headroom" ]] && \
+    [[ -d "$tool_dir" && ! -L "$tool_dir" ]] && \
+    [[ -d "$bin_dir" && ! -L "$bin_dir" ]] || return 1
+  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
+  headroom_physical="$(
+    cd -P -- "$data_root/headroom" && pwd
+  )" || return 1
+  tool_physical="$(cd -P -- "$tool_dir" && pwd)" || return 1
+  bin_physical="$(cd -P -- "$bin_dir" && pwd)" || return 1
+  [[ "$headroom_physical" == "$data_physical/headroom" ]] && \
+    [[ "$tool_physical" == "$data_physical/headroom/tools" ]] && \
+    [[ "$bin_physical" == "$data_physical/headroom/bin" ]]
 }
 
 snapshot_private_tree() {
@@ -1221,10 +1235,14 @@ snapshot_private_tool_state() {
   local tool_dir="$2"
   local bin_dir="$3"
   local snapshot_dir="$4"
-  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || \
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
     workflow_die "refusing unsafe private tool snapshot layout"
-  [[ "$snapshot_dir" == /* && "$snapshot_dir" != / ]] || \
+    return 1
+  }
+  [[ "$snapshot_dir" == /* && "$snapshot_dir" != / ]] || {
     workflow_die "refusing unsafe private tool snapshot directory"
+    return 1
+  }
   install -d -m 0700 "$snapshot_dir"
   snapshot_private_tree "$tool_dir/mempalace" \
     "$snapshot_dir" mempalace-environment
@@ -1238,8 +1256,10 @@ restore_private_tool_state() {
   local tool_dir="$2"
   local bin_dir="$3"
   local snapshot_dir="$4"
-  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || \
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
     workflow_die "refusing unsafe private tool restore layout"
+    return 1
+  }
   restore_private_tree "$tool_dir/mempalace" \
     "$snapshot_dir" mempalace-environment
   restore_private_tree "$tool_dir/graphifyy" \
