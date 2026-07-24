@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Optional
 
 from .context_population import (
     PopulationError,
@@ -551,6 +551,43 @@ def _context_lock(config_path: Path):
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def assign_stack_to_context(
+    config_path: Path,
+    launch_dir: Path,
+    stack: str,
+    known_stacks: Collection[str],
+) -> Path:
+    if stack not in known_stacks:
+        raise ContextError("model stack is unknown")
+    config_path = Path(config_path)
+    home = Path.home()
+    with _context_lock(config_path):
+        document = _read_context_document(config_path, home)
+        resolved = resolve_control_plane_context(
+            document, launch_dir, home=home
+        )
+        route = resolved.get("route")
+        if not isinstance(route, dict):
+            raise ContextError(
+                "current directory has no project context"
+            )
+        matched = Path(route["contextRootReal"])
+        for context in document["contexts"]:
+            root = _context_root(
+                context["root"], home, must_exist=True
+            )
+            if root.resolve() == matched:
+                context["modelStack"] = stack
+                break
+        else:
+            raise ContextError(
+                "matched project context disappeared"
+            )
+        validate_config_document(document, home)
+        _write_context_document(config_path, document)
+        return matched
 
 
 def _context_root(value: str, home: Path, *, must_exist: bool) -> Path:

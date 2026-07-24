@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+import threading
+import unittest
+from unittest import mock
+
+from integrations.common.account_registry import Account, update_accounts
+from integrations.common.stack_bindings import StackBindings
+from integrations.common.stack_definition import normalize_model_stacks
+from integrations.common.stack_catalog import LiveCatalog, LiveModelChoice
+from integrations.common.stack_store import (
+    StackSnapshot,
+    StackStoreError,
+    delete_stack,
+    load_stack_snapshot,
+    save_stack,
+    validate_stack_assignment,
+)
+
+
+ROLES = (
+    "repository-explorer",
+    "repository-verifier",
+    "correctness-critic",
+    "architecture-advisor",
+    "implementation-worker",
+)
+
+
+class StackStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.portable = self.root / "portable"
+        self.private = self.root / "private"
+        self.portable.mkdir()
+        self.private.mkdir()
+        self.private.chmod(0o700)
+        self.model_path = self.portable / "model-stacks.json"
+        self.binding_path = self.private / "stack-bindings.json"
+        self.account_id = "oc-a-1111111111111111"
+        self.register_account(self.account_id)
+        self.write_model_document(self.document())
+        self.snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        self.projects = {
+            "schemaVersion": 1,
+            "contexts": [
+                {
+                    "root": str(self.root / "project"),
+                    "dockerProfile": None,
+                    "modelStack": None,
+                    "accountPools": ["shared"],
+                    "memoryPalace": str(self.root / "palace"),
+                    "memoryWing": "project",
+                }
+            ],
+        }
+
+    def register_account(
+        self, identifier: str, *, state: str = "active"
+    ) -> None:
+        account = Account(
+            id=identifier,
+            name=identifier,
+            provider="openai",
+            credential_ref=f"{identifier}.json",
+            pool="shared",
+            routing_prefix=f"oc-r-{identifier.removeprefix('oc-a-')}",
+            priority=100,
+            state=state,
+            original_prefix=None,
+            original_priority=None,
+        )
+        update_accounts(
+            self.private / "accounts.json",
+            lambda accounts: (*accounts, account),
+        )
+
+    @staticmethod
+    def candidate(identifier: str, model: str) -> dict[str, object]:
+        return {
+            "id": identifier,
+            "model": model,
+            "providers": ["openai"],
+        }
+
+    def stack(self, prefix: str) -> dict[str, object]:
+        return {
+            "controller": [
+                self.candidate(f"oc-c-{prefix}000000000000001", "gpt-main")
+            ],
+            "agents": {
+                role: [
+                    self.candidate(
+                        f"oc-c-{prefix}{ordinal:015x}", "gpt-worker"
+                    )
+                ]
+                for ordinal, role in enumerate(ROLES, start=2)
+            },
+        }
+
+    def document(self, *, include_heavy: bool = True) -> dict[str, object]:
+        stacks = {"balanced": self.stack("1")}
+        if include_heavy:
+            stacks["heavy"] = self.stack("2")
+        return {
+            "schemaVersion": 2,
+            "defaultStack": "balanced",
+            "models": {
+                "gpt-main": {
+                    "family": "gpt",
+                    "routes": {"openai": "gpt-main-upstream"},
+                },
+                "gpt-worker": {
+                    "family": "gpt",
+                    "routes": {"openai": "gpt-worker-upstream"},
+                },
+            },
+            "stacks": stacks,
+        }
+
+    def document_with_stack(self, name: str) -> dict[str, object]:
+        document = self.document()
+        document["stacks"][name] = self.stack("3")
+        return document
+
+    def write_model_document(self, document: dict[str, object]) -> None:
+        self.model_path.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def read_model_document(self) -> dict[str, object]:
+        return json.loads(self.model_path.read_text(encoding="utf-8"))
+
+    def write_bindings(self, bindings: dict[str, str]) -> None:
+        self.binding_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "candidateAccounts": bindings,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.binding_path.chmod(0o600)
+
+    def projects_for(self, stack: str) -> dict[str, object]:
+        projects = json.loads(json.dumps(self.projects))
+        projects["contexts"][0]["modelStack"] = stack
+        return projects
+
+    def test_concurrent_stack_edit_is_rejected_without_overwrite(self):
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        external = self.document_with_stack("external")
+        self.write_model_document(external)
+
+        with self.assertRaisesRegex(
+            StackStoreError, "changed during update"
+        ):
+            save_stack(snapshot, snapshot.stacks, snapshot.bindings)
+
+        self.assertEqual(self.read_model_document(), external)
+
+    def test_concurrent_binding_edit_is_rejected_without_model_overwrite(self):
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_model = self.model_path.read_bytes()
+        self.write_bindings(
+            {"oc-c-ffffffffffffffff": self.account_id}
+        )
+        external_binding = self.binding_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            StackStoreError, "changed during update"
+        ):
+            save_stack(snapshot, snapshot.stacks, snapshot.bindings)
+
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), external_binding)
+
+    def test_concurrent_saves_serialize_and_stale_writer_never_stages(self):
+        first_snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        second_snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        first_staged = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_staged = threading.Event()
+        first_errors: list[BaseException] = []
+        second_errors: list[BaseException] = []
+        from integrations.common import stack_store
+
+        real_stage = stack_store._stage
+
+        def controlled_stage(
+            path: Path, payload: bytes, mode: int
+        ) -> Path:
+            if threading.current_thread().name == "first-stack-save":
+                if path == self.model_path and not first_staged.is_set():
+                    staged = real_stage(path, payload, mode)
+                    first_staged.set()
+                    if not release_first.wait(timeout=2):
+                        raise AssertionError(
+                            "fixture did not release first save"
+                        )
+                    return staged
+            else:
+                second_staged.set()
+            return real_stage(path, payload, mode)
+
+        def first_save() -> None:
+            try:
+                save_stack(
+                    first_snapshot,
+                    first_snapshot.stacks,
+                    first_snapshot.bindings,
+                )
+            except BaseException as error:
+                first_errors.append(error)
+
+        def second_save() -> None:
+            second_started.set()
+            try:
+                save_stack(
+                    second_snapshot,
+                    second_snapshot.stacks,
+                    second_snapshot.bindings,
+                )
+            except BaseException as error:
+                second_errors.append(error)
+
+        with mock.patch.object(
+            stack_store, "_stage", side_effect=controlled_stage
+        ):
+            first = threading.Thread(
+                target=first_save, name="first-stack-save"
+            )
+            second = threading.Thread(
+                target=second_save, name="second-stack-save"
+            )
+            first.start()
+            self.assertTrue(first_staged.wait(timeout=2))
+            second.start()
+            self.assertTrue(second_started.wait(timeout=2))
+            self.assertFalse(second_staged.wait(timeout=0.1))
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(first_errors, [])
+        self.assertEqual(len(second_errors), 1)
+        self.assertRegex(
+            str(second_errors[0]), "changed during update"
+        )
+        self.assertFalse(second_staged.is_set())
+
+    def test_rejects_deleting_referenced_or_default_stack(self):
+        with self.assertRaisesRegex(StackStoreError, "default stack"):
+            delete_stack(self.snapshot, "balanced", self.projects)
+        with self.assertRaisesRegex(StackStoreError, "referenced by"):
+            delete_stack(
+                self.snapshot, "heavy", self.projects_for("heavy")
+            )
+
+    def test_delete_removes_stack_and_only_its_candidate_bindings(self):
+        heavy_controller = "oc-c-2000000000000001"
+        balanced_controller = "oc-c-1000000000000001"
+        snapshot = StackSnapshot(
+            stacks=self.snapshot.stacks,
+            bindings=StackBindings(
+                {
+                    heavy_controller: self.account_id,
+                    balanced_controller: self.account_id,
+                }
+            ),
+            stack_digest=self.snapshot.stack_digest,
+            binding_digest=self.snapshot.binding_digest,
+        )
+
+        updated, bindings = delete_stack(
+            snapshot, "heavy", self.projects
+        )
+
+        self.assertEqual(tuple(updated.stacks), ("balanced",))
+        self.assertEqual(
+            dict(bindings.candidate_accounts),
+            {balanced_controller: self.account_id},
+        )
+
+    def test_first_rename_failure_preserves_both_originals(self):
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_model = self.model_path.read_bytes()
+        original_binding = self.binding_path.read_bytes()
+        real_replace = os.replace
+        targets: list[Path] = []
+
+        def fail_binding(source: object, target: object) -> None:
+            targets.append(Path(target))
+            if Path(target) == self.binding_path:
+                raise OSError("injected first rename failure")
+            real_replace(source, target)
+
+        with mock.patch(
+            "integrations.common.stack_store.os.replace",
+            side_effect=fail_binding,
+        ), self.assertRaisesRegex(StackStoreError, "could not be saved"):
+            save_stack(snapshot, snapshot.stacks, snapshot.bindings)
+
+        self.assertEqual(targets, [self.binding_path])
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), original_binding)
+        self.assertEqual(
+            [
+                path
+                for path in (*self.portable.iterdir(), *self.private.iterdir())
+                if path.name.startswith((".model-stacks.json.", ".stack-bindings.json."))
+            ],
+            [],
+        )
+
+    def test_second_rename_failure_restores_fsynced_binding_snapshot(self):
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_model = self.model_path.read_bytes()
+        original_binding = self.binding_path.read_bytes()
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+        real_replace = os.replace
+        targets: list[Path] = []
+        failed = False
+
+        def fail_model_once(source: object, target: object) -> None:
+            nonlocal failed
+            targets.append(Path(target))
+            if Path(target) == self.model_path and not failed:
+                failed = True
+                raise OSError("injected second rename failure")
+            real_replace(source, target)
+
+        with mock.patch(
+            "integrations.common.stack_store.os.replace",
+            side_effect=fail_model_once,
+        ), self.assertRaisesRegex(StackStoreError, "could not be saved"):
+            save_stack(snapshot, snapshot.stacks, updated_bindings)
+
+        self.assertEqual(
+            targets,
+            [self.binding_path, self.model_path, self.binding_path],
+        )
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), original_binding)
+
+    def test_rollback_failure_retains_fsynced_binding_snapshot(self):
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_binding = self.binding_path.read_bytes()
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+        real_replace = os.replace
+        binding_replacements = 0
+
+        def fail_model_and_restore(
+            source: object, target: object
+        ) -> None:
+            nonlocal binding_replacements
+            if Path(target) == self.binding_path:
+                binding_replacements += 1
+                if binding_replacements == 2:
+                    raise OSError("injected rollback failure")
+            if Path(target) == self.model_path:
+                raise OSError("injected model rename failure")
+            real_replace(source, target)
+
+        with mock.patch(
+            "integrations.common.stack_store.os.replace",
+            side_effect=fail_model_and_restore,
+        ), self.assertRaisesRegex(StackStoreError, "rollback failed"):
+            save_stack(snapshot, snapshot.stacks, updated_bindings)
+
+        recovery = [
+            path
+            for path in self.private.iterdir()
+            if path.name.startswith(".stack-bindings.json.")
+        ]
+        self.assertEqual(len(recovery), 1)
+        self.assertEqual(recovery[0].read_bytes(), original_binding)
+        self.assertEqual(stat.S_IMODE(recovery[0].stat().st_mode), 0o600)
+
+    def test_second_rename_failure_removes_new_binding_when_none_existed(self):
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_model = self.model_path.read_bytes()
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+        real_replace = os.replace
+
+        def fail_model(source: object, target: object) -> None:
+            if Path(target) == self.model_path:
+                raise OSError("injected model rename failure")
+            real_replace(source, target)
+
+        with mock.patch(
+            "integrations.common.stack_store.os.replace",
+            side_effect=fail_model,
+        ), self.assertRaisesRegex(StackStoreError, "could not be saved"):
+            save_stack(snapshot, snapshot.stacks, updated_bindings)
+
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertFalse(self.binding_path.exists())
+
+    def test_save_writes_private_binding_and_lock_with_canonical_documents(self):
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+
+        save_stack(
+            self.snapshot, self.snapshot.stacks, updated_bindings
+        )
+
+        self.assertEqual(
+            json.loads(self.binding_path.read_text(encoding="utf-8")),
+            {
+                "schemaVersion": 1,
+                "candidateAccounts": {
+                    "oc-c-2000000000000001": self.account_id
+                },
+            },
+        )
+        self.assertEqual(stat.S_IMODE(self.binding_path.stat().st_mode), 0o600)
+        self.assertEqual(
+            stat.S_IMODE(
+                (self.private / ".model-stacks.lock").stat().st_mode
+            ),
+            0o600,
+        )
+        self.assertEqual(
+            self.read_model_document(), self.document()
+        )
+
+    def test_save_rejects_binding_to_missing_candidate_or_inactive_account(self):
+        missing_candidate = StackBindings(
+            {"oc-c-ffffffffffffffff": self.account_id}
+        )
+        with self.assertRaisesRegex(
+            StackStoreError, "unknown candidate"
+        ):
+            save_stack(
+                self.snapshot, self.snapshot.stacks, missing_candidate
+            )
+
+        inactive_id = "oc-a-2222222222222222"
+        self.register_account(inactive_id, state="disabled")
+        inactive = StackBindings(
+            {"oc-c-2000000000000001": inactive_id}
+        )
+        with self.assertRaisesRegex(StackStoreError, "active account"):
+            save_stack(self.snapshot, self.snapshot.stacks, inactive)
+
+        self.assertFalse(self.binding_path.exists())
+
+    def test_load_ignores_stale_binding_only_for_missing_candidate(self):
+        self.write_bindings(
+            {"oc-c-ffffffffffffffff": self.account_id}
+        )
+
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+
+        self.assertEqual(snapshot.bindings, StackBindings({}))
+        self.assertIsNotNone(snapshot.binding_digest)
+
+    def test_load_and_save_reject_unsafe_files_and_lock(self):
+        model_target = self.portable / "real-model-stacks.json"
+        self.model_path.replace(model_target)
+        self.model_path.symlink_to(model_target)
+        with self.assertRaisesRegex(StackStoreError, "unsafe"):
+            load_stack_snapshot(self.model_path, self.binding_path)
+
+        self.model_path.unlink()
+        model_target.replace(self.model_path)
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        lock_target = self.private / "lock-target"
+        lock_target.write_text("", encoding="utf-8")
+        lock_target.chmod(0o600)
+        model_lock = self.private / ".model-stacks.lock"
+        model_lock.unlink()
+        model_lock.symlink_to(lock_target)
+        with self.assertRaisesRegex(StackStoreError, "lock is unsafe"):
+            save_stack(snapshot, snapshot.stacks, snapshot.bindings)
+
+        model_lock.unlink()
+        self.write_bindings({})
+        self.binding_path.chmod(0o644)
+        with self.assertRaisesRegex(StackStoreError, "unsafe"):
+            load_stack_snapshot(self.model_path, self.binding_path)
+
+    def live_catalog(
+        self, *, include_worker: bool = True
+    ) -> LiveCatalog:
+        choices = [
+            LiveModelChoice(
+                family="gpt",
+                provider="openai",
+                upstream="gpt-main-upstream",
+                account_ids=(self.account_id,),
+                account_names=(self.account_id,),
+            )
+        ]
+        if include_worker:
+            choices.append(
+                LiveModelChoice(
+                    family="gpt",
+                    provider="openai",
+                    upstream="gpt-worker-upstream",
+                    account_ids=(self.account_id,),
+                    account_names=(self.account_id,),
+                )
+            )
+        return LiveCatalog(
+            choices=tuple(choices), unclassified=()
+        )
+
+    def active_account(
+        self, identifier: str | None = None, *, pool: str = "shared"
+    ) -> Account:
+        identifier = identifier or self.account_id
+        return Account(
+            id=identifier,
+            name=identifier,
+            provider="openai",
+            credential_ref=f"{identifier}.json",
+            pool=pool,
+            routing_prefix=f"oc-r-{identifier.removeprefix('oc-a-')}",
+            priority=100,
+            state="active",
+            original_prefix=None,
+            original_priority=None,
+        )
+
+    def test_assignment_requires_live_controller_and_every_agent_role(self):
+        validate_stack_assignment(
+            "heavy",
+            {"accountPools": ["shared"]},
+            self.snapshot.stacks,
+            StackBindings(
+                {"oc-c-2000000000000001": self.account_id}
+            ),
+            (self.active_account(),),
+            {"openai": {"families": ["gpt"]}},
+            self.live_catalog(),
+        )
+
+        with self.assertRaisesRegex(
+            StackStoreError, "implementation-worker|agent role"
+        ):
+            validate_stack_assignment(
+                "heavy",
+                {"accountPools": ["shared"]},
+                self.snapshot.stacks,
+                StackBindings({}),
+                (self.active_account(),),
+                {"openai": {"families": ["gpt"]}},
+                self.live_catalog(include_worker=False),
+            )
+
+    def test_assignment_rejects_locked_account_outside_context_or_exact_route(self):
+        other_id = "oc-a-3333333333333333"
+        locked = StackBindings(
+            {"oc-c-2000000000000001": other_id}
+        )
+        for account, catalog in (
+            (
+                self.active_account(other_id, pool="other"),
+                LiveCatalog(
+                    choices=(
+                        LiveModelChoice(
+                            family="gpt",
+                            provider="openai",
+                            upstream="gpt-main-upstream",
+                            account_ids=(other_id,),
+                            account_names=(other_id,),
+                        ),
+                    ),
+                    unclassified=(),
+                ),
+            ),
+            (
+                self.active_account(other_id),
+                self.live_catalog(),
+            ),
+        ):
+            with self.subTest(
+                pool=account.pool
+            ), self.assertRaisesRegex(
+                StackStoreError, "locked candidate"
+            ):
+                validate_stack_assignment(
+                    "heavy",
+                    {"accountPools": ["shared"]},
+                    self.snapshot.stacks,
+                    locked,
+                    (self.active_account(), account),
+                    {"openai": {"families": ["gpt"]}},
+                    catalog,
+                )
+
+    def test_invalid_assignment_does_not_mutate_saved_stack_or_projects(self):
+        original_model = self.model_path.read_bytes()
+        original_projects = json.dumps(self.projects, sort_keys=True)
+
+        with self.assertRaisesRegex(StackStoreError, "unknown"):
+            validate_stack_assignment(
+                "missing",
+                {"accountPools": ["shared"]},
+                self.snapshot.stacks,
+                StackBindings({}),
+                (self.active_account(),),
+                {"openai": {"families": ["gpt"]}},
+                self.live_catalog(),
+            )
+
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(
+            json.dumps(self.projects, sort_keys=True),
+            original_projects,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
