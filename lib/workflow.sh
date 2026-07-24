@@ -839,7 +839,8 @@ if b"<plist" in raw[:500]:
             and (
                 (
                     legacy
-                    and environment.get("ORICHUM_DATA_HOME") == data_root
+                    and environment.get("ORICHUM_DATA_HOME")
+                    in (None, data_root)
                 )
                 or (
                     not legacy
@@ -975,20 +976,29 @@ if kind == "claudex-proxy":
         descriptions == ["Description=Orichum same-family recovery proxy"]
         and claudex_proxy_arguments_owned(arguments)
         and exec_lines[0] == expected_exec
-        and environment_lines == (
-            [expected_environment, expected_data_environment]
-            if legacy
-            else [
+        and (
+            (
+                legacy
+                and environment_lines in (
+                    [expected_environment],
+                    [expected_environment, expected_data_environment],
+                )
+            )
+            or (
+                not legacy
+                and environment_lines == [
                 expected_environment,
                 expected_workflow_environment,
                 expected_python_environment,
-            ]
+                ]
+            )
         )
         and environment.get("HOME") == os.environ.get("HOME")
         and (
             (
                 legacy
-                and environment.get("ORICHUM_DATA_HOME") == data_root
+                and environment.get("ORICHUM_DATA_HOME")
+                in (None, data_root)
             )
             or (
                 not legacy
