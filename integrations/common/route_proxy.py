@@ -24,6 +24,7 @@ RETRYABLE_STATUSES = frozenset({401, 403, 408, 429, 500, 502, 503, 504})
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_CONCURRENT_REQUESTS = 32
 CLIENT_READ_TIMEOUT_SECONDS = 30
+ATTESTATION_TTL_SECONDS = 30
 _HOP_HEADERS = frozenset(
     {
         "connection",
@@ -108,6 +109,89 @@ class Cooldowns:
     def clear(self, model: str) -> None:
         with self._lock:
             self._until.pop(model, None)
+
+
+class AttestationGate:
+    def __init__(
+        self,
+        ttl_seconds: int,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.ttl_seconds = ttl_seconds
+        self.clock = clock
+        self._verified_until = 0.0
+        self._service_pid: int | None = None
+        self._refreshing = False
+        self._generation = 0
+        self._condition = threading.Condition()
+
+    def verify(
+        self,
+        client_port: int,
+        full_verifier: Callable[[int], int],
+        connection_verifier: Callable[[int, int], None],
+    ) -> None:
+        while True:
+            with self._condition:
+                observed_generation = self._generation
+                while self._refreshing:
+                    self._condition.wait()
+                if (
+                    self._generation != observed_generation
+                    and self._service_pid is None
+                ):
+                    raise RouteProxyError(
+                        "upstream ownership could not be verified"
+                    )
+                service_pid = self._service_pid
+                generation = self._generation
+                if (
+                    service_pid is None
+                    or self._verified_until <= self.clock()
+                ):
+                    self._refreshing = True
+                    break
+
+            try:
+                connection_verifier(service_pid, client_port)
+                return
+            except RouteProxyError:
+                with self._condition:
+                    if (
+                        self._service_pid != service_pid
+                        or self._generation != generation
+                    ):
+                        continue
+                    self._service_pid = None
+                    self._verified_until = 0.0
+                    self._refreshing = True
+                    break
+
+        try:
+            service_pid = full_verifier(client_port)
+            if (
+                not isinstance(service_pid, int)
+                or isinstance(service_pid, bool)
+                or service_pid <= 0
+            ):
+                raise RouteProxyError(
+                    "upstream service identity is invalid"
+                )
+        except BaseException:
+            with self._condition:
+                self._service_pid = None
+                self._verified_until = 0.0
+                self._refreshing = False
+                self._generation += 1
+                self._condition.notify_all()
+            raise
+
+        with self._condition:
+            self._service_pid = service_pid
+            self._verified_until = self.clock() + self.ttl_seconds
+            self._refreshing = False
+            self._generation += 1
+            self._condition.notify_all()
 
 
 def _request_model(body: bytes) -> str | None:
@@ -212,41 +296,7 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         headers["Connection"] = "close"
         connected = None
         try:
-            connected = socket.create_connection(
-                ("127.0.0.1", config.upstream_port), timeout=3
-            )
-            connected.settimeout(300)
-            client_host, client_port = connected.getsockname()
-            if client_host != "127.0.0.1":
-                raise RouteProxyError("upstream connection is not loopback")
-            if config.data_home is not None:
-                verifier = (
-                    Path(__file__).resolve().parents[2]
-                    / "bin"
-                    / "orichum-verify-cliproxy"
-                )
-                try:
-                    completed = subprocess.run(
-                        [
-                            str(verifier),
-                            str(config.data_home),
-                            str(config.upstream_port),
-                            str(client_port),
-                        ],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=3,
-                    )
-                except (OSError, subprocess.SubprocessError) as failure:
-                    raise RouteProxyError(
-                        "upstream ownership could not be verified"
-                    ) from failure
-                if completed.returncode != 0:
-                    raise RouteProxyError(
-                        "upstream connection is not Orichum-owned"
-                    )
+            connected = self._open_upstream_socket()
             connection.sock = connected
             connected = None
             connection.request(
@@ -260,6 +310,82 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             if connected is not None:
                 connected.close()
             connection.close()
+            raise
+
+    def _open_upstream_socket(self) -> socket.socket:
+        config: ProxyConfig = self.server.proxy_config
+        connected = socket.create_connection(
+            ("127.0.0.1", config.upstream_port), timeout=3
+        )
+        try:
+            connected.settimeout(300)
+            client_host, client_port = connected.getsockname()
+            if client_host != "127.0.0.1":
+                raise RouteProxyError("upstream connection is not loopback")
+            if config.data_home is not None:
+                verifier = (
+                    Path(__file__).resolve().parents[2]
+                    / "bin"
+                    / "orichum-verify-cliproxy"
+                )
+
+                def run_verifier(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+                    try:
+                        return subprocess.run(
+                            [str(verifier), *arguments],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=3,
+                            text=True,
+                        )
+                    except (OSError, subprocess.SubprocessError) as failure:
+                        raise RouteProxyError(
+                            "upstream ownership could not be verified"
+                        ) from failure
+
+                def full_verify(current_client_port: int) -> int:
+                    completed = run_verifier(
+                        [
+                            str(config.data_home),
+                            str(config.upstream_port),
+                            str(current_client_port),
+                        ]
+                    )
+                    if completed.returncode != 0:
+                        raise RouteProxyError(
+                            "upstream connection is not Orichum-owned"
+                        )
+                    service_pid = completed.stdout.strip()
+                    if not service_pid.isascii() or not service_pid.isdecimal():
+                        raise RouteProxyError(
+                            "upstream service identity is invalid"
+                        )
+                    return int(service_pid, 10)
+
+                def verify_connection(
+                    service_pid: int, current_client_port: int
+                ) -> None:
+                    completed = run_verifier(
+                        [
+                            "--connection",
+                            str(service_pid),
+                            str(config.upstream_port),
+                            str(current_client_port),
+                        ]
+                    )
+                    if completed.returncode != 0:
+                        raise RouteProxyError(
+                            "upstream connection is not Orichum-owned"
+                        )
+
+                self.server.attestation_gate.verify(
+                    client_port, full_verify, verify_connection
+                )
+            return connected
+        except Exception:
+            connected.close()
             raise
 
     def _send_response(
@@ -296,16 +422,23 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         self.send_error(status, message)
 
     def _health(self) -> None:
+        ready = False
+        try:
+            connected = self._open_upstream_socket()
+            connected.close()
+            ready = True
+        except (RouteProxyError, TimeoutError, OSError):
+            pass
         body = json.dumps(
             {
                 "pid": os.getpid(),
-                "ready": True,
+                "ready": ready,
                 "service": "orichum-route-proxy",
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        self.send_response_only(200)
+        self.send_response_only(200 if ready else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
@@ -387,6 +520,9 @@ class RouteProxyServer(ThreadingHTTPServer):
         self.proxy_config = config
         self.route_index = route_index or RouteIndex(config.state_home)
         self.cooldowns = cooldowns or Cooldowns(config.cooldown_seconds)
+        self.attestation_gate = AttestationGate(
+            ATTESTATION_TTL_SECONDS
+        )
         self.request_slots = threading.BoundedSemaphore(
             MAX_CONCURRENT_REQUESTS
         )

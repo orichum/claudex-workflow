@@ -5,6 +5,17 @@ workflow_root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$workflow_root/lib/workflow.sh"
 
+if [[ "$#" -eq 4 && "$1" == --connection ]]; then
+  service_pid="$2"
+  port="$3"
+  client_port="$4"
+  [[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || exit 2
+  valid_service_port "$port" || exit 2
+  valid_service_port "$client_port" || exit 2
+  pid_owns_loopback_connection "$service_pid" "$port" "$client_port"
+  exit
+fi
+
 [[ "$#" -eq 3 ]] || exit 2
 data_root="$1"
 port="$2"
@@ -37,4 +48,5 @@ active_definition="$(
 [[ "$active_definition" == "$service_file" ]] || exit 1
 service_pid="$(managed_service_main_pid "$platform" "$label" "$unit")" || exit 1
 pid_owns_loopback_listener "$service_pid" "$port" || exit 1
-pid_owns_loopback_connection "$service_pid" "$port" "$client_port"
+pid_owns_loopback_connection "$service_pid" "$port" "$client_port" || exit 1
+printf '%s\n' "$service_pid"
