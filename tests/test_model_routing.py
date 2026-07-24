@@ -17,6 +17,7 @@ from integrations.common.model_routing import (
     resolve_effective,
     validate_stack_name,
 )
+from integrations.common.stack_definition import normalize_model_stacks
 
 
 class ModelRoutingTests(unittest.TestCase):
@@ -93,15 +94,131 @@ class ModelRoutingTests(unittest.TestCase):
             {role: "fallback/" + role for role in ROLES},
         )
 
+    def test_candidate_stack_resolves_ordered_logical_model_ids(self) -> None:
+        models = {
+            "controller/main": {
+                "family": "gpt",
+                "routes": {"openai": "upstream/controller"},
+            }
+        }
+        agents = {}
+        next_id = 2
+        for role in ROLES:
+            preferred = "preferred/" + role
+            fallback = "fallback/" + role
+            models[preferred] = {
+                "family": "gpt",
+                "routes": {"openai": "upstream/" + preferred},
+            }
+            models[fallback] = {
+                "family": "gpt",
+                "routes": {"openai": "upstream/" + fallback},
+            }
+            agents[role] = [
+                {
+                    "id": f"oc-c-{next_id:016x}",
+                    "model": preferred,
+                    "providers": ["openai"],
+                },
+                {
+                    "id": f"oc-c-{next_id + 1:016x}",
+                    "model": fallback,
+                    "providers": ["openai"],
+                },
+            ]
+            next_id += 2
+        normalized = normalize_model_stacks(
+            {
+                "schemaVersion": 2,
+                "defaultStack": "balanced",
+                "models": models,
+                "stacks": {
+                    "balanced": {
+                        "controller": [
+                            {
+                                "id": "oc-c-0000000000000001",
+                                "model": "controller/main",
+                                "providers": ["openai"],
+                            }
+                        ],
+                        "agents": agents,
+                    }
+                },
+            }
+        )
+
+        effective = resolve_effective(
+            normalized,
+            ["controller/main"]
+            + ["fallback/" + role for role in ROLES],
+        )
+
+        self.assertEqual(effective.controller, "controller/main")
+        self.assertEqual(
+            effective.candidates,
+            {
+                role: (
+                    "preferred/" + role,
+                    "fallback/" + role,
+                )
+                for role in ROLES
+            },
+        )
+        self.assertEqual(
+            effective.agents,
+            {role: "fallback/" + role for role in ROLES},
+        )
+
     def test_routing_view_accepts_focused_model_stacks_document(self) -> None:
-        focused = dict(self.routing)
-        focused["models"] = {}
+        focused = {
+            "schemaVersion": 2,
+            "defaultStack": "balanced",
+            "models": {
+                "controller/main": {
+                    "family": "gpt",
+                    "routes": {"openai": "upstream/controller"},
+                },
+                **{
+                    "fallback/" + role: {
+                        "family": "gpt",
+                        "routes": {"openai": "upstream/" + role},
+                    }
+                    for role in ROLES
+                },
+            },
+            "stacks": {
+                "balanced": {
+                    "controller": [
+                        {
+                            "id": "oc-c-0000000000000001",
+                            "model": "controller/main",
+                            "providers": ["openai"],
+                        }
+                    ],
+                    "agents": {
+                        role: [
+                            {
+                                "id": f"oc-c-{index:016x}",
+                                "model": "fallback/" + role,
+                                "providers": ["openai"],
+                            }
+                        ]
+                        for index, role in enumerate(ROLES, start=2)
+                    },
+                }
+            },
+        }
         self.routing_path.write_text(json.dumps(focused), encoding="utf-8")
 
         loaded = model_routing.load_routing_view(self.routing_path)
 
-        self.assertEqual(loaded["defaultStack"], "balanced")
-        self.assertNotIn("models", loaded)
+        effective = resolve_effective(
+            loaded,
+            ["controller/main"]
+            + ["fallback/" + role for role in ROLES],
+        )
+        self.assertEqual(effective.stack_name, "balanced")
+        self.assertEqual(effective.controller, "controller/main")
 
     def test_materialized_plugin_rewrites_only_model_frontmatter(self) -> None:
         plugin = materialize_runtime_plugin(

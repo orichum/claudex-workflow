@@ -14,8 +14,11 @@ from urllib.parse import parse_qsl, urlsplit
 from .model_routing import (
     ROLES,
     RoutingError,
-    validate_model_id,
-    validate_routing_document,
+)
+from .stack_definition import (
+    NormalizedStacks,
+    StackCandidate,
+    normalize_model_stacks,
 )
 from .project_context import ContextError, validate_config_document
 from .github_identity import GithubIdentityError, validate_github_account
@@ -214,48 +217,6 @@ def _unique_identifiers(value: object, label: str) -> tuple[str, ...]:
     return result
 
 
-def _validate_models(document: object) -> tuple[dict[str, object], dict[str, object]]:
-    raw = _exact(
-        document,
-        {"schemaVersion", "defaultStack", "models", "stacks"},
-        "model-stacks",
-    )
-    if type(raw["schemaVersion"]) is not int or raw["schemaVersion"] != 1:
-        raise ConfigError("model-stacks schemaVersion must be exactly 1")
-    models = raw["models"]
-    if not isinstance(models, dict) or not models:
-        raise ConfigError("models must be a non-empty object")
-    normalized_models: dict[str, object] = {}
-    for raw_model, raw_metadata in models.items():
-        model = validate_model_id(raw_model, "model")
-        metadata = _exact(
-            raw_metadata, {"provider", "family", "upstream"}, f"model {model}"
-        )
-        normalized_models[model] = {
-            "provider": _identifier(metadata["provider"], f"model {model} provider"),
-            "family": _identifier(metadata["family"], f"model {model} family"),
-            "upstream": validate_model_id(
-                metadata["upstream"], f"model {model} upstream"
-            ),
-        }
-    routing = validate_routing_document(
-        {
-            "schemaVersion": raw["schemaVersion"],
-            "defaultStack": raw["defaultStack"],
-            "stacks": raw["stacks"],
-        }
-    )
-    referenced: set[str] = set()
-    for stack in routing["stacks"].values():
-        referenced.add(stack["controller"])
-        for role in ROLES:
-            referenced.update(stack["agents"][role])
-    missing = sorted(referenced - set(normalized_models))
-    if missing:
-        raise ConfigError(f"model declarations are missing: {', '.join(missing)}")
-    return normalized_models, routing
-
-
 def _validate_providers(
     document: object,
 ) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, tuple[str, ...]]]:
@@ -333,10 +294,8 @@ def _validate_providers(
 def _validate_projects(
     document: object,
     *,
-    routing: Mapping[str, object],
-    models: Mapping[str, object],
+    routing: NormalizedStacks,
     pools: Mapping[str, object],
-    routes: Mapping[str, tuple[str, ...]],
 ) -> None:
     raw = _exact(document, {"schemaVersion", "contexts"}, "projects")
     if type(raw["schemaVersion"]) is not int or raw["schemaVersion"] != 1:
@@ -376,23 +335,24 @@ def _validate_projects(
         eligible_providers: set[str] = set()
         for pool in selected_pools:
             eligible_providers.update(pools[pool])
-        selected_stack = context["modelStack"] or routing["defaultStack"]
-        stack = routing["stacks"].get(selected_stack)
+        selected_stack = context["modelStack"] or routing.default_stack
+        stack = routing.stacks.get(selected_stack)
         if stack is None:
             raise ConfigError(f"project context {index} names an unknown model stack")
 
-        def model_is_routable(model: str) -> bool:
-            family = models[model]["family"]
-            return bool(eligible_providers.intersection(routes[family]))
+        def candidate_is_routable(candidate: StackCandidate) -> bool:
+            return bool(
+                eligible_providers.intersection(candidate.providers)
+            )
 
-        if not model_is_routable(stack["controller"]):
+        if not any(candidate_is_routable(candidate) for candidate in stack.controller):
             raise ConfigError(
                 f"project context {index} cannot route its controller"
             )
         for role in ROLES:
             if not any(
-                model_is_routable(candidate)
-                for candidate in stack["agents"][role]
+                candidate_is_routable(candidate)
+                for candidate in stack.agents[role]
             ):
                 raise ConfigError(
                     f"project context {index} cannot route role {role}"
@@ -407,7 +367,7 @@ def _validate_projects(
     validate_config_document(
         {"contexts": portable_contexts},
         Path.home(),
-        dict(routing["stacks"]),
+        dict(routing.stacks),
     )
 
 
@@ -469,27 +429,34 @@ def validate_control_plane(config: ResolvedConfig) -> None:
             raise ConfigError("control-plane sources are incomplete")
         for name, document in config.documents.items():
             _reject_sensitive_values(document, name)
-        models, routing = _validate_models(config.documents["model-stacks"])
+        routing = normalize_model_stacks(
+            config.documents["model-stacks"]
+        )
         providers, pools, routes = _validate_providers(
             config.documents["providers"]
         )
-        for model, metadata in models.items():
-            provider = metadata["provider"]
-            family = metadata["family"]
-            if provider not in providers:
-                raise ConfigError(f"model {model} names an unknown provider")
-            if family not in providers[provider]:
-                raise ConfigError(
-                    f"provider {provider} does not support model family {family}"
-                )
-            if family not in routes or provider not in routes[family]:
-                raise ConfigError(f"model {model} family has no provider route")
+        for model, definition in routing.models.items():
+            for provider in definition.routes:
+                if provider not in providers:
+                    raise ConfigError(
+                        f"model {model} names an unknown provider"
+                    )
+                if definition.family not in providers[provider]:
+                    raise ConfigError(
+                        f"provider {provider} does not support model family "
+                        f"{definition.family}"
+                    )
+                if (
+                    definition.family not in routes
+                    or provider not in routes[definition.family]
+                ):
+                    raise ConfigError(
+                        f"model {model} family has no provider route"
+                    )
         _validate_projects(
             config.documents["projects"],
             routing=routing,
-            models=models,
             pools=pools,
-            routes=routes,
         )
         _validate_plugins(config.documents["plugins"])
         _validate_runtime(config.documents["runtime"])

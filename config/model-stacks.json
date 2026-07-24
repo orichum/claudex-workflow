@@ -1,37 +1,77 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "defaultStack": "balanced",
   "models": {
     "gpt-5.6-sol": {
-      "provider": "openai",
       "family": "gpt",
-      "upstream": "gpt-5.6-sol"
+      "routes": {
+        "openai": "gpt-5.6-sol"
+      }
     },
     "gpt-5.6-terra": {
-      "provider": "openai",
       "family": "gpt",
-      "upstream": "gpt-5.6-terra"
+      "routes": {
+        "openai": "gpt-5.6-terra"
+      }
     },
     "claude-sonnet-5": {
-      "provider": "anthropic",
       "family": "claude",
-      "upstream": "claude-sonnet-5"
+      "routes": {
+        "anthropic": "claude-sonnet-5"
+      }
     },
     "claude-opus-4-8": {
-      "provider": "anthropic",
       "family": "claude",
-      "upstream": "claude-opus-4-8"
+      "routes": {
+        "anthropic": "claude-opus-4-8"
+      }
     }
   },
   "stacks": {
     "balanced": {
-      "controller": "gpt-5.6-sol",
+      "controller": [
+        {
+          "id": "oc-c-c64159d152c2cf90",
+          "model": "gpt-5.6-sol",
+          "providers": ["openai"]
+        }
+      ],
       "agents": {
-        "repository-explorer": ["gpt-5.6-terra"],
-        "repository-verifier": ["gpt-5.6-terra"],
-        "correctness-critic": ["claude-sonnet-5"],
-        "architecture-advisor": ["claude-opus-4-8"],
-        "implementation-worker": ["gpt-5.6-sol"]
+        "repository-explorer": [
+          {
+            "id": "oc-c-1db0df6c362e02e9",
+            "model": "gpt-5.6-terra",
+            "providers": ["openai"]
+          }
+        ],
+        "repository-verifier": [
+          {
+            "id": "oc-c-38e35c710e57f9ea",
+            "model": "gpt-5.6-terra",
+            "providers": ["openai"]
+          }
+        ],
+        "correctness-critic": [
+          {
+            "id": "oc-c-a69e16d6ee83ad12",
+            "model": "claude-sonnet-5",
+            "providers": ["anthropic"]
+          }
+        ],
+        "architecture-advisor": [
+          {
+            "id": "oc-c-15e855e1e22ff2c1",
+            "model": "claude-opus-4-8",
+            "providers": ["anthropic"]
+          }
+        ],
+        "implementation-worker": [
+          {
+            "id": "oc-c-a24e82f9843f457c",
+            "model": "gpt-5.6-sol",
+            "providers": ["openai"]
+          }
+        ]
       }
     }
   }
