@@ -131,6 +131,7 @@ jobs:
           doctor_rc=$?
           set -e
           trap report_acceptance_failure ERR
+          printf '%s\n' "$doctor_output"
           test "$doctor_rc" -eq 1
           test "$(grep -c '^FAIL ' <<<"$doctor_output")" -eq 1
           grep -Fq 'provider login is pending' <<<"$doctor_output"

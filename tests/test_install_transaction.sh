@@ -279,6 +279,7 @@ for acceptance_workflow in \
   rg -Fq 'bash -x "$test_script"' "$acceptance_workflow"
   rg -Fq 'report_acceptance_failure()' "$acceptance_workflow"
   rg -Fq 'trap report_acceptance_failure ERR' "$acceptance_workflow"
+  rg -Fq "printf '%s\\n' \"\$doctor_output\"" "$acceptance_workflow"
   python3 - "$acceptance_workflow" <<'PY'
 from pathlib import Path
 import sys
