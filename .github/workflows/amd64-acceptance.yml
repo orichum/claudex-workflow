@@ -191,7 +191,7 @@ jobs:
           done
           systemctl --user show orichum-route-proxy.service \
             --property=ExecStart --value |
-            rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-python"
+            rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-route-proxy"
           route_port="$(jq -r .routeProxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
           curl -fsS "http://127.0.0.1:$route_port/health" |
             jq -e '
