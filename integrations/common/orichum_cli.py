@@ -59,7 +59,12 @@ from .provider_credentials import (
     resolve_credential_ref,
 )
 from .route_selection import RouteError, validate_route_credential
-from .stack_bindings import StackBindingError, load_stack_bindings
+from .stack_bindings import (
+    StackBindingError,
+    StackBindings,
+    load_stack_bindings,
+    stack_binding_transaction,
+)
 from .stack_definition import normalize_model_stacks
 from .session_config import (
     SessionError,
@@ -508,16 +513,23 @@ def _validate_live_models(
 ) -> None:
     if available is None:
         available = _live_models(paths)
-    bindings = (controller, *(agents[role] for role in ROLES))
-    required = {
-        route.upstream_model
-        for binding in bindings
+    bindings = (
+        ("controller", controller),
+        *((role, agents[role]) for role in ROLES),
+    )
+    missing = {
+        (role, route.logical_model)
+        for role, binding in bindings
         for route in (binding.primary, *binding.fallbacks)
+        if route.upstream_model not in available
     }
-    missing = sorted(required - available)
     if missing:
         raise CliError(
-            "bound model routes are not live: " + ", ".join(missing)
+            "bound model routes are not live for: "
+            + ", ".join(
+                f"{role} ({model})"
+                for role, model in sorted(missing)
+            )
         )
 
 
@@ -770,6 +782,7 @@ def _mutate_account(
     config: ResolvedConfig,
 ) -> None:
     registry = paths["config"] / "accounts.json"
+    bindings_path = paths["config"] / "stack-bindings.json"
     provider_document = config.documents["providers"]
     auth_dir = paths["data"] / "auth"
     management_endpoint = None
@@ -870,7 +883,11 @@ def _mutate_account(
             )
 
     action = parsed.account_command
-    with account_transaction(registry), credential_metadata_transaction(auth_dir):
+    with (
+        stack_binding_transaction(bindings_path) as binding_transaction,
+        account_transaction(registry),
+        credential_metadata_transaction(auth_dir),
+    ):
         if action == "add":
             providers = provider_document["providers"]
             pools = provider_document["accountPools"]
@@ -923,34 +940,42 @@ def _mutate_account(
             synchronize(account)
         elif action == "remove":
             current = find_account(load_accounts(registry), parsed.selector)
-            stack_bindings = load_stack_bindings(
-                paths["config"] / "stack-bindings.json"
+            stacks = normalize_model_stacks(
+                config.documents["model-stacks"]
             )
-            if current.id in stack_bindings.candidate_accounts.values():
-                stacks = normalize_model_stacks(
-                    config.documents["model-stacks"]
+            usage = {
+                candidate.id: (stack_name, role)
+                for stack_name, stack in stacks.stacks.items()
+                for role, candidates in (
+                    ("controller", stack.controller),
+                    *((name, stack.agents[name]) for name in ROLES),
                 )
-                for stack_name, stack in stacks.stacks.items():
-                    candidates = (
-                        ("controller", stack.controller),
-                        *((role, stack.agents[role]) for role in ROLES),
+                for candidate in candidates
+            }
+            stack_bindings = binding_transaction.load()
+            current_bindings = StackBindings(
+                {
+                    candidate: account
+                    for candidate, account in (
+                        stack_bindings.candidate_accounts.items()
                     )
-                    for role, role_candidates in candidates:
-                        if any(
-                            stack_bindings.candidate_accounts.get(
-                                candidate.id
-                            )
-                            == current.id
-                            for candidate in role_candidates
-                        ):
-                            raise CliError(
-                                "account cannot be removed: bound by "
-                                f"stack {stack_name} role {role}"
-                            )
-                raise CliError(
-                    "account cannot be removed while a stack binding "
-                    "references it"
+                    if candidate in usage
+                }
+            )
+            if current_bindings != stack_bindings:
+                current_bindings = binding_transaction.save(
+                    current_bindings,
+                    expected_digest=binding_transaction.digest(),
                 )
+            for candidate, account in (
+                current_bindings.candidate_accounts.items()
+            ):
+                if account == current.id:
+                    stack_name, role = usage[candidate]
+                    raise CliError(
+                        "account cannot be removed: bound by "
+                        f"stack {stack_name} role {role}"
+                    )
             if current.state == "pending-remove":
                 synchronize(current)
                 return

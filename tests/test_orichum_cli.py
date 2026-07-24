@@ -16,7 +16,12 @@ import unittest
 from unittest import mock
 
 from integrations.common import orichum_cli
-from integrations.common.stack_bindings import StackBindings, save_stack_bindings
+from integrations.common import stack_bindings
+from integrations.common.stack_bindings import (
+    StackBindingError,
+    StackBindings,
+    save_stack_bindings,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -347,6 +352,144 @@ class OrichumCliTests(unittest.TestCase):
             )["accounts"][0]["state"],
             "active",
         )
+
+    def test_account_remove_prunes_orphan_candidate_binding(self) -> None:
+        config_home, credential = self.provision_account_runtime()
+        status, stdout, stderr = self.run_cli(
+            "provider",
+            "account",
+            "add",
+            "Orphaned Claude",
+            "anthropic",
+            credential.name,
+            "xebia",
+        )
+        self.assertEqual((status, stdout, stderr), (0, "", ""))
+        account = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )["accounts"][0]
+        bindings_path = config_home / "stack-bindings.json"
+        save_stack_bindings(
+            bindings_path,
+            StackBindings(
+                {"oc-c-ffffffffffffffff": account["id"]}
+            ),
+            expected_digest=None,
+        )
+
+        status, stdout, stderr = self.run_cli(
+            "provider", "account", "remove", account["id"]
+        )
+
+        self.assertEqual((status, stdout, stderr), (0, "", ""))
+        self.assertEqual(
+            json.loads(
+                (config_home / "accounts.json").read_text(encoding="utf-8")
+            )["accounts"],
+            [],
+        )
+        self.assertEqual(
+            orichum_cli.load_stack_bindings(bindings_path),
+            StackBindings({}),
+        )
+
+    def test_account_remove_serializes_against_new_binding_save(self) -> None:
+        config_home, credential = self.provision_account_runtime()
+        status, stdout, stderr = self.run_cli(
+            "provider",
+            "account",
+            "add",
+            "Racing Claude",
+            "anthropic",
+            credential.name,
+            "xebia",
+        )
+        self.assertEqual((status, stdout, stderr), (0, "", ""))
+        account_id = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )["accounts"][0]["id"]
+        with mock.patch.dict(os.environ, self.environment, clear=False):
+            paths, config = orichum_cli._load()
+
+        removal_inside = threading.Event()
+        release_removal = threading.Event()
+        binding_attempted = threading.Event()
+        binding_completed = threading.Event()
+        original_find = orichum_cli.find_account
+        original_flock = stack_bindings.fcntl.flock
+        remove_errors: list[BaseException] = []
+        binding_errors: list[BaseException] = []
+
+        def blocking_find(accounts, selector):
+            if (
+                threading.current_thread().name == "account-removal"
+                and not removal_inside.is_set()
+            ):
+                removal_inside.set()
+                if not release_removal.wait(timeout=2):
+                    raise AssertionError("removal test was not released")
+            return original_find(accounts, selector)
+
+        def observed_flock(descriptor: int, operation: int) -> None:
+            if threading.current_thread().name == "binding-save":
+                binding_attempted.set()
+            original_flock(descriptor, operation)
+
+        def remove() -> None:
+            try:
+                orichum_cli._mutate_account(
+                    SimpleNamespace(
+                        account_command="remove",
+                        selector=account_id,
+                    ),
+                    paths,
+                    config,
+                )
+            except BaseException as error:
+                remove_errors.append(error)
+
+        def bind() -> None:
+            try:
+                save_stack_bindings(
+                    config_home / "stack-bindings.json",
+                    StackBindings(
+                        {"oc-c-a69e16d6ee83ad12": account_id}
+                    ),
+                    expected_digest=None,
+                )
+            except BaseException as error:
+                binding_errors.append(error)
+            finally:
+                binding_completed.set()
+
+        with (
+            mock.patch.object(
+                orichum_cli, "find_account", side_effect=blocking_find
+            ),
+            mock.patch.object(
+                stack_bindings.fcntl,
+                "flock",
+                side_effect=observed_flock,
+            ),
+        ):
+            removal = threading.Thread(target=remove, name="account-removal")
+            binding = threading.Thread(target=bind, name="binding-save")
+            removal.start()
+            self.assertTrue(removal_inside.wait(timeout=2))
+            binding.start()
+            self.assertTrue(binding_attempted.wait(timeout=2))
+            self.assertFalse(binding_completed.is_set())
+            release_removal.set()
+            removal.join(timeout=2)
+            binding.join(timeout=2)
+
+        self.assertFalse(removal.is_alive())
+        self.assertFalse(binding.is_alive())
+        self.assertEqual(remove_errors, [])
+        self.assertEqual(len(binding_errors), 1)
+        self.assertIsInstance(binding_errors[0], StackBindingError)
+        self.assertIn("not registered", str(binding_errors[0]))
+        self.assertFalse((config_home / "stack-bindings.json").exists())
 
     def test_account_add_rejects_provider_pool_and_credential_mismatch(self) -> None:
         _, credential = self.provision_account_runtime()
@@ -880,6 +1023,52 @@ class OrichumCliTests(unittest.TestCase):
             )
         connect.assert_called_once_with("127.0.0.1", 8317, timeout=3)
         self.assertEqual(models, frozenset({"gpt-5.6-sol"}))
+
+    def test_missing_live_models_reports_roles_without_routing_prefixes(
+        self,
+    ) -> None:
+        def route(model: str, upstream: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                logical_model=model,
+                upstream_model=upstream,
+            )
+
+        controller = SimpleNamespace(
+            primary=route(
+                "gpt-5.6-sol",
+                "oc-r-1111111111111111/gpt-5.6-sol",
+            ),
+            fallbacks=(),
+        )
+        worker = SimpleNamespace(
+            primary=route(
+                "gpt-5.6-terra",
+                "oc-r-2222222222222222/gpt-5.6-terra",
+            ),
+            fallbacks=(),
+        )
+        agents = {role: worker for role in orichum_cli.ROLES}
+
+        def prepare(*_args: object, **_kwargs: object) -> object:
+            orichum_cli._validate_live_models(
+                {},
+                controller,
+                agents,
+                available=frozenset(),
+            )
+            raise AssertionError("unreachable")
+
+        with mock.patch.object(
+            orichum_cli, "_prepare_new_session", side_effect=prepare
+        ):
+            status, stdout, stderr = self.run_cli("run")
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("controller", stderr)
+        self.assertIn("gpt-5.6-sol", stderr)
+        self.assertIn("repository-explorer", stderr)
+        self.assertNotIn("oc-r-", stderr)
 
     def test_session_environment_scrubs_token_identity_overrides(self) -> None:
         physical = SimpleNamespace(

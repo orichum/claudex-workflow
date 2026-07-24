@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import hashlib
@@ -15,10 +16,12 @@ import tempfile
 from types import MappingProxyType
 from typing import Mapping
 
+from .account_registry import AccountError, load_accounts
+
 
 MAX_BINDING_BYTES = 1024 * 1024
 _CANDIDATE_ID = re.compile(r"oc-c-[0-9a-f]{16}")
-_ACCOUNT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_ACCOUNT_ID = re.compile(r"oc-a-[a-f0-9]{16}")
 
 
 class StackBindingError(RuntimeError):
@@ -241,14 +244,76 @@ def _write(path: Path, updated: StackBindings) -> None:
         raise
 
 
-def save_stack_bindings(
-    path: Path,
-    updated: StackBindings,
-    expected_digest: str | None,
-) -> StackBindings:
+class StackBindingTransaction:
+    """Exclusive account/binding transaction held in one canonical order."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._active = True
+
+    def _require_active(self) -> None:
+        if not self._active:
+            raise StackBindingError("stack binding transaction is closed")
+
+    def load(self) -> StackBindings:
+        self._require_active()
+        content = _read(self._path)
+        return StackBindings({}) if content is None else _decode(content)
+
+    def digest(self) -> str | None:
+        self._require_active()
+        content = _read(self._path)
+        return (
+            None
+            if content is None
+            else hashlib.sha256(content).hexdigest()
+        )
+
+    def save(
+        self,
+        updated: StackBindings,
+        expected_digest: str | None,
+    ) -> StackBindings:
+        self._require_active()
+        current = _read(self._path)
+        observed_digest = (
+            None
+            if current is None
+            else hashlib.sha256(current).hexdigest()
+        )
+        if observed_digest != expected_digest:
+            raise StackBindingError("stack bindings changed during update")
+        if updated.candidate_accounts:
+            try:
+                registered = {
+                    account.id
+                    for account in load_accounts(
+                        self._path.parent / "accounts.json"
+                    )
+                }
+            except AccountError as error:
+                raise StackBindingError(
+                    "account registry is unavailable for stack bindings"
+                ) from error
+            missing = sorted(
+                set(updated.candidate_accounts.values()) - registered
+            )
+            if missing:
+                raise StackBindingError(
+                    "stack binding account is not registered"
+                )
+        if current is None and not updated.candidate_accounts:
+            return updated
+        _write(self._path, updated)
+        return self.load()
+
+
+@contextmanager
+def stack_binding_transaction(path: Path):
+    """Serialize account lifecycle and stack-binding mutations."""
     path = Path(path)
     parent = _private_parent(path)
-    lock_path = parent / ".stack-bindings.lock"
+    lock_path = parent / ".account-stack-transaction.lock"
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -264,17 +329,19 @@ def save_stack_bindings(
         ):
             raise StackBindingError("stack binding lock is unsafe")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        current = _read(path)
-        observed_digest = (
-            None
-            if current is None
-            else hashlib.sha256(current).hexdigest()
-        )
-        if observed_digest != expected_digest:
-            raise StackBindingError("stack bindings changed during update")
-        if current is None and not updated.candidate_accounts:
-            return updated
-        _write(path, updated)
-        return load_stack_bindings(path)
+        transaction = StackBindingTransaction(path)
+        try:
+            yield transaction
+        finally:
+            transaction._active = False
     finally:
         os.close(lock_descriptor)
+
+
+def save_stack_bindings(
+    path: Path,
+    updated: StackBindings,
+    expected_digest: str | None,
+) -> StackBindings:
+    with stack_binding_transaction(path) as transaction:
+        return transaction.save(updated, expected_digest)
