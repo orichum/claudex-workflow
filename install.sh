@@ -1569,5 +1569,8 @@ if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"
 else
-  printf 'Next: orichum doctor\n'
+  printf '\nRunning Orichum doctor...\n'
+  ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
+  ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+    "$USER_BIN_DIR/orichum" doctor
 fi

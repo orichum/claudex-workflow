@@ -187,6 +187,11 @@ rg -Fq 'headroom_service_is_ready' "$ROOT/install.sh"
 rg -Fq \
   'Headroom did not become fully ready after route proxy activation' \
   "$ROOT/install.sh"
+rg -Fq '"$USER_BIN_DIR/orichum" doctor' "$ROOT/install.sh"
+if rg -Fq 'Next: orichum doctor' "$ROOT/install.sh"; then
+  printf 'installer still delegates final health verification to the user\n' >&2
+  exit 1
+fi
 rg -Fq 'io.orichum.route-proxy' "$ROOT/lib/workflow.sh"
 if rg -Fq 'home=Path.home()' "$ROOT/install.sh"; then
   printf 'installer uses obsolete load_control_plane home argument\n' >&2
