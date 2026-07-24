@@ -58,6 +58,15 @@ def _exact_object(value: object, keys: set[str], label: str) -> dict:
     return value
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RoutingError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def validate_stack_name(value: object, label: str = "stack name") -> str:
     if not isinstance(value, str) or not _STACK_PATTERN.fullmatch(value):
         raise RoutingError(f"{label} is invalid")
@@ -133,7 +142,10 @@ def load_routing(path: Path) -> dict[str, object]:
 def load_routing_view(path: Path) -> object:
     """Load the routing portion of either routing.json or model-stacks.json."""
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_object,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RoutingError("model routing could not be parsed") from error
     if isinstance(raw, dict) and set(raw) == {

@@ -82,6 +82,43 @@ class ModelRoutingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def focused_model_stacks(self) -> dict[str, object]:
+        return {
+            "schemaVersion": 2,
+            "defaultStack": "balanced",
+            "models": {
+                "controller/main": {
+                    "family": "gpt",
+                    "routes": {"openai": "upstream/controller"},
+                },
+                "agent/main": {
+                    "family": "gpt",
+                    "routes": {"openai": "upstream/agent"},
+                },
+            },
+            "stacks": {
+                "balanced": {
+                    "controller": [
+                        {
+                            "id": "oc-c-0000000000000001",
+                            "model": "controller/main",
+                            "providers": ["openai"],
+                        }
+                    ],
+                    "agents": {
+                        role: [
+                            {
+                                "id": f"oc-c-{index:016x}",
+                                "model": "agent/main",
+                                "providers": ["openai"],
+                            }
+                        ]
+                        for index, role in enumerate(ROLES, start=2)
+                    },
+                }
+            },
+        }
+
     def test_default_stack_uses_ordered_agent_fallbacks(self) -> None:
         routing = load_routing(self.routing_path)
         effective = resolve_effective(
@@ -219,6 +256,28 @@ class ModelRoutingTests(unittest.TestCase):
         )
         self.assertEqual(effective.stack_name, "balanced")
         self.assertEqual(effective.controller, "controller/main")
+
+    def test_routing_view_rejects_duplicate_top_level_key(self) -> None:
+        raw = json.dumps(self.focused_model_stacks()).replace(
+            '"defaultStack": "balanced"',
+            '"defaultStack": "balanced", "defaultStack": "balanced"',
+            1,
+        )
+        self.routing_path.write_text(raw, encoding="utf-8")
+
+        with self.assertRaisesRegex(RoutingError, "duplicate JSON key"):
+            model_routing.load_routing_view(self.routing_path)
+
+    def test_routing_view_rejects_duplicate_nested_key(self) -> None:
+        raw = json.dumps(self.focused_model_stacks()).replace(
+            '"family": "gpt"',
+            '"family": "gpt", "family": "gpt"',
+            1,
+        )
+        self.routing_path.write_text(raw, encoding="utf-8")
+
+        with self.assertRaisesRegex(RoutingError, "duplicate JSON key"):
+            model_routing.load_routing_view(self.routing_path)
 
     def test_materialized_plugin_rewrites_only_model_frontmatter(self) -> None:
         plugin = materialize_runtime_plugin(
