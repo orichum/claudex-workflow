@@ -41,7 +41,9 @@ jobs:
             "USER_BIN_DIR=$USER_BIN_DIR" \
             "UV_TOOL_DIR=$UV_TOOL_DIR" \
             "UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR" >>"$GITHUB_ENV"
-          printf '%s\n' "$USER_BIN_DIR" >>"$GITHUB_PATH"
+          printf '%s\n' \
+            "$USER_BIN_DIR" \
+            "$ORICHUM_DATA_HOME/headroom/bin" >>"$GITHUB_PATH"
           runtime_dir="/run/user/$(id -u)"
           printf 'XDG_RUNTIME_DIR=%s\n' "$runtime_dir" >>"$GITHUB_ENV"
           sudo loginctl enable-linger "$USER"

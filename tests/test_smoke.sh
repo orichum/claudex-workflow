@@ -102,6 +102,7 @@ for required_contract in \
     'timeout-minutes: 30' \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
     'sudo apt-get install --yes ripgrep' \
+    '$ORICHUM_DATA_HOME/headroom/bin' \
     'systemctl --user show orichum-headroom.service --property=ExecStart --value' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
