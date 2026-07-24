@@ -385,13 +385,13 @@ rg -Fq "<string>$data_root/bin/orichum-route-proxy</string>" \
   "$fixture/route.plist"
 rg -Fq '<key>ORICHUM_DATA_HOME</key>' "$fixture/route.plist"
 rg -Fq '<string>--data-home</string>' "$fixture/route.plist"
-sed 's/<key>ORICHUM_DATA_HOME<\/key>/<key>FOREIGN_DATA_HOME<\/key>/' \
-  "$fixture/route.plist" >"$fixture/foreign-route.plist"
-if claudex_proxy_service_is_owned \
-    "$fixture/foreign-route.plist" "$data_root" "$ROOT"; then
-  printf 'route launch agent without ORICHUM_DATA_HOME was accepted\n' >&2
-  exit 1
-fi
+awk '
+  skip { skip = 0; next }
+  /<key>ORICHUM_DATA_HOME<\/key>/ { skip = 1; next }
+  { print }
+' "$fixture/route.plist" >"$fixture/previous-route.plist"
+claudex_proxy_service_is_owned \
+  "$fixture/previous-route.plist" "$data_root" "$ROOT"
 rg -Fq '<string>io.orichum.headroom</string>' "$fixture/headroom.plist"
 rg -Fq '<string>--anthropic-api-url</string>' "$fixture/headroom.plist"
 rg -Fq '<string>http://127.0.0.1:13457</string>' \
@@ -419,13 +419,10 @@ rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' \
 rg -Fq "$data_root/bin/orichum-route-proxy" "$fixture/route.service"
 rg -Fq "Environment=\"ORICHUM_DATA_HOME=$data_root\"" \
   "$fixture/route.service"
-sed 's/Environment="ORICHUM_DATA_HOME=/Environment="FOREIGN_DATA_HOME=/' \
-  "$fixture/route.service" >"$fixture/foreign-route.service"
-if claudex_proxy_service_is_owned \
-    "$fixture/foreign-route.service" "$data_root" "$ROOT"; then
-  printf 'route systemd unit without ORICHUM_DATA_HOME was accepted\n' >&2
-  exit 1
-fi
+sed '/^Environment="ORICHUM_DATA_HOME=/d' \
+  "$fixture/route.service" >"$fixture/previous-route.service"
+claudex_proxy_service_is_owned \
+  "$fixture/previous-route.service" "$data_root" "$ROOT"
 rg -Fq 'Wants=orichum-cliproxy.service' "$fixture/route.service"
 rg -Fq 'resolve_orichum_python' "$ROOT/bin/orichum-route-proxy"
 rg -Fq -- '--anthropic-api-url http://127.0.0.1:13457' \
