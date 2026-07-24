@@ -22,6 +22,9 @@ for script in \
   bash -n "$ROOT/$script"
 done
 
+rg -Fq 'export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"' \
+  "$ROOT/install.sh"
+
 ports_root="$fixture/ports"
 write_service_ports "$ports_root" 18317 18787 13457
 [[ "$(read_service_ports "$ports_root")" == $'18317\t18787\t13457' ]]

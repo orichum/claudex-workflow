@@ -207,7 +207,7 @@ migrate_legacy_model_config "$WORKFLOW_DATA_ROOT"
 find "$WORKFLOW_DATA_ROOT/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
 chmod 0755 "$WORKFLOW_ROOT/controller/plugin/scripts/"*.sh
 
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"
 headroom_prior_version=
 headroom_prior_binary="$UV_TOOL_BIN_DIR/headroom"
 if [[ -x "$headroom_prior_binary" ]]; then
