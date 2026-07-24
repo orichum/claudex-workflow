@@ -191,13 +191,27 @@ def _model_list(config: ResolvedConfig) -> str:
     return _render_table(("MODEL", "PROVIDER", "FAMILY", "UPSTREAM"), rows)
 
 
+def _stack_list(config: ResolvedConfig) -> str:
+    document = config.documents["model-stacks"]
+    default = document["defaultStack"]
+    rows = [
+        (name, "yes" if name == default else "—", stack["controller"])
+        for name, stack in sorted(document["stacks"].items())
+    ]
+    return _render_table(("STACK", "DEFAULT", "CONTROLLER"), rows)
+
+
 def _resolve_stack(config: ResolvedConfig, requested: str | None) -> dict[str, object]:
     document = config.documents["model-stacks"]
     stack_name = requested or document["defaultStack"]
     try:
         stack = document["stacks"][stack_name]
     except KeyError as error:
-        raise CliError(f"model stack is not configured: {stack_name}") from error
+        available = ", ".join(sorted(document["stacks"]))
+        raise CliError(
+            f"model stack is not configured: {stack_name}; "
+            f"available stacks: {available}"
+        ) from error
     return {
         "stack": stack_name,
         "controller": stack["controller"],
@@ -1562,6 +1576,7 @@ def build_parser() -> argparse.ArgumentParser:
     models = commands.add_parser("models")
     model_action = models.add_subparsers(dest="models_command", required=True)
     model_action.add_parser("list")
+    model_action.add_parser("stacks")
     model_action.add_parser("validate")
     resolve = model_action.add_parser("resolve")
     resolve.add_argument("stack", nargs="?")
@@ -1737,6 +1752,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command == "models":
             if parsed.models_command == "list":
                 print(_model_list(config), end="")
+            elif parsed.models_command == "stacks":
+                print(_stack_list(config), end="")
             elif parsed.models_command == "resolve":
                 print(
                     json.dumps(

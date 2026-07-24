@@ -214,15 +214,17 @@ Resume preserves the original logical model/account binding and Claude session
 identity. The current control plane and live services are validated again, but
 the session is not silently moved to another model family.
 
-To change family or stack, create an explicit child session:
+To change family or stack, first list the stacks that are actually configured,
+then create an explicit child session:
 
 ```bash
-orichum fork oc-s-0123456789abcdef --stack claude-heavy
+orichum models stacks
 orichum fork oc-s-0123456789abcdef \
-  --stack google-heavy \
+  --stack TARGET_STACK \
   --handoff-file ./bounded-handoff.md
 ```
 
+`TARGET_STACK` must be one of the names shown by `orichum models stacks`.
 The parent stays resumable. The child receives only the explicit bounded
 handoff, not a replay of hidden provider state.
 
@@ -230,6 +232,7 @@ handoff, not a replay of hidden provider state.
 
 ```bash
 orichum models list
+orichum models stacks
 orichum models resolve
 orichum models resolve STACK
 orichum models validate

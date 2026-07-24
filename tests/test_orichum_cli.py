@@ -97,6 +97,25 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(resolved["stack"], "balanced")
         self.assertEqual(resolved["controller"], "gpt-5.6-sol")
 
+        status, stdout, stderr = self.run_cli("models", "stacks")
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("STACK", stdout)
+        self.assertIn("DEFAULT", stdout)
+        self.assertIn("balanced", stdout)
+        self.assertIn("gpt-5.6-sol", stdout)
+
+        status, stdout, stderr = self.run_cli(
+            "models", "resolve", "missing-stack"
+        )
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "ERROR: model stack is not configured: missing-stack; "
+            "available stacks: balanced\n",
+        )
+
         status, stdout, stderr = self.run_cli("provider", "list")
         self.assertEqual(status, 0)
         self.assertEqual(stderr, "")

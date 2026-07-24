@@ -123,6 +123,14 @@ models="$(
 rg -Fq 'gpt-5.6-sol' <<<"$models"
 rg -Fq 'claude-opus-4-8' <<<"$models"
 
+stacks="$(
+  ORICHUM_CONFIG_HOME="$ROOT/config" \
+  ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" models stacks
+)"
+rg -Fq 'STACK' <<<"$stacks"
+rg -Fq 'balanced' <<<"$stacks"
+
 contexts="$(
   ORICHUM_CONFIG_HOME="$ROOT/config" \
   ORICHUM_DATA_HOME="$fixture/data" \
@@ -131,6 +139,13 @@ contexts="$(
 rg -Fq 'ACCOUNT POOLS' <<<"$contexts"
 rg -Fq 'MCP_DOCKER' "$ROOT/README.md"
 rg -Fq 'orichum fork' "$ROOT/README.md"
+rg -Fq 'orichum models stacks' "$ROOT/README.md"
+rg -Fq 'TARGET_STACK' "$ROOT/README.md"
+if rg -Fq 'claude-heavy' "$ROOT/README.md" || \
+   rg -Fq 'google-heavy' "$ROOT/README.md"; then
+  printf 'README references model stacks that are not configured\n' >&2
+  exit 1
+fi
 [[ "$(rg -c -- '--max-time 4' \
   "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 4 ]]
 rg -Fq \
