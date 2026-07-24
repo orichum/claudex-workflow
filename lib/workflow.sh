@@ -1161,6 +1161,106 @@ run_rollback_if_active() {
   "$rollback_handler"
 }
 
+private_tool_layout_is_owned() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  [[ "$data_root" == /* && "$data_root" != / ]] && \
+    [[ "$tool_dir" == "$data_root/headroom/tools" ]] && \
+    [[ "$bin_dir" == "$data_root/headroom/bin" ]]
+}
+
+snapshot_private_tree() {
+  local source_path="$1"
+  local snapshot_dir="$2"
+  local snapshot_name="$3"
+  rm -rf -- "$snapshot_dir/$snapshot_name.data"
+  rm -f -- \
+    "$snapshot_dir/$snapshot_name.present" \
+    "$snapshot_dir/$snapshot_name.absent"
+  if [[ -e "$source_path" || -L "$source_path" ]]; then
+    cp -pPR "$source_path" "$snapshot_dir/$snapshot_name.data"
+    : >"$snapshot_dir/$snapshot_name.present"
+  else
+    : >"$snapshot_dir/$snapshot_name.absent"
+  fi
+}
+
+restore_private_tree() {
+  local destination="$1"
+  local snapshot_dir="$2"
+  local snapshot_name="$3"
+  rm -rf -- "$destination"
+  if [[ -f "$snapshot_dir/$snapshot_name.present" ]]; then
+    cp -pPR "$snapshot_dir/$snapshot_name.data" "$destination"
+  elif [[ ! -f "$snapshot_dir/$snapshot_name.absent" ]]; then
+    workflow_die "missing private tool snapshot state for $destination"
+    return 1
+  fi
+}
+
+private_tree_matches_snapshot() {
+  local destination="$1"
+  local snapshot_dir="$2"
+  local snapshot_name="$3"
+  if [[ -f "$snapshot_dir/$snapshot_name.present" ]]; then
+    [[ -e "$destination" || -L "$destination" ]] && \
+      [[ "$(path_mode "$snapshot_dir/$snapshot_name.data")" == \
+         "$(path_mode "$destination")" ]] && \
+      diff -qr -- "$snapshot_dir/$snapshot_name.data" "$destination" \
+        >/dev/null
+  elif [[ -f "$snapshot_dir/$snapshot_name.absent" ]]; then
+    [[ ! -e "$destination" && ! -L "$destination" ]]
+  else
+    workflow_die "missing private tool snapshot state for $destination"
+  fi
+}
+
+snapshot_private_tool_state() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local snapshot_dir="$4"
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || \
+    workflow_die "refusing unsafe private tool snapshot layout"
+  [[ "$snapshot_dir" == /* && "$snapshot_dir" != / ]] || \
+    workflow_die "refusing unsafe private tool snapshot directory"
+  install -d -m 0700 "$snapshot_dir"
+  snapshot_private_tree "$tool_dir/mempalace" \
+    "$snapshot_dir" mempalace-environment
+  snapshot_private_tree "$tool_dir/graphifyy" \
+    "$snapshot_dir" graphify-environment
+  snapshot_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
+}
+
+restore_private_tool_state() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local snapshot_dir="$4"
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || \
+    workflow_die "refusing unsafe private tool restore layout"
+  restore_private_tree "$tool_dir/mempalace" \
+    "$snapshot_dir" mempalace-environment
+  restore_private_tree "$tool_dir/graphifyy" \
+    "$snapshot_dir" graphify-environment
+  restore_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
+}
+
+private_tool_state_matches() {
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local snapshot_dir="$4"
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || return 1
+  private_tree_matches_snapshot "$tool_dir/mempalace" \
+    "$snapshot_dir" mempalace-environment &&
+    private_tree_matches_snapshot "$tool_dir/graphifyy" \
+      "$snapshot_dir" graphify-environment &&
+    private_tree_matches_snapshot "$bin_dir" \
+      "$snapshot_dir" private-tool-bin
+}
+
 snapshot_path() {
   local source_path="$1"
   local snapshot_dir="$2"

@@ -30,6 +30,49 @@ restore_snapshot "$absent" "$snapshot" absent
 snapshot_path_matches "$absent" "$snapshot" absent
 [[ ! -e "$absent" && ! -L "$absent" ]]
 
+private_data="$fixture/private-data"
+private_tools="$private_data/headroom/tools"
+private_bin="$private_data/headroom/bin"
+private_snapshot="$fixture/private-snapshot"
+host_bin="$fixture/host-bin"
+install -d -m 0700 \
+  "$private_tools/mempalace" "$private_tools/graphifyy" \
+  "$private_tools/headroom-ai" "$private_bin" "$host_bin"
+printf 'mempalace-old\n' >"$private_tools/mempalace/version"
+printf 'graphify-old\n' >"$private_tools/graphifyy/version"
+printf 'headroom-old\n' >"$private_tools/headroom-ai/version"
+printf 'mempalace-bin-old\n' >"$private_bin/mempalace-mcp"
+printf 'graphify-bin-old\n' >"$private_bin/graphify-mcp"
+printf 'headroom-bin-old\n' >"$private_bin/headroom"
+printf 'host-tool-unchanged\n' >"$host_bin/graphify-mcp"
+
+snapshot_private_tool_state \
+  "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
+inject_failure_after_all_three_upgrades() {
+  printf 'mempalace-new\n' >"$private_tools/mempalace/version"
+  printf 'graphify-new\n' >"$private_tools/graphifyy/version"
+  printf 'headroom-new\n' >"$private_tools/headroom-ai/version"
+  printf 'mempalace-bin-new\n' >"$private_bin/mempalace-mcp"
+  printf 'graphify-bin-new\n' >"$private_bin/graphify-mcp"
+  printf 'headroom-bin-new\n' >"$private_bin/headroom"
+  printf 'new-entrypoint\n' >"$private_bin/graphify-future"
+  return 72
+}
+if inject_failure_after_all_three_upgrades; then
+  printf 'three-upgrade failure injection unexpectedly succeeded\n' >&2
+  exit 1
+fi
+restore_private_tool_state \
+  "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
+private_tool_state_matches \
+  "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
+[[ "$(<"$private_tools/mempalace/version")" == mempalace-old ]]
+[[ "$(<"$private_tools/graphifyy/version")" == graphify-old ]]
+[[ "$(<"$private_bin/mempalace-mcp")" == mempalace-bin-old ]]
+[[ "$(<"$private_bin/graphify-mcp")" == graphify-bin-old ]]
+[[ ! -e "$private_bin/graphify-future" ]]
+[[ "$(<"$host_bin/graphify-mcp")" == host-tool-unchanged ]]
+
 python3 - "$fixture/occupied.port" <<'PY' &
 import socket
 import sys
@@ -68,6 +111,8 @@ rg -Fq 'from TEST_PORT is unavailable' "$fixture/override.stderr"
 rg -Fq 'snapshot_path "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'orichum_launcher_mutated=true' "$ROOT/install.sh"
 rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
+rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
+rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
 rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
 settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
@@ -85,6 +130,7 @@ end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
 rollback = source[start:end]
 
 stop_route = rollback.index("claudex_proxy_runtime_mutated")
+restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
     'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
 )
@@ -93,6 +139,7 @@ restore_route = rollback.index("restore_claudex_proxy_service")
 restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
+    < restore_private_tools
     < restore_cliproxy
     < restore_endpoint
     < restore_route
@@ -102,6 +149,18 @@ if not (
 
 if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:
     raise SystemExit("final Headroom readiness is not tied to usable route state")
+
+snapshot_private_tools = source.index("snapshot_private_tool_state")
+upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
+upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
+upgrade_headroom = source.index("upgrade_headroom_distribution")
+if not (
+    snapshot_private_tools
+    < upgrade_mempalace
+    < upgrade_graphify
+    < upgrade_headroom
+):
+    raise SystemExit("private tool snapshot does not precede all three upgrades")
 PY
 
 printf 'PASS: Orichum installer rollback and port selection\n'

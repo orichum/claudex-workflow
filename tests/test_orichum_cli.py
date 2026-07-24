@@ -548,7 +548,7 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn("credential", stdout.lower())
         self.assertNotIn("routing", stdout.lower())
 
-    def test_session_routes_maps_frozen_account_ids_to_display_names(
+    def test_session_routes_prints_opaque_account_ids_not_display_names(
         self,
     ) -> None:
         def route(account_id: str, provider: str, model: str):
@@ -591,10 +591,12 @@ class OrichumCliTests(unittest.TestCase):
 
         output = orichum_cli._session_routes(session, accounts)
 
-        self.assertIn("Personal GPT", output)
-        self.assertIn("Work Claude", output)
-        self.assertIn("Antigravity Reserve (antigravity)", output)
-        self.assertNotIn("oc-a-", output)
+        self.assertIn("oc-a-gpt", output)
+        self.assertIn("oc-a-claude", output)
+        self.assertIn("oc-a-antigravity (antigravity)", output)
+        self.assertNotIn("Personal GPT", output)
+        self.assertNotIn("Work Claude", output)
+        self.assertNotIn("Antigravity Reserve", output)
 
     def test_fork_dispatches_fresh_session_with_bounded_handoff(self) -> None:
         prepared = object()

@@ -97,6 +97,16 @@ class MemoryHookTests(unittest.TestCase):
         self.assertEqual(updated["items"][0]["wing"], "xebia")
         self.assertEqual(updated["diary"]["wing"], "xebia")
 
+    def test_unknown_mempalace_tool_fails_closed(self):
+        completed = self.invoke({
+            "tool_name": "mcp__mempalace__mempalace_future_export",
+            "tool_input": {"destination": "outside"},
+        })
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        output = json.loads(completed.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertNotIn("updatedInput", output)
+
     def test_digest_mismatch_fails_closed(self):
         completed = self.invoke({
             "tool_name": "mcp__mempalace__mempalace_search",

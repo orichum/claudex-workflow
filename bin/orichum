@@ -8,6 +8,10 @@ while [[ -L "$launcher_source" ]]; do
   [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
 done
 WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$WORKFLOW_ROOT/lib/workflow.sh"
+WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
+export PATH="$WORKFLOW_DATA_ROOT/headroom/bin:$PATH"
 python_entrypoint=(
   python3 -I -B -c
   'import sys; sys.path.insert(0, sys.argv.pop(1)); import runpy; runpy.run_module("integrations.common.orichum_cli", run_name="__main__")'

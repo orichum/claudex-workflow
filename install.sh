@@ -781,6 +781,9 @@ snapshot_path "$claudex_proxy_service_file" \
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
 snapshot_path "$USER_BIN_DIR/orichum" \
   "$snapshot_dir" orichum-launcher
+snapshot_private_tool_state \
+  "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
+  "$snapshot_dir/private-tools"
 if [[ "$legacy_headroom_service_owned" == true ]]; then
   snapshot_path "$legacy_headroom_service_file" \
     "$snapshot_dir" legacy-headroom-service
@@ -792,6 +795,7 @@ claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
 orichum_launcher_mutated=false
+private_tools_transaction_active=false
 legacy_headroom_stopped=false
 headroom_health_is_ready() {
   local expected_version="$1"
@@ -966,6 +970,15 @@ rollback_install_transaction() {
     fi
   fi
 
+  if [[ "${private_tools_transaction_active:-false}" == true ]]; then
+    restore_private_tool_state \
+      "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
+      "$snapshot_dir/private-tools" || rollback_ready=false
+    private_tool_state_matches \
+      "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
+      "$snapshot_dir/private-tools" || rollback_ready=false
+  fi
+
   if [[ "$cliproxy_transaction_active" == true ]]; then
     if [[ "$platform" == darwin ]]; then
       launchctl bootout "gui/$(id -u)" "$service_file" >/dev/null 2>&1 || true
@@ -1053,6 +1066,7 @@ if [[ -n "$prior_model_generation" ]]; then
     workflow_die "prior model configuration could not be snapshotted"
 fi
 
+private_tools_transaction_active=true
 uv tool install --upgrade mempalace
 if ! mempalace_mcp="$(command -v mempalace-mcp)"; then
   workflow_die "Mempalace installation did not provide mempalace-mcp"
@@ -1509,6 +1523,7 @@ headroom_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=false
+private_tools_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"

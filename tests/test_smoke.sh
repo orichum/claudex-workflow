@@ -29,6 +29,33 @@ observed_cwd="$(
 )"
 [[ "$observed_cwd" == "$caller_dir" ]]
 
+install -d \
+  "$fixture/post-install-system-bin" \
+  "$fixture/post-install-user-bin" \
+  "$fixture/post-install-data/headroom/bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'command -v mempalace-mcp' \
+  'command -v graphify-mcp' \
+  >"$fixture/post-install-system-bin/python3"
+chmod 0755 "$fixture/post-install-system-bin/python3"
+for private_tool in mempalace-mcp graphify-mcp; do
+  printf '#!/usr/bin/env bash\nexit 0\n' \
+    >"$fixture/post-install-data/headroom/bin/$private_tool"
+  chmod 0755 "$fixture/post-install-data/headroom/bin/$private_tool"
+done
+ln -s "$ROOT/bin/orichum" "$fixture/post-install-user-bin/orichum"
+post_install_tools="$(
+  ORICHUM_DATA_HOME="$fixture/post-install-data" \
+  PATH="$fixture/post-install-user-bin:$fixture/post-install-system-bin:/usr/bin:/bin" \
+    "$fixture/post-install-user-bin/orichum" config
+)"
+[[ "$post_install_tools" == "$(
+  printf '%s\n' \
+    "$fixture/post-install-data/headroom/bin/mempalace-mcp" \
+    "$fixture/post-install-data/headroom/bin/graphify-mcp"
+)" ]]
+
 forwarded="$(
   cd "$caller_dir"
   CAPTURE_ARGS=1 PATH="$fixture/fake-bin:$PATH" \
@@ -102,13 +129,18 @@ for required_contract in \
     'timeout-minutes: 30' \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
     'sudo apt-get install --yes ripgrep' \
-    '$ORICHUM_DATA_HOME/headroom/bin' \
+    'PATH="$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
     'systemctl --user show orichum-headroom.service --property=ExecStart --value' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'Verify idempotent upgrade'; do
   rg -Fq "$required_contract" "$amd64_workflow"
 done
+if sed -n '/>>"[$]GITHUB_PATH"/,+3p' "$amd64_workflow" | \
+    rg -Fq '$ORICHUM_DATA_HOME/headroom/bin'; then
+  printf 'AMD64 acceptance still adds the private tool directory to GITHUB_PATH\n' >&2
+  exit 1
+fi
 set +e
 rg -q 'secrets[.]|\$\{\{[[:space:]]*secrets' "$amd64_workflow"
 secret_scan_rc=$?

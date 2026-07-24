@@ -258,7 +258,6 @@ def _session_list(sessions: Sequence[LogicalSession]) -> str:
 def _session_routes(
     session: LogicalSession, accounts: Sequence[Account]
 ) -> str:
-    names = {account.id: account.name for account in accounts}
     bindings = (
         ("controller", session.controller),
         *((role, session.agents[role]) for role in ROLES),
@@ -267,7 +266,7 @@ def _session_routes(
     for role, binding in bindings:
         primary = binding.primary
         fallback = (
-            f"{names.get(route.account_id, '<unavailable>')} ({route.provider})"
+            f"{route.account_id} ({route.provider})"
             for route in binding.fallbacks[:1]
         )
         fallback_name = next(fallback, "—")
@@ -276,7 +275,7 @@ def _session_routes(
                 role,
                 primary.logical_model,
                 primary.provider,
-                names.get(primary.account_id, "<unavailable>"),
+                primary.account_id,
                 fallback_name,
             )
         )

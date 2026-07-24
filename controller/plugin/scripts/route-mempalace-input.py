@@ -28,6 +28,10 @@ WING_TOOLS = {
     "mempalace_diary_read",
 }
 
+GLOBAL_TOOLS = {
+    "mempalace_get_taxonomy",
+}
+
 
 def emit(payload: dict) -> None:
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
@@ -91,6 +95,10 @@ def main() -> int:
         if isinstance(diary, dict):
             diary["wing"] = wing
             changed = True
+    elif short_name in GLOBAL_TOOLS:
+        return 0
+    else:
+        return deny()
 
     if changed:
         emit({"hookSpecificOutput": {
