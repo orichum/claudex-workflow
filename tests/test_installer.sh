@@ -39,7 +39,7 @@ curl() {
   [[ -n "$output_file" ]]
   printf '{"tag_name":"v4.5.6"}\n' >"$output_file"
 }
-fetch_latest_github_release example/tool "$anonymous_release"
+GH_TOKEN= fetch_latest_github_release example/tool "$anonymous_release"
 [[ "$(jq -r .tag_name "$anonymous_release")" == v4.5.6 ]]
 unset -f gh curl
 
