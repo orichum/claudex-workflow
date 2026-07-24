@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""Transparent bounded same-family recovery proxy for Orichum routes."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+import socket
+import subprocess
+import threading
+import time
+from typing import Callable, Mapping
+
+from .model_routing import ROLES
+from .orichum_sessions import LogicalSessionError
+
+
+RETRYABLE_STATUSES = frozenset({401, 403, 408, 429, 500, 502, 503, 504})
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_CONCURRENT_REQUESTS = 32
+CLIENT_READ_TIMEOUT_SECONDS = 30
+_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+
+class RouteProxyError(RuntimeError):
+    """A request cannot be proxied without violating the recovery contract."""
+
+
+class RequestTooLarge(RouteProxyError):
+    """An inbound request exceeds the local proxy safety bound."""
+
+
+@dataclass(frozen=True)
+class ProxyConfig:
+    upstream_port: int
+    state_home: Path
+    data_home: Path | None = None
+    cooldown_seconds: int = 60
+
+
+class RouteIndex:
+    def __init__(self, state_home: Path):
+        self.state_home = Path(state_home)
+
+    def fallback_for(
+        self, session_id: str | None, primary_model: str
+    ) -> str | None:
+        if session_id is None:
+            return None
+        from .orichum_sessions import load_logical_session
+
+        session = load_logical_session(self.state_home, session_id)
+        bindings = (
+            session.controller,
+            *(session.agents[role] for role in ROLES),
+        )
+        matches = tuple(
+            binding
+            for binding in bindings
+            if binding.primary.upstream_model == primary_model
+        )
+        if not matches:
+            return None
+        fallbacks = {
+            binding.fallbacks[0].upstream_model
+            for binding in matches
+            if binding.fallbacks
+        }
+        return next(iter(fallbacks)) if len(fallbacks) == 1 else None
+
+
+class Cooldowns:
+    def __init__(self, seconds: int, clock: Callable[[], float] = time.monotonic):
+        self.seconds = seconds
+        self.clock = clock
+        self._until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def active(self, model: str) -> bool:
+        now = self.clock()
+        with self._lock:
+            until = self._until.get(model, 0)
+            if until <= now:
+                self._until.pop(model, None)
+                return False
+            return True
+
+    def trip(self, model: str) -> None:
+        with self._lock:
+            self._until[model] = self.clock() + self.seconds
+
+    def clear(self, model: str) -> None:
+        with self._lock:
+            self._until.pop(model, None)
+
+
+def _request_model(body: bytes) -> str | None:
+    try:
+        document = json.loads(body)
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return None
+    model = document.get("model") if isinstance(document, dict) else None
+    return model if isinstance(model, str) else None
+
+
+def _replace_model(body: bytes, expected: str, replacement: str) -> bytes:
+    try:
+        document = json.loads(body)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as failure:
+        raise RouteProxyError("request body is not valid JSON") from failure
+    if not isinstance(document, dict) or document.get("model") != expected:
+        raise RouteProxyError("request model changed before recovery")
+    document["model"] = replacement
+    return json.dumps(
+        document, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+def _upstream_path(path: str) -> str:
+    profile_prefix = "/proxy/gpt"
+    route_path, separator, query = path.partition("?")
+    if route_path == profile_prefix:
+        normalized = "/"
+    elif route_path.startswith(f"{profile_prefix}/"):
+        normalized = route_path[len(profile_prefix) :]
+    elif route_path.startswith("/proxy/"):
+        raise RouteProxyError("request names an unowned Claudex profile")
+    else:
+        normalized = route_path
+    return normalized + (f"?{query}" if separator else "")
+
+
+def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
+    raw_length = handler.headers.get("Content-Length")
+    if raw_length is None:
+        if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            chunks = []
+            total = 0
+            while True:
+                line = handler.rfile.readline(128)
+                try:
+                    size = int(line.split(b";", 1)[0].strip(), 16)
+                except ValueError as failure:
+                    raise RouteProxyError("invalid chunked request") from failure
+                if size == 0:
+                    while handler.rfile.readline(8192) not in (b"\r\n", b"\n", b""):
+                        pass
+                    break
+                if size < 0 or total + size > MAX_REQUEST_BYTES:
+                    raise RequestTooLarge("request body is too large")
+                chunks.append(handler.rfile.read(size))
+                if len(chunks[-1]) != size:
+                    raise RouteProxyError("request body ended early")
+                total += size
+                if handler.rfile.read(2) != b"\r\n":
+                    raise RouteProxyError("invalid chunked request boundary")
+            return b"".join(chunks)
+        return b""
+    try:
+        length = int(raw_length, 10)
+    except ValueError as failure:
+        raise RouteProxyError("invalid Content-Length") from failure
+    if length < 0:
+        raise RouteProxyError("invalid Content-Length")
+    if length > MAX_REQUEST_BYTES:
+        raise RequestTooLarge("request body is too large")
+    body = handler.rfile.read(length)
+    if len(body) != length:
+        raise RouteProxyError("request body ended early")
+    return body
+
+
+class RouteProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "OrichumRouteProxy/1"
+    sys_version = ""
+
+    def log_message(self, _format: str, *_arguments: object) -> None:
+        return
+
+    def _upstream(
+        self, body: bytes
+    ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+        config: ProxyConfig = self.server.proxy_config
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", config.upstream_port, timeout=300
+        )
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in _HOP_HEADERS
+            and key.lower() not in {"host", "content-length"}
+            and key.lower() != "x-orichum-session-id"
+        }
+        headers["Content-Length"] = str(len(body))
+        headers["Connection"] = "close"
+        connected = None
+        try:
+            connected = socket.create_connection(
+                ("127.0.0.1", config.upstream_port), timeout=3
+            )
+            connected.settimeout(300)
+            client_host, client_port = connected.getsockname()
+            if client_host != "127.0.0.1":
+                raise RouteProxyError("upstream connection is not loopback")
+            if config.data_home is not None:
+                verifier = (
+                    Path(__file__).resolve().parents[2]
+                    / "bin"
+                    / "orichum-verify-cliproxy"
+                )
+                try:
+                    completed = subprocess.run(
+                        [
+                            str(verifier),
+                            str(config.data_home),
+                            str(config.upstream_port),
+                            str(client_port),
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=3,
+                    )
+                except (OSError, subprocess.SubprocessError) as failure:
+                    raise RouteProxyError(
+                        "upstream ownership could not be verified"
+                    ) from failure
+                if completed.returncode != 0:
+                    raise RouteProxyError(
+                        "upstream connection is not Orichum-owned"
+                    )
+            connection.sock = connected
+            connected = None
+            connection.request(
+                self.command,
+                _upstream_path(self.path),
+                body=body,
+                headers=headers,
+            )
+            return connection, connection.getresponse()
+        except Exception:
+            if connected is not None:
+                connected.close()
+            connection.close()
+            raise
+
+    def _send_response(
+        self,
+        connection: http.client.HTTPConnection,
+        response: http.client.HTTPResponse,
+    ) -> None:
+        try:
+            self._response_started = True
+            self.send_response_only(response.status, response.reason)
+            for key, value in response.getheaders():
+                if (
+                    key.lower() not in _HOP_HEADERS
+                    and key.lower() not in {"content-length"}
+                ):
+                    self.send_header(key, value)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            while True:
+                block = response.read(65536)
+                if not block:
+                    break
+                self.wfile.write(block)
+                self.wfile.flush()
+        finally:
+            connection.close()
+
+    def _safe_error(self, status: int, message: str) -> None:
+        if getattr(self, "_response_started", False):
+            self.close_connection = True
+            return
+        self.close_connection = True
+        self.send_error(status, message)
+
+    def _handle(self) -> None:
+        self._response_started = False
+        self.connection.settimeout(CLIENT_READ_TIMEOUT_SECONDS)
+        try:
+            body = _read_request_body(self)
+            primary = _request_model(body)
+            session_id = self.headers.get("X-Orichum-Session-ID")
+            index: RouteIndex = self.server.route_index
+            cooldowns: Cooldowns = self.server.cooldowns
+            fallback = (
+                index.fallback_for(session_id, primary)
+                if primary is not None
+                else None
+            )
+            if (
+                primary is not None
+                and fallback is not None
+                and cooldowns.active(primary)
+            ):
+                fallback_body = _replace_model(body, primary, fallback)
+                connection, response = self._upstream(fallback_body)
+                self._send_response(connection, response)
+                return
+
+            connection, response = self._upstream(body)
+            if (
+                primary is not None
+                and fallback is not None
+                and response.status in RETRYABLE_STATUSES
+            ):
+                connection.close()
+                cooldowns.trip(primary)
+                fallback_body = _replace_model(body, primary, fallback)
+                connection, response = self._upstream(fallback_body)
+            elif primary is not None and response.status < 400:
+                cooldowns.clear(primary)
+            self._send_response(connection, response)
+        except RequestTooLarge:
+            self._safe_error(413, "Orichum request body is too large")
+        except (RouteProxyError, LogicalSessionError):
+            self._safe_error(502, "Orichum route state is unavailable")
+        except (http.client.HTTPException, TimeoutError, OSError):
+            self._safe_error(502, "Orichum upstream connection failed")
+
+    do_DELETE = _handle
+    do_GET = _handle
+    do_PATCH = _handle
+    do_POST = _handle
+    do_PUT = _handle
+
+
+class RouteProxyServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        config: ProxyConfig,
+        *,
+        route_index: RouteIndex | None = None,
+        cooldowns: Cooldowns | None = None,
+    ):
+        if address[0] != "127.0.0.1":
+            raise RouteProxyError("route proxy must bind to 127.0.0.1")
+        self.proxy_config = config
+        self.route_index = route_index or RouteIndex(config.state_home)
+        self.cooldowns = cooldowns or Cooldowns(config.cooldown_seconds)
+        self.request_slots = threading.BoundedSemaphore(
+            MAX_CONCURRENT_REQUESTS
+        )
+        super().__init__(address, RouteProxyHandler)
+
+    def process_request(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        if not self.request_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+            finally:
+                request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.request_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.request_slots.release()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="orichum-route-proxy")
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--upstream-port", required=True, type=int)
+    parser.add_argument("--state-home", required=True, type=Path)
+    parser.add_argument("--data-home", required=True, type=Path)
+    arguments = parser.parse_args()
+    for port in (arguments.port, arguments.upstream_port):
+        if port < 1024 or port > 65535:
+            raise SystemExit("ports must be between 1024 and 65535")
+    server = RouteProxyServer(
+        ("127.0.0.1", arguments.port),
+        ProxyConfig(
+            arguments.upstream_port,
+            arguments.state_home,
+            arguments.data_home,
+        ),
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

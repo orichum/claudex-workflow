@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "providers": {
+    "anthropic": {
+      "type": "anthropic",
+      "transport": "cliproxy",
+      "authType": "claude",
+      "families": ["claude"]
+    },
+    "antigravity": {
+      "type": "openai-compatible",
+      "transport": "cliproxy",
+      "authType": "antigravity",
+      "families": ["claude", "google"]
+    },
+    "kimi": {
+      "type": "openai-compatible",
+      "transport": "cliproxy",
+      "authType": "kimi",
+      "families": ["kimi"]
+    },
+    "openai": {
+      "type": "openai-compatible",
+      "transport": "cliproxy",
+      "authType": "codex",
+      "families": ["gpt"]
+    }
+  },
+  "accountPools": {
+    "xebia": {
+      "providers": ["anthropic", "antigravity", "openai"]
+    },
+    "realtime": {
+      "providers": ["anthropic", "antigravity", "openai"]
+    },
+    "shared": {
+      "providers": ["anthropic", "antigravity", "kimi", "openai"]
+    }
+  },
+  "fallbackRoutes": {
+    "claude": ["anthropic", "antigravity"],
+    "google": ["antigravity"],
+    "gpt": ["openai"],
+    "kimi": ["kimi"]
+  }
+}

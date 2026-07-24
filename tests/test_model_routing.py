@@ -93,6 +93,16 @@ class ModelRoutingTests(unittest.TestCase):
             {role: "fallback/" + role for role in ROLES},
         )
 
+    def test_routing_view_accepts_focused_model_stacks_document(self) -> None:
+        focused = dict(self.routing)
+        focused["models"] = {}
+        self.routing_path.write_text(json.dumps(focused), encoding="utf-8")
+
+        loaded = model_routing.load_routing_view(self.routing_path)
+
+        self.assertEqual(loaded["defaultStack"], "balanced")
+        self.assertNotIn("models", loaded)
+
     def test_materialized_plugin_rewrites_only_model_frontmatter(self) -> None:
         plugin = materialize_runtime_plugin(
             self.source_plugin, self.run_dir / "plugin", self.effective

@@ -19,7 +19,7 @@ from integrations.common.model_routing import (
     ROLES,
     RoutingError,
     load_catalog,
-    load_routing,
+    load_routing_view,
     materialize_runtime_plugin,
     resolve_effective,
     validate_model_id,
@@ -458,6 +458,67 @@ def create_session(
         data_root = require_owned_component(workflow_root, "runtime", private=False)
     else:
         data_root = _require_directory(_absolute_lexical(data_root), expected_mode=0o700)
+    context = resolve_context(load_config(config_path), launch_dir)
+    routing = load_routing_view(routing_path)
+    route = context.get("route")
+    requested_stack = (
+        route.get("modelStack")
+        if isinstance(route, dict)
+        and isinstance(route.get("modelStack"), str)
+        else None
+    )
+    effective = resolve_effective(
+        routing, load_catalog(models_path), requested_stack
+    )
+    return _materialize_session(
+        workflow_root,
+        data_root,
+        context,
+        effective,
+        plugin_source,
+        verification_data_root,
+    )
+
+
+def create_resolved_session(
+    workflow_root: Path,
+    *,
+    data_root: Path,
+    context: dict[str, object],
+    effective: EffectiveStack,
+    plugin_source: Path,
+) -> SessionPaths:
+    """Materialize one resolved Orichum run through hardened run machinery."""
+    workflow_root = _validated_workflow_root(workflow_root)
+    data_root = _require_directory(
+        _absolute_lexical(data_root), expected_mode=0o700
+    )
+    try:
+        effective = _parse_effective_models(
+            _canonical_json_bytes(effective.as_json())
+        )
+    except (AttributeError, TypeError) as error:
+        raise SessionError("resolved effective models are invalid") from error
+    if not isinstance(context, dict):
+        raise SessionError("resolved session context is invalid")
+    return _materialize_session(
+        workflow_root,
+        data_root,
+        context,
+        effective,
+        plugin_source,
+        data_root,
+    )
+
+
+def _materialize_session(
+    workflow_root: Path,
+    data_root: Path,
+    context: dict[str, object],
+    effective: EffectiveStack,
+    plugin_source: Path,
+    verification_data_root: Optional[Path],
+) -> SessionPaths:
     state = require_owned_component(data_root, "state", private=True, create=True)
     sessions = require_owned_component(state, "sessions", private=True, create=True)
     run_dir: Optional[Path] = None
@@ -474,21 +535,9 @@ def create_session(
             sessions, run_dir, expected_mode=0o700
         )
         context_file = run_dir / "context.json"
-        context = resolve_context(load_config(config_path), launch_dir)
         context_bytes = atomic_json(context_file, context, 0o600)
         context_sha256 = hashlib.sha256(context_bytes).hexdigest()
 
-        routing = load_routing(routing_path)
-        route = context.get("route")
-        requested_stack = (
-            route.get("modelStack")
-            if isinstance(route, dict)
-            and isinstance(route.get("modelStack"), str)
-            else None
-        )
-        effective = resolve_effective(
-            routing, load_catalog(models_path), requested_stack
-        )
         effective_file = run_dir / "effective-models.json"
         effective_bytes = atomic_json(
             effective_file, effective.as_json(), 0o600

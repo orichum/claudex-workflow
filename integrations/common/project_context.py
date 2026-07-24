@@ -18,7 +18,12 @@ from .context_population import (
     populate_context,
     render_population_result,
 )
-from .model_routing import RoutingError, load_routing, validate_stack_name
+from .github_identity import GithubIdentityError, validate_github_account
+from .model_routing import (
+    RoutingError,
+    load_routing_view,
+    validate_stack_name,
+)
 
 
 class ContextError(RuntimeError):
@@ -28,7 +33,11 @@ class ContextError(RuntimeError):
 _CONTEXT_REQUIRED_KEYS = {
     "root", "dockerProfile", "memoryPalace", "memoryWing"
 }
-_CONTEXT_OPTIONAL_KEYS = {"modelStack"}
+_CONTEXT_OPTIONAL_KEYS = {
+    "modelStack",
+    "accountPools",
+    "githubAccount",
+}
 
 
 def _context_object(value: object, label: str) -> dict:
@@ -178,10 +187,23 @@ def _structural_existing_ancestor_path(
     return canonical
 
 
-def _validate_config_value(
-    raw: object, home: Path, stacks: Optional[dict] = None
+def validate_config_document(
+    raw: object,
+    home: Path,
+    stacks: Optional[dict] = None,
+    account_pools: Optional[set[str]] = None,
 ) -> None:
-    config = _require_exact_keys(raw, {"contexts"}, "configuration")
+    """Validate an already-parsed portable project-context document."""
+    if not isinstance(raw, dict):
+        raise ContextError("configuration must be an object")
+    focused = "schemaVersion" in raw
+    expected = {"schemaVersion", "contexts"} if focused else {"contexts"}
+    config = _require_exact_keys(raw, expected, "configuration")
+    if focused and (
+        type(config["schemaVersion"]) is not int
+        or config["schemaVersion"] != 1
+    ):
+        raise ContextError("schemaVersion must be exactly 1")
     raw_contexts = config["contexts"]
     if not isinstance(raw_contexts, list):
         raise ContextError("contexts must be a list")
@@ -195,6 +217,28 @@ def _validate_config_value(
         palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
         _require_optional_non_blank(context["dockerProfile"], "dockerProfile")
         _model_stack(context.get("modelStack"), stacks)
+        try:
+            validate_github_account(context.get("githubAccount"))
+        except GithubIdentityError as error:
+            raise ContextError("githubAccount is invalid") from error
+        pools = context.get("accountPools")
+        if focused:
+            if (
+                not isinstance(pools, list)
+                or not pools
+                or any(
+                    not isinstance(pool, str) or not pool.strip()
+                    for pool in pools
+                )
+                or len(pools) != len(set(pools))
+            ):
+                raise ContextError("accountPools must be a non-empty unique list")
+            if account_pools is not None and any(
+                pool not in account_pools for pool in pools
+            ):
+                raise ContextError("accountPools names an unknown pool")
+        elif pools is not None:
+            raise ContextError("accountPools requires schemaVersion")
         memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
         if any(_contains(existing_root, root) or _contains(root, existing_root)
                for existing_root in lexical_roots):
@@ -219,7 +263,7 @@ def validate_config_structure(
     except (json.JSONDecodeError, UnicodeError, OSError) as error:
         raise ContextError("configuration could not be parsed") from error
 
-    _validate_config_value(raw, home)
+    validate_config_document(raw, home)
     for context in raw["contexts"]:
         root = _structural_path(context["root"], home, "root")
         palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
@@ -336,6 +380,92 @@ def resolve_context(config: dict, launch_dir: Path) -> dict:
     }
 
 
+def resolve_control_plane_context(
+    project_document: object,
+    launch_dir: Path,
+    home: Optional[Path] = None,
+) -> dict:
+    """Resolve the validated Orichum project document without a temp file."""
+    home = Path.home() if home is None else Path(home)
+    document = _require_exact_keys(
+        project_document, {"schemaVersion", "contexts"}, "projects"
+    )
+    if (
+        type(document["schemaVersion"]) is not int
+        or document["schemaVersion"] != 1
+        or not isinstance(document["contexts"], list)
+    ):
+        raise ContextError("projects document has invalid schema")
+    normalized = []
+    pools_by_root: dict[str, tuple[str, ...]] = {}
+    canonical_roots: set[Path] = set()
+    for index, raw in enumerate(document["contexts"]):
+        if not isinstance(raw, dict):
+            raise ContextError(f"project context {index} must be an object")
+        context = raw
+        expected = {
+            "root",
+            "dockerProfile",
+            "modelStack",
+            "accountPools",
+            "memoryPalace",
+            "memoryWing",
+        }
+        if set(context) not in (expected, expected | {"githubAccount"}):
+            raise ContextError(f"project context {index} has invalid fields")
+        pools = context["accountPools"]
+        if (
+            not isinstance(pools, list)
+            or not pools
+            or any(not isinstance(pool, str) or not pool for pool in pools)
+            or len(pools) != len(set(pools))
+        ):
+            raise ContextError("project accountPools are invalid")
+        root = _expand(context["root"], home)
+        try:
+            root = root.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ContextError("configured root must resolve to a directory") from error
+        if not root.is_dir():
+            raise ContextError("configured root must resolve to a directory")
+        if root == Path(root.anchor) or root == home.resolve(strict=False):
+            raise ContextError("configured root is unsafe")
+        if any(
+            _contains(existing, root) or _contains(root, existing)
+            for existing in canonical_roots
+        ):
+            raise ContextError("configured roots must not overlap")
+        canonical_roots.add(root)
+        palace = _expand(context["memoryPalace"], home)
+        normalized.append(
+            {
+                "root": root,
+                "dockerProfile": _require_optional_non_blank(
+                    context["dockerProfile"], "dockerProfile"
+                ),
+                "modelStack": _model_stack(context["modelStack"]),
+                "githubAccount": validate_github_account(
+                    context.get("githubAccount")
+                ),
+                "memoryPalace": palace,
+                "memoryWing": _require_non_blank(
+                    context["memoryWing"], "memoryWing"
+                ),
+            }
+        )
+        pools_by_root[str(root)] = tuple(pools)
+    resolved = resolve_context({"contexts": normalized}, launch_dir)
+    route = resolved.get("route")
+    if isinstance(route, dict):
+        route["accountPools"] = list(pools_by_root[route["contextRootReal"]])
+        route["githubAccount"] = next(
+            context["githubAccount"]
+            for context in normalized
+            if str(context["root"]) == route["contextRootReal"]
+        )
+    return resolved
+
+
 def _atomic_json(output: Path, payload: dict) -> None:
     output = Path(output)
     file_descriptor, temporary_name = tempfile.mkstemp(
@@ -368,14 +498,17 @@ def _descriptor_is_open(file_descriptor: int) -> bool:
 
 
 def _read_context_document(
-    config_path: Path, home: Path, stacks: Optional[dict] = None
+    config_path: Path,
+    home: Path,
+    stacks: Optional[dict] = None,
+    account_pools: Optional[set[str]] = None,
 ) -> dict:
     try:
         with Path(config_path).open(encoding="utf-8") as handle:
             document = json.load(handle)
     except (json.JSONDecodeError, UnicodeError, OSError) as error:
         raise ContextError("configuration could not be parsed") from error
-    _validate_config_value(document, home, stacks)
+    validate_config_document(document, home, stacks, account_pools)
     return document
 
 
@@ -465,9 +598,12 @@ def _prepare_palace(palace: Path) -> None:
 
 
 def _validate_context_candidate(
-    document: dict, home: Path, stacks: Optional[dict] = None
+    document: dict,
+    home: Path,
+    stacks: Optional[dict] = None,
+    account_pools: Optional[set[str]] = None,
 ) -> None:
-    _validate_config_value(document, home, stacks)
+    validate_config_document(document, home, stacks, account_pools)
     canonical_roots = []
     canonical_palaces = set()
     for context in document["contexts"]:
@@ -506,7 +642,10 @@ def _find_canonical_context_index(
 
 
 def _build_add_candidate(
-    document: dict, parsed: argparse.Namespace, home: Path
+    document: dict,
+    parsed: argparse.Namespace,
+    home: Path,
+    account_pools: Optional[set[str]] = None,
 ) -> tuple[dict, dict, Path, Path]:
     root = _context_root(parsed.root, home, must_exist=True)
     palace_value = parsed.palace or f"~/.mempalace/palaces/{root.name}"
@@ -518,7 +657,21 @@ def _build_add_candidate(
         "memoryPalace": palace_value if parsed.palace is None else str(palace),
         "memoryWing": parsed.wing or root.name,
     }
-    candidate = {"contexts": [*document["contexts"], context]}
+    if "schemaVersion" in document:
+        context["githubAccount"] = validate_github_account(
+            parsed.github_account
+        )
+    if "schemaVersion" in document:
+        requested = list(parsed.pool or ())
+        if not requested:
+            if parsed.docker and parsed.docker in (account_pools or set()):
+                requested.append(parsed.docker)
+            requested.append("shared")
+        context["accountPools"] = list(dict.fromkeys(requested))
+    candidate = {
+        **({"schemaVersion": 1} if "schemaVersion" in document else {}),
+        "contexts": [*document["contexts"], context],
+    }
     return candidate, context, root, palace
 
 
@@ -527,12 +680,17 @@ def _render_context_table(contexts: list[dict], default_stack: str) -> str:
         ("PROJECT ROOT", "root"),
         ("MODEL STACK", "modelStack"),
         ("MCP_DOCKER PROFILE", "dockerProfile"),
+        ("GITHUB ACCOUNT", "githubAccount"),
         ("MEMPALACE PATH", "memoryPalace"),
         ("MEMPALACE WING", "memoryWing"),
     )
 
     def render_value(context: dict, key: str) -> str:
-        value = context.get(key) if key == "modelStack" else context[key]
+        value = (
+            context.get(key)
+            if key in {"modelStack", "githubAccount"}
+            else context[key]
+        )
         if key == "modelStack" and value is None:
             return f"{default_stack} (global)"
         return "—" if value is None else value
@@ -561,10 +719,35 @@ def _print_population_progress(message: str) -> None:
     print(message, flush=True)
 
 
+def _load_context_routing(path: Path) -> dict[str, object]:
+    return load_routing_view(path)
+
+
+def _load_account_pool_names(path: Optional[Path]) -> Optional[set[str]]:
+    if path is None:
+        return None
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError, OSError) as error:
+        raise ContextError("providers configuration could not be parsed") from error
+    if (
+        not isinstance(raw, dict)
+        or type(raw.get("schemaVersion")) is not int
+        or raw["schemaVersion"] != 1
+        or not isinstance(raw.get("accountPools"), dict)
+    ):
+        raise ContextError("providers configuration has invalid accountPools")
+    pools = set(raw["accountPools"])
+    if not pools or any(not isinstance(pool, str) or not pool for pool in pools):
+        raise ContextError("providers configuration has invalid accountPools")
+    return pools
+
+
 def context_main(arguments: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="claudex-context")
+    parser = argparse.ArgumentParser(prog="orichum context")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--routing-config", required=True, type=Path)
+    parser.add_argument("--providers-config", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")
     add = commands.add_parser("add")
@@ -573,6 +756,8 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     add.add_argument("--palace")
     add.add_argument("--wing")
     add.add_argument("--model-stack")
+    add.add_argument("--pool", action="append")
+    add.add_argument("--github-account")
     populate = commands.add_parser("populate")
     populate.add_argument("root")
     update = commands.add_parser("update")
@@ -581,6 +766,10 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     update.add_argument("--palace")
     update.add_argument("--wing")
     update.add_argument("--model-stack")
+    update.add_argument("--pool", action="append")
+    update.add_argument("--no-docker", action="store_true")
+    update.add_argument("--github-account")
+    update.add_argument("--no-github-account", action="store_true")
     update.add_argument("--inherit-model-stack", action="store_true")
     remove = commands.add_parser("remove")
     remove.add_argument("root")
@@ -590,8 +779,9 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     home = Path.home()
 
     try:
-        routing = load_routing(parsed.routing_config)
+        routing = _load_context_routing(parsed.routing_config)
         routing_stacks = routing["stacks"]
+        account_pools = _load_account_pool_names(parsed.providers_config)
         requested_stack = getattr(parsed, "model_stack", None)
         if requested_stack is not None:
             requested_stack = _model_stack(requested_stack, routing_stacks)
@@ -609,10 +799,10 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             with _context_lock(parsed.config):
                 document = _read_context_document(parsed.config, home)
                 candidate, context, root, palace = _build_add_candidate(
-                    document, parsed, home
+                    document, parsed, home, account_pools
                 )
                 _validate_context_candidate(
-                    candidate, home, routing_stacks
+                    candidate, home, routing_stacks, account_pools
                 )
 
             _prepare_palace(palace)
@@ -626,10 +816,15 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             with _context_lock(parsed.config):
                 current = _read_context_document(parsed.config, home)
                 final_candidate = {
+                    **(
+                        {"schemaVersion": 1}
+                        if "schemaVersion" in current
+                        else {}
+                    ),
                     "contexts": [*current["contexts"], context]
                 }
                 _validate_context_candidate(
-                    final_candidate, home, routing_stacks
+                    final_candidate, home, routing_stacks, account_pools
                 )
                 _write_context_document(parsed.config, final_candidate)
 
@@ -640,6 +835,7 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             with _context_lock(parsed.config):
                 document = _read_context_document(
                     parsed.config, home, routing_stacks
+                    , account_pools
                 )
                 root = _context_root(parsed.root, home, must_exist=True)
                 index = _find_canonical_context_index(
@@ -673,11 +869,12 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                 routing_stacks
                 if parsed.command in ("list", "validate")
                 else None,
+                account_pools,
             )
             contexts = document["contexts"]
             if parsed.command == "validate":
                 _validate_context_candidate(
-                    document, home, routing_stacks
+                    document, home, routing_stacks, account_pools
                 )
                 return 0
             if parsed.command == "list":
@@ -704,14 +901,20 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                             parsed.palace,
                             parsed.wing,
                             parsed.model_stack,
+                            parsed.pool,
+                            parsed.github_account,
                         )
                     )
                     and not parsed.inherit_model_stack
+                    and not parsed.no_docker
+                    and not parsed.no_github_account
                 ):
                     raise ContextError("update requires a replacement field")
                 replacement = dict(contexts[index])
                 if parsed.docker is not None:
                     replacement["dockerProfile"] = parsed.docker
+                elif parsed.no_docker:
+                    replacement["dockerProfile"] = None
                 if parsed.palace is not None:
                     palace = _context_palace(parsed.palace, home)
                     replacement["memoryPalace"] = str(palace)
@@ -723,10 +926,31 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     replacement["modelStack"] = parsed.model_stack
                 elif parsed.inherit_model_stack:
                     replacement["modelStack"] = None
-                candidate = {"contexts": list(contexts)}
+                if parsed.github_account is not None:
+                    replacement["githubAccount"] = validate_github_account(
+                        parsed.github_account
+                    )
+                elif parsed.no_github_account:
+                    replacement["githubAccount"] = None
+                if parsed.pool is not None:
+                    if "schemaVersion" not in document:
+                        raise ContextError(
+                            "--pool requires a focused projects configuration"
+                        )
+                    replacement["accountPools"] = list(
+                        dict.fromkeys(parsed.pool)
+                    )
+                candidate = {
+                    **(
+                        {"schemaVersion": 1}
+                        if "schemaVersion" in document
+                        else {}
+                    ),
+                    "contexts": list(contexts),
+                }
                 candidate["contexts"][index] = replacement
                 _validate_context_candidate(
-                    candidate, home, routing_stacks
+                    candidate, home, routing_stacks, account_pools
                 )
                 if palace is not None:
                     _prepare_palace(palace)
@@ -742,9 +966,18 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     raise ContextError("remove requires confirmation") from error
                 if confirmation != "REMOVE":
                     raise ContextError("remove requires confirmation")
-            candidate = {"contexts": list(contexts)}
+            candidate = {
+                **(
+                    {"schemaVersion": 1}
+                    if "schemaVersion" in document
+                    else {}
+                ),
+                "contexts": list(contexts),
+            }
             del candidate["contexts"][index]
-            _validate_config_value(candidate, home, routing_stacks)
+            validate_config_document(
+                candidate, home, routing_stacks, account_pools
+            )
             _write_context_document(parsed.config, candidate)
             return 0
     except (ContextError, PopulationError, RoutingError) as error:

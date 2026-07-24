@@ -8,8 +8,10 @@ while [[ -L "$launcher_source" ]]; do
   [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
 done
 WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+CONFIG_ROOT="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
 cd "$WORKFLOW_ROOT"
 exec python3 -B -m integrations.common.project_context context \
-  --config "$WORKFLOW_ROOT/controller/project-context.json" \
-  --routing-config "$WORKFLOW_ROOT/controller/model-routing.json" \
+  --config "$CONFIG_ROOT/projects.json" \
+  --routing-config "$CONFIG_ROOT/model-stacks.json" \
+  --providers-config "$CONFIG_ROOT/providers.json" \
   "$@"

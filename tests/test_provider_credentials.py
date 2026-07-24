@@ -15,6 +15,7 @@ from integrations.common.provider_credentials import (
     default_priority,
     list_credentials,
     main,
+    resolve_credential_ref,
     set_default_priorities,
     set_provider_priority,
 )
@@ -91,6 +92,7 @@ class ProviderCredentialTests(unittest.TestCase):
         self.assertEqual(credentials[0].account, "person@example.com")
         self.assertEqual(credentials[0].priority, 100)
         self.assertFalse(credentials[0].disabled)
+        self.assertIsNone(credentials[0].prefix)
         self.assertNotIn("SECRET", repr(credentials[0]))
 
         stdout = io.StringIO()
@@ -103,6 +105,37 @@ class ProviderCredentialTests(unittest.TestCase):
         self.assertIn("person@example.com", output)
         self.assertNotIn("ACCESS-SECRET", output)
         self.assertNotIn("REFRESH-SECRET", output)
+
+    def test_resolve_credential_ref_is_bounded_and_checks_provider_type(self) -> None:
+        credential = self.credential(
+            "codex-e200239f-arvind9981@gmail.com-pro.json",
+            "claude",
+            email="work@example.com",
+        )
+
+        resolved = resolve_credential_ref(
+            self.auth_dir, credential.name, expected_provider="claude"
+        )
+
+        self.assertEqual(resolved.provider, "claude")
+        self.assertEqual(resolved.account, "work@example.com")
+        self.assertNotIn("SECRET", repr(resolved))
+        for reference in (
+            "../claude-work.json",
+            str(credential),
+            "missing.json",
+            "unsafe",
+        ):
+            with self.subTest(reference=reference), self.assertRaises(
+                CredentialError
+            ):
+                resolve_credential_ref(self.auth_dir, reference)
+        with self.assertRaises(CredentialError):
+            resolve_credential_ref(
+                self.auth_dir,
+                credential.name,
+                expected_provider="codex",
+            )
 
     def test_empty_store_lists_headers_and_defaults_are_idempotent(self) -> None:
         self.assertEqual(set_default_priorities(self.auth_dir), 0)

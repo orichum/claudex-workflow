@@ -2,624 +2,106 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/claudex-install-transaction.XXXXXX")"
-fixture="$(cd "$fixture" && pwd -P)"
-background_pids=("")
-cleanup() {
-  local process_id
-  for process_id in "${background_pids[@]}"; do
-    [[ -n "$process_id" ]] || continue
-    kill "$process_id" 2>/dev/null || true
-    wait "$process_id" 2>/dev/null || true
-  done
-  rm -rf -- "$fixture"
-}
-trap cleanup EXIT
+# shellcheck source=../lib/workflow.sh
+source "$ROOT/lib/workflow.sh"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-transaction.XXXXXX")"
+trap 'rm -rf -- "$fixture"' EXIT
 
-fake_bin="$fixture/bin"
-install -d "$fake_bin"
-real_python="$(command -v python3)"
-tool_bin="$(dirname "$(command -v rg)")"
-archive_digest="$(printf archive | shasum -a 256 | awk '{print $1}')"
-ca_file="$fixture/ca.pem"
-printf 'fixture ca\n' >"$ca_file"
+snapshot="$fixture/snapshot"
+install -d -m 0700 "$snapshot" "$fixture/bin"
 
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'output=' \
-  'url=' \
-  'while (($#)); do' \
-  '  case "$1" in' \
-  '    --output) output="$2"; shift 2 ;;' \
-  '    http*) url="$1"; shift ;;' \
-  '    *) shift ;;' \
-  '  esac' \
-  'done' \
-  'if [[ "$url" == *api.github.com/repos/router-for-me/CLIProxyAPI* ]]; then' \
-  '  if [[ "$FAKE_UNAME_S" == Darwin ]]; then asset=CLIProxyAPI_1.0.0_darwin_aarch64.tar.gz; else asset=CLIProxyAPI_1.0.0_linux_aarch64.tar.gz; fi' \
-  '  printf '\''{"tag_name":"v1.0.0","assets":[{"name":"%s","browser_download_url":"https://fixture/cliproxy.tar.gz","digest":"sha256:%s"}]}\n'\'' "$asset" "$FAKE_ARCHIVE_DIGEST" >"$output"' \
-  'elif [[ "$url" == *api.github.com/repos/StringKe/claudex* ]]; then' \
-  '  if [[ "$(cat "$FAKE_CLAUDEX_BUILD_STATE")" == 2 ]]; then version=1.0.1; else version=1.0.0; fi' \
-  '  if [[ "$FAKE_UNAME_S" == Darwin ]]; then asset="claudex-v${version}-aarch64-apple-darwin.tar.gz"; else asset="claudex-v${version}-aarch64-unknown-linux-gnu.tar.gz"; fi' \
-  '  printf '\''{"tag_name":"v%s","assets":[{"name":"%s","browser_download_url":"https://fixture/claudex.tar.gz","digest":"sha256:%s"}]}\n'\'' "$version" "$asset" "$FAKE_ARCHIVE_DIGEST" >"$output"' \
-  'elif [[ "$url" == *raw.githubusercontent.com/router-for-me/CLIProxyAPI/v1.0.0/internal/registry/models/models.json* ]]; then' \
-  '  case "$(cat "$FAKE_HEADROOM_REGISTRY_STATE")" in' \
-  '    changed) printf '\''{"kimi":[{"id":"kimi-k2.7-code","context_length":131072},{"id":"shared-model","context_length":200000}],"antigravity":[{"id":"gemini-3.1-pro-preview","inputTokenLimit":1048576},{"id":"shared-model","inputTokenLimit":114000},{"id":"no-upstream-limit"}]}\n'\'' >"$output" ;;' \
-  '    invalid) printf '\''{"provider":[{"id":"bad model","context_length":1000}]}\n'\'' >"$output" ;;' \
-  '    *) printf '\''{"kimi":[{"id":"kimi-k2.7-code","context_length":262144},{"id":"shared-model","context_length":200000}],"antigravity":[{"id":"gemini-3.1-pro-preview","inputTokenLimit":1048576},{"id":"shared-model","inputTokenLimit":114000},{"id":"no-upstream-limit"}]}\n'\'' >"$output" ;;' \
-  '  esac' \
-  'elif [[ "$url" == https://fixture/* ]]; then' \
-  '  printf archive >"$output"' \
-  'elif [[ "$url" == */health ]]; then' \
-  '  printf '\''{"service":"headroom-proxy","status":"healthy","ready":true,"version":"1.0.0","config":{"optimize":true,"cache":false,"memory":false,"code_graph":false,"runtime_env":{"HEADROOM_OUTPUT_SHAPER":"0","HEADROOM_VERBOSITY_AUTOTUNE":"0","HEADROOM_EFFORT_ROUTER":"0"}}}\n'\''' \
-  'elif [[ "$url" == */v1/models ]]; then' \
-  '  endpoint="${url#*://127.0.0.1:}"' \
-  '  port="${endpoint%%/*}"' \
-  '  if [[ -f "$FAKE_SERVICE_STATE/preflight.port" ]] && [[ "$(cat "$FAKE_SERVICE_STATE/preflight.port")" == "$port" ]]; then' \
-  '    [[ -f "$FAKE_SERVICE_STATE/preflight.ready" ]] || exit 7' \
-  '    kill -0 "$(cat "$FAKE_SERVICE_STATE/preflight.pid")" 2>/dev/null || exit 7' \
-  '    [[ "${FAKE_SWAP_DEFINITION_AFTER_PREFLIGHT:-0}" != 1 ]] || touch "$FAKE_SERVICE_STATE/proxy.foreign"' \
-  '    case "${FAKE_MANAGER_FAILURE_AFTER_PREFLIGHT:-}" in state) touch "$FAKE_SERVICE_STATE/manager.state-fail" ;; pid) touch "$FAKE_SERVICE_STATE/manager.pid-fail"; printf "0\n" >"$FAKE_SERVICE_STATE/manager.print-count" ;; esac' \
-  '    printf '\''{"object":"list","data":[{"id":"gpt-5.6-luna"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-sol"},{"id":"claude-haiku-4-5-20251001"},{"id":"claude-sonnet-5"},{"id":"claude-opus-4-8"}]}\n'\''' \
-  '  elif [[ -f "$FAKE_SERVICE_STATE/proxy.port" ]] && [[ "$(cat "$FAKE_SERVICE_STATE/proxy.port")" == "$port" ]]; then' \
-  '    [[ -f "$FAKE_SERVICE_STATE/proxy.loaded" ]] || exit 7' \
-  '    [[ ! -f "$FAKE_SERVICE_STATE/proxy.unready" ]] || exit 7' \
-  '    printf '\''{"object":"list","data":[{"id":"gpt-5.6-luna"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-sol"},{"id":"claude-haiku-4-5-20251001"},{"id":"claude-sonnet-5"},{"id":"claude-opus-4-8"}]}\n'\''' \
-  '  elif [[ "$(cat "$FAKE_MODELS_STATE")" == full ]]; then' \
-  '    printf '\''{"object":"list","data":[{"id":"gpt-5.6-luna"},{"id":"gpt-5.6-terra"},{"id":"gpt-5.6-sol"},{"id":"claude-haiku-4-5-20251001"},{"id":"claude-sonnet-5"},{"id":"claude-opus-4-8"}]}\n'\''' \
-  '  else' \
-  '    printf '\''{"object":"list","data":[]}\n'\''' \
-  '  fi' \
-  'else' \
-  '  exit 22' \
-  'fi' >"$fake_bin/curl"
+launcher="$fixture/bin/orichum"
+prior="$fixture/prior-orichum"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$prior"
+chmod 0755 "$prior"
+ln -s "$prior" "$launcher"
 
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'destination=' \
-  'binary=' \
-  'while (($#)); do' \
-  '  case "$1" in -C) destination="$2"; shift 2 ;; -*) shift ;; *) binary="$1"; shift ;; esac' \
-  'done' \
-  'if [[ "$binary" == cli-proxy-api ]]; then' \
-  '  printf '\''#!/usr/bin/env bash\nif [[ "${1:-}" == "--version" || "${1:-}" == "--help" ]]; then echo "CLIProxyAPI 1.0.0"; else /bin/sleep 300; fi\n'\'' >"$destination/$binary"' \
-  'else' \
-  '  build="$(cat "$FAKE_CLAUDEX_BUILD_STATE")"; if [[ "$build" == 2 ]]; then version=1.0.1; else version=1.0.0; fi' \
-  '  printf '\''#!/usr/bin/env bash\nset -euo pipefail\n# build %s\nif [[ "${1:-}" == "--version" ]]; then echo "claudex %s"; exit 0; fi\nif [[ "$*" == *"config validate"* ]]; then printf "publish-validate\\n" >>"$FAKE_EVENT_LOG"; exit 0; fi\nport=\nwhile (($#)); do if [[ "$1" == --port ]]; then port="$2"; shift 2; else shift; fi; done\nprintf "preflight-start %%s\\n" "$port" >>"$FAKE_EVENT_LOG"\nprintf "%%s\\n" "$port" >"$FAKE_SERVICE_STATE/preflight.port"\nprintf "%%s\\n" "$$" >"$FAKE_SERVICE_STATE/preflight.pid"\ntouch "$FAKE_SERVICE_STATE/preflight.ready"\nexec /bin/sleep 300\n'\'' "$build" "$version" >"$destination/$binary"' \
-  'fi' \
-  'chmod 0755 "$destination/$binary"' >"$fake_bin/tar"
+snapshot_path "$launcher" "$snapshot" launcher
+rm "$launcher"
+printf 'partial install\n' >"$launcher"
+restore_snapshot "$launcher" "$snapshot" launcher
+snapshot_path_matches "$launcher" "$snapshot" launcher
+[[ -L "$launcher" && "$(readlink "$launcher")" == "$prior" ]]
 
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'if [[ "${1:-}" == -c ]]; then' \
-  '  case "$2" in *importlib.metadata*) printf "1.0.0\n" ;; *certifi*) printf "%s\n" "$FAKE_CA_FILE" ;; *) exit 1 ;; esac' \
-  '  exit 0' \
-  'fi' \
-  'shift' \
-  'if [[ "${1:-}" == --version ]]; then printf "headroom 1.0.0\n"; else' \
-  '  [[ "$HEADROOM_CONFIG_DIR" == */headroom-preflight/config ]]' \
-  '  [[ -f "$HEADROOM_CONFIG_DIR/models.json" && ! -L "$HEADROOM_CONFIG_DIR/models.json" ]]' \
-  '  mode="$(stat -f "%Lp" "$HEADROOM_CONFIG_DIR/models.json" 2>/dev/null || stat -c "%a" "$HEADROOM_CONFIG_DIR/models.json")"' \
-  '  [[ "$mode" == 600 ]]' \
-  '  jq -e '\''.source.tag == "v1.0.0" and (.anthropic.context_limits | length > 0)'\'' "$HEADROOM_CONFIG_DIR/models.json" >/dev/null' \
-  '  exec /bin/sleep 300' \
-  'fi' \
-  >"$fake_bin/headroom-python"
+absent="$fixture/bin/absent"
+snapshot_path "$absent" "$snapshot" absent
+printf 'partial install\n' >"$absent"
+restore_snapshot "$absent" "$snapshot" absent
+snapshot_path_matches "$absent" "$snapshot" absent
+[[ ! -e "$absent" && ! -L "$absent" ]]
 
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'case "$*" in' \
-  '  *mempalace*)' \
-  '    install -d "$HOME/.local/bin"' \
-  '    printf '\''#!/usr/bin/env bash\nexit 0\n'\'' >"$HOME/.local/bin/mempalace-mcp"' \
-  '    chmod 0755 "$HOME/.local/bin/mempalace-mcp" ;;' \
-  '  *graphifyy*)' \
-  '    install -d "$HOME/.local/bin"' \
-  '    printf '\''#!/usr/bin/env bash\nexit 0\n'\'' >"$HOME/.local/bin/graphify-mcp"' \
-  '    chmod 0755 "$HOME/.local/bin/graphify-mcp" ;;' \
-  '  *headroom-ai*)' \
-  '    install -d "$UV_TOOL_BIN_DIR"' \
-  '    printf '\''#!%s\n'\'' "$FAKE_HEADROOM_PYTHON" >"$UV_TOOL_BIN_DIR/headroom"' \
-  '    printf '\''# fixture\n'\'' >>"$UV_TOOL_BIN_DIR/headroom"' \
-  '    chmod 0755 "$UV_TOOL_BIN_DIR/headroom" ;;' \
-  'esac' >"$fake_bin/uv"
-
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'if [[ "$*" == *"mcp_probe.py"* ]]; then exit 0; fi' \
-  'exec "$REAL_PYTHON" "$@"' >"$fake_bin/python3"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/claude"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'case "${1:-}" in -s) printf "%s\n" "$FAKE_UNAME_S" ;; -m) printf "aarch64\n" ;; *) printf "%s\n" "$FAKE_UNAME_S" ;; esac' \
-  >"$fake_bin/uname"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/sleep"
-
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'printf "%s\n" "$*" >>"$FAKE_SERVICE_LOG"' \
-  '[[ ! -f "$FAKE_SERVICE_STATE/manager.state-fail" ]] || exit 70' \
-  'if [[ -f "$FAKE_SERVICE_STATE/manager.pid-fail" ]]; then count=$(( $(cat "$FAKE_SERVICE_STATE/manager.print-count") + 1 )); printf "%s\n" "$count" >"$FAKE_SERVICE_STATE/manager.print-count"; [[ "$count" -ne 4 ]] || exit 70; fi' \
-  'case "${1:-}" in' \
-  '  print)' \
-  '    if [[ -f "$FAKE_SERVICE_STATE/proxy.registered" ]]; then' \
-  '      service_pid=0; [[ -f "$FAKE_SERVICE_STATE/proxy.loaded" ]] && service_pid=4242' \
-  '      service_path="$HOME/Library/LaunchAgents/com.user.claudex-translation-proxy.plist"; [[ ! -f "$FAKE_SERVICE_STATE/proxy.foreign" ]] || service_path=/foreign/claudex-proxy.plist' \
-  '      printf "service = {\n  path = %s\n  pid = %s\n}\n" "$service_path" "$service_pid"' \
-  '    else exit 113; fi ;;' \
-  '  bootstrap)' \
-  '    if [[ "$*" == *claudex-translation-proxy* ]]; then' \
-  '      if [[ "${FAKE_PROXY_BOOTSTRAP_FAIL:-0}" == 1 ]] && [[ ! -f "$FAKE_SERVICE_STATE/bootstrap.failed" ]]; then' \
-  '        touch "$FAKE_SERVICE_STATE/bootstrap.failed"' \
-  '        printf "cutover-fail\n" >>"$FAKE_EVENT_LOG"' \
-  '        exit 19' \
-  '      fi' \
-  '      service_file="${!#}"' \
-  '      next_line=false' \
-  '      while IFS= read -r line; do' \
-  '        if [[ "$next_line" == true ]]; then line="${line#*<string>}"; line="${line%%</string>*}"; printf "%s\n" "$line" >"$FAKE_SERVICE_STATE/proxy.port"; break; fi' \
-  '        [[ "$line" == *"<string>--port</string>"* ]] && next_line=true' \
-  '      done <"$service_file"' \
-  '      touch "$FAKE_SERVICE_STATE/proxy.registered"' \
-  '      touch "$FAKE_SERVICE_STATE/proxy.loaded"' \
-  '      printf "cutover-start\n" >>"$FAKE_EVENT_LOG"' \
-  '      if [[ "${FAKE_PROXY_POST_START_FAIL:-0}" == 1 ]] && [[ ! -f "$FAKE_SERVICE_STATE/post-start.failed" ]]; then touch "$FAKE_SERVICE_STATE/post-start.failed" "$FAKE_SERVICE_STATE/proxy.unready"; printf "cutover-unready\n" >>"$FAKE_EVENT_LOG"; fi' \
-  '    fi ;;' \
-  '  bootout)' \
-  '    if [[ "$*" == *claudex-translation-proxy* ]]; then rm -f "$FAKE_SERVICE_STATE/proxy.loaded" "$FAKE_SERVICE_STATE/proxy.registered" "$FAKE_SERVICE_STATE/proxy.unready"; printf "cutover-stop\n" >>"$FAKE_EVENT_LOG"; fi ;;' \
-  'esac' >"$fake_bin/launchctl"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -euo pipefail' \
-  'printf "%s\n" "$*" >>"$FAKE_SERVICE_LOG"' \
-  'proxy_unit="$HOME/.config/systemd/user/claudex-translation-proxy.service"' \
-  'if [[ "$*" == *show-environment* ]]; then exit 0; fi' \
-  'if [[ "$*" == *"--property LoadState"* ]] && [[ -f "$FAKE_SERVICE_STATE/manager.state-fail" ]]; then exit 70; fi' \
-  'if [[ "$*" == *"--property MainPID"* ]] && [[ -f "$FAKE_SERVICE_STATE/manager.pid-fail" ]]; then exit 70; fi' \
-  'if [[ "$*" == *"--property LoadState"* ]]; then if [[ -f "$FAKE_SERVICE_STATE/proxy.registered" ]]; then printf "loaded\n"; else printf "not-found\n"; fi; exit 0; fi' \
-  'if [[ "$*" == *"--property FragmentPath"* ]]; then if [[ -f "$FAKE_SERVICE_STATE/proxy.registered" ]]; then if [[ -f "$FAKE_SERVICE_STATE/proxy.foreign" ]]; then printf "/foreign/claudex-proxy.service\n"; else printf "%s\n" "$proxy_unit"; fi; fi; exit 0; fi' \
-  'if [[ "$*" == *"--property MainPID"* ]]; then if [[ -f "$FAKE_SERVICE_STATE/proxy.loaded" ]]; then printf "4242\n"; else printf "0\n"; fi; exit 0; fi' \
-  'action=' \
-  'for argument in "$@"; do case "$argument" in daemon-reload|enable|disable|start|stop|restart) action="$argument"; break ;; esac; done' \
-  'case "$action" in' \
-  '  daemon-reload) if [[ -f "$proxy_unit" ]]; then touch "$FAKE_SERVICE_STATE/proxy.registered"; else rm -f "$FAKE_SERVICE_STATE/proxy.registered"; fi ;;' \
-  '  start|restart)' \
-  '    if [[ "$*" == *claudex-translation-proxy.service* ]]; then' \
-  '      if [[ "${FAKE_PROXY_BOOTSTRAP_FAIL:-0}" == 1 ]] && [[ ! -f "$FAKE_SERVICE_STATE/bootstrap.failed" ]]; then touch "$FAKE_SERVICE_STATE/bootstrap.failed"; printf "cutover-fail\n" >>"$FAKE_EVENT_LOG"; exit 19; fi' \
-  '      sed -n '\''s/.*--port \([0-9][0-9]*\).*/\1/p'\'' "$proxy_unit" >"$FAKE_SERVICE_STATE/proxy.port"' \
-  '      touch "$FAKE_SERVICE_STATE/proxy.registered" "$FAKE_SERVICE_STATE/proxy.loaded"' \
-  '      printf "cutover-start\n" >>"$FAKE_EVENT_LOG"' \
-  '      if [[ "${FAKE_PROXY_POST_START_FAIL:-0}" == 1 ]] && [[ ! -f "$FAKE_SERVICE_STATE/post-start.failed" ]]; then touch "$FAKE_SERVICE_STATE/post-start.failed" "$FAKE_SERVICE_STATE/proxy.unready"; printf "cutover-unready\n" >>"$FAKE_EVENT_LOG"; fi' \
-  '    fi ;;' \
-  '  stop)' \
-  '    if [[ "$*" == *claudex-translation-proxy.service* ]]; then rm -f "$FAKE_SERVICE_STATE/proxy.loaded" "$FAKE_SERVICE_STATE/proxy.unready"; printf "cutover-stop\n" >>"$FAKE_EVENT_LOG"; fi ;;' \
-  'esac' >"$fake_bin/systemctl"
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/plutil"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  '[[ -f "$FAKE_SERVICE_STATE/proxy.loaded" ]] || exit 1' \
-  'printf "4242\n"' >"$fake_bin/lsof"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  '[[ -f "$FAKE_SERVICE_STATE/proxy.loaded" ]] || exit 1' \
-  'port="$(cat "$FAKE_SERVICE_STATE/proxy.port")"' \
-  'printf '\''LISTEN 0 128 127.0.0.1:%s 0.0.0.0:* users:(("claudex",pid=4242,fd=7))\n'\'' "$port"' \
-  >"$fake_bin/ss"
-chmod 0755 "$fake_bin"/*
-
-invoke_install() {
-  local home="$1" models="$2" output="$3" platform="$4"
-  local build="${5:-1}" bootstrap_fail="${6:-0}"
-  local post_start_fail="${7:-0}" proxy_port_override="${8:-}"
-  local swap_definition="${9:-0}"
-  local manager_failure="${10:-}"
-  install -d "$home" "$home/service-state"
-  printf '%s\n' "$models" >"$home/models.state"
-  printf '%s\n' "$build" >"$home/claudex-build.state"
-  [[ -f "$home/headroom-registry.state" ]] || \
-    printf '%s\n' default >"$home/headroom-registry.state"
-  HOME="$home" \
-  CLAUDEX_DATA_DIR="$home/data" \
-  USER_BIN_DIR="$home/user-bin" \
-  PATH="$fake_bin:$tool_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  REAL_PYTHON="$real_python" \
-  FAKE_ARCHIVE_DIGEST="$archive_digest" \
-  FAKE_UNAME_S="$platform" \
-  FAKE_MODELS_STATE="$home/models.state" \
-  FAKE_CLAUDEX_BUILD_STATE="$home/claudex-build.state" \
-  FAKE_HEADROOM_REGISTRY_STATE="$home/headroom-registry.state" \
-  FAKE_HEADROOM_PYTHON="$fake_bin/headroom-python" \
-  FAKE_CA_FILE="$ca_file" \
-  FAKE_SERVICE_STATE="$home/service-state" \
-  FAKE_SERVICE_LOG="$home/service.log" \
-  FAKE_EVENT_LOG="$home/events.log" \
-  FAKE_PROXY_BOOTSTRAP_FAIL="$bootstrap_fail" \
-  FAKE_PROXY_POST_START_FAIL="$post_start_fail" \
-  FAKE_SWAP_DEFINITION_AFTER_PREFLIGHT="$swap_definition" \
-  FAKE_MANAGER_FAILURE_AFTER_PREFLIGHT="$manager_failure" \
-  CLAUDEX_PROXY_PORT="$proxy_port_override" \
-  "$ROOT/install.sh" >"$output" 2>&1
-}
-
-run_install() {
-  local home="$1" models="$2" output="$3" platform="$4"
-  local build="${5:-1}"
-  invoke_install "$home" "$models" "$output" "$platform" "$build" || {
-    sed -n '1,220p' "$output" >&2
-    return 1
-  }
-}
-
-proxy_mutation_count() {
-  awk '$0 == "cutover-start" || $0 == "cutover-stop" {count++} END {print count + 0}' \
-    "$1"
-}
-
-headroom_start_count() {
-  local platform="$1" service_log="$2"
-  if [[ "$platform" == Darwin ]]; then
-    awk '/bootstrap/ && /claudex-headroom/ {count++} END {print count + 0}' \
-      "$service_log"
-  else
-    awk '/start claudex-headroom.service/ {count++} END {print count + 0}' \
-      "$service_log"
-  fi
-}
-
-headroom_mutation_count() {
-  local platform="$1" service_log="$2"
-  if [[ "$platform" == Darwin ]]; then
-    awk '/(bootstrap|bootout)/ && /claudex-headroom/ {count++} END {print count + 0}' \
-      "$service_log"
-  else
-    awk '/(start|stop|restart) claudex-headroom.service/ {count++} END {print count + 0}' \
-      "$service_log"
-  fi
-}
-
-assert_one_restart() {
-  local before="$1" event_log="$2"
-  local after
-  after="$(proxy_mutation_count "$event_log")"
-  [[ $((after - before)) -eq 2 ]]
-}
-
-exercise_platform() {
-  local platform="$1" platform_name="$2"
-  local daily_home="$fixture/$platform_name-daily"
-  local unknown_home="$fixture/$platform_name-unknown"
-  local absent_launcher_home="$fixture/$platform_name-launcher-absent"
-  local directory_launcher_home="$fixture/$platform_name-launcher-directory"
-  local proxy_service before
-
-  install -d "$unknown_home/service-state"
-  touch "$unknown_home/service-state/proxy.registered"
-  if invoke_install "$unknown_home" full "$fixture/$platform_name-unknown.log" \
-      "$platform" 1; then
-    printf 'loaded unknown %s target was accepted\n' "$platform" >&2
-    return 1
-  fi
-  rg -Fq 'refusing to replace loaded unknown Claudex proxy target' \
-    "$fixture/$platform_name-unknown.log"
-  [[ ! -e "$unknown_home/data/service-ports.json" ]]
-  [[ ! -s "$unknown_home/events.log" ]]
-
-  install -d \
-    "$directory_launcher_home/user-bin/claudex-models"
-  printf 'owned marker\n' \
-    >"$directory_launcher_home/user-bin/claudex-models/marker"
-  if invoke_install "$directory_launcher_home" full \
-      "$fixture/$platform_name-launcher-directory.log" \
-      "$platform" 1; then
-    printf 'real %s launcher directory was accepted\n' "$platform" >&2
-    return 1
-  fi
-  [[ "$(cat "$directory_launcher_home/user-bin/claudex-models/marker")" == \
-     'owned marker' ]]
-  [[ ! -e "$directory_launcher_home/data" ]]
-  [[ ! -s "$directory_launcher_home/events.log" ]]
-
-  if invoke_install "$absent_launcher_home" full \
-      "$fixture/$platform_name-launcher-absent.log" \
-      "$platform" 1 1; then
-    printf 'injected %s launcher rollback failure reported success\n' \
-      "$platform" >&2
-    return 1
-  fi
-  [[ ! -e "$absent_launcher_home/user-bin/claudex-models" && \
-     ! -L "$absent_launcher_home/user-bin/claudex-models" ]]
-  [[ ! -e "$absent_launcher_home/data/headroom/config/models.json" && \
-     ! -L "$absent_launcher_home/data/headroom/config/models.json" ]]
-
-  run_install "$daily_home" empty "$fixture/$platform_name-pending.log" \
-    "$platform" 1
-  rg -Fq pending-provider-login "$fixture/$platform_name-pending.log"
-  rg -Fq "Next: claudex-login <installed-oauth-provider>; $ROOT/install.sh" \
-    "$fixture/$platform_name-pending.log"
-  [[ ! -e "$daily_home/service-state/proxy.loaded" ]]
-  if [[ "$platform" == Darwin ]]; then
-    proxy_service="$daily_home/Library/LaunchAgents/com.user.claudex-translation-proxy.plist"
-  else
-    proxy_service="$daily_home/.config/systemd/user/claudex-translation-proxy.service"
-  fi
-  [[ ! -e "$proxy_service" ]]
-
-  : >"$daily_home/events.log"
-  run_install "$daily_home" full "$fixture/$platform_name-activated.log" \
-    "$platform" 1
-  [[ -f "$proxy_service" ]]
-  [[ -f "$daily_home/service-state/proxy.loaded" ]]
-  rg -Fq 'Claudex:     installed' "$fixture/$platform_name-activated.log"
-  headroom_models="$daily_home/data/headroom/config/models.json"
-  [[ "$(jq -r '.source.tag' "$headroom_models")" == v1.0.0 ]]
-  [[ "$(jq -r '.anthropic.context_limits["shared-model"]' \
-    "$headroom_models")" == 114000 ]]
-  [[ "$(stat -f '%Lp' "$headroom_models" 2>/dev/null || \
-    stat -c '%a' "$headroom_models")" == 600 ]]
-  python3 - "$daily_home/events.log" <<'PY'
-import sys
-
-events = open(sys.argv[1], encoding="utf-8").read().splitlines()
-publication = events.index("publish-validate")
-preflight = next(i for i, event in enumerate(events) if event.startswith("preflight-start "))
-cutover = events.index("cutover-start")
-if not publication < preflight < cutover:
-    raise SystemExit("model publication, preflight, and cutover were out of order")
-PY
-
-  before="$(proxy_mutation_count "$daily_home/events.log")"
-  headroom_before="$(
-    headroom_mutation_count "$platform" "$daily_home/service.log"
-  )"
-  run_install "$daily_home" full "$fixture/$platform_name-reused.log" \
-    "$platform" 1
-  [[ "$(proxy_mutation_count "$daily_home/events.log")" == "$before" ]]
-  [[ "$(headroom_mutation_count "$platform" "$daily_home/service.log")" == \
-     "$headroom_before" ]]
-  rg -Fq 'Claudex:     reused' "$fixture/$platform_name-reused.log"
-
-  chmod 0644 "$headroom_models"
-  headroom_before="$(headroom_start_count "$platform" "$daily_home/service.log")"
-  run_install "$daily_home" full \
-    "$fixture/$platform_name-headroom-mode.log" "$platform" 1
-  [[ $(( $(headroom_start_count "$platform" "$daily_home/service.log") - \
-    headroom_before )) -eq 1 ]]
-  [[ -f "$headroom_models" && ! -L "$headroom_models" ]]
-  [[ "$(stat -f '%Lp' "$headroom_models" 2>/dev/null || \
-    stat -c '%a' "$headroom_models")" == 600 ]]
-
-  headroom_symlink_target="$daily_home/headroom-models-target.json"
-  cp "$headroom_models" "$headroom_symlink_target"
-  rm -f "$headroom_models"
-  ln -s "$headroom_symlink_target" "$headroom_models"
-  headroom_before="$(headroom_start_count "$platform" "$daily_home/service.log")"
-  run_install "$daily_home" full \
-    "$fixture/$platform_name-headroom-symlink.log" "$platform" 1
-  [[ $(( $(headroom_start_count "$platform" "$daily_home/service.log") - \
-    headroom_before )) -eq 1 ]]
-  [[ -f "$headroom_models" && ! -L "$headroom_models" ]]
-  [[ "$(stat -f '%Lp' "$headroom_models" 2>/dev/null || \
-    stat -c '%a' "$headroom_models")" == 600 ]]
-  cmp -s "$headroom_models" "$headroom_symlink_target"
-
-  printf '%s\n' changed >"$daily_home/headroom-registry.state"
-  old_headroom_mode="$(
-    stat -f '%Lp' "$headroom_models" 2>/dev/null || stat -c '%a' "$headroom_models"
-  )"
-  headroom_before="$(headroom_start_count "$platform" "$daily_home/service.log")"
-  run_install "$daily_home" full \
-    "$fixture/$platform_name-headroom-metadata.log" "$platform" 1
-  [[ $(( $(headroom_start_count "$platform" "$daily_home/service.log") - \
-    headroom_before )) -eq 1 ]]
-  [[ "$(jq -r '.anthropic.context_limits["kimi-k2.7-code"]' \
-    "$headroom_models")" == 131072 ]]
-
-  current_headroom_models="$(cat "$headroom_models")"
-  printf '%s\n' invalid >"$daily_home/headroom-registry.state"
-  headroom_before="$(
-    headroom_mutation_count "$platform" "$daily_home/service.log"
-  )"
-  if invoke_install "$daily_home" full \
-      "$fixture/$platform_name-headroom-invalid.log" "$platform" 1; then
-    printf 'invalid exact-release metadata was accepted on %s\n' "$platform" >&2
-    return 1
-  fi
-  [[ "$(cat "$headroom_models")" == "$current_headroom_models" ]]
-  [[ "$(headroom_mutation_count "$platform" "$daily_home/service.log")" == \
-     "$headroom_before" ]]
-  printf '%s\n' changed >"$daily_home/headroom-registry.state"
-  cp "$headroom_models" "$headroom_symlink_target"
-  rm -f "$headroom_models"
-  ln -s "$headroom_symlink_target" "$headroom_models"
-  rm -f -- "$daily_home/user-bin/claudex-provider"
-  headroom_before_rollback="$(readlink "$headroom_models")"
-  if invoke_install "$daily_home" full \
-      "$fixture/$platform_name-headroom-rollback.log" "$platform" 2 0 1; then
-    printf 'post-metadata failure reported success on %s\n' "$platform" >&2
-    return 1
-  fi
-  [[ -L "$headroom_models" ]]
-  [[ "$(readlink "$headroom_models")" == "$headroom_before_rollback" ]]
-  [[ ! -e "$daily_home/user-bin/claudex-provider" && \
-     ! -L "$daily_home/user-bin/claudex-provider" ]]
-  [[ -f "$daily_home/service-state/proxy.loaded" ]]
-  rm -f "$daily_home/service-state/post-start.failed"
-  rm -f "$headroom_models"
-  cp "$headroom_symlink_target" "$headroom_models"
-  chmod "$old_headroom_mode" "$headroom_models"
-  printf '%s\n' default >"$daily_home/headroom-registry.state"
-
-  before="$(proxy_mutation_count "$daily_home/events.log")"
-  run_install "$daily_home" full "$fixture/$platform_name-binary.log" \
-    "$platform" 2
-  assert_one_restart "$before" "$daily_home/events.log"
-
-  printf '\n' >>"$proxy_service"
-  for manager_failure in state pid; do
-    before="$(proxy_mutation_count "$daily_home/events.log")"
-    if invoke_install "$daily_home" full \
-        "$fixture/$platform_name-$manager_failure-query.log" \
-        "$platform" 2 0 0 '' 0 "$manager_failure"; then
-      printf 'post-preflight %s %s query failure was accepted\n' \
-        "$platform" "$manager_failure" >&2
-      return 1
-    fi
-    [[ "$(proxy_mutation_count "$daily_home/events.log")" == "$before" ]]
-    [[ -f "$daily_home/service-state/proxy.loaded" ]]
-    rg -Fq 'refusing to stop ownership-drifted Claudex proxy runtime' \
-      "$fixture/$platform_name-$manager_failure-query.log"
-    rm -f "$daily_home/service-state/manager.state-fail" \
-      "$daily_home/service-state/manager.pid-fail" \
-      "$daily_home/service-state/manager.print-count"
-  done
-
-  before="$(proxy_mutation_count "$daily_home/events.log")"
-  run_install "$daily_home" full "$fixture/$platform_name-service.log" \
-    "$platform" 2
-  assert_one_restart "$before" "$daily_home/events.log"
-
-  "$real_python" - "$daily_home/data/model-config/current/claudex.toml" <<'PY'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-path.write_text(
-    text.replace(
-        'default_model = "gpt-5.6-sol"',
-        'default_model = "gpt-5.6-terra"',
-        1,
-    ),
-    encoding="utf-8",
-)
-PY
-  before="$(proxy_mutation_count "$daily_home/events.log")"
-  run_install "$daily_home" full "$fixture/$platform_name-model.log" \
-    "$platform" 2
-  assert_one_restart "$before" "$daily_home/events.log"
-
-  touch "$daily_home/service-state/proxy.unready"
-  before="$(proxy_mutation_count "$daily_home/events.log")"
-  run_install "$daily_home" full "$fixture/$platform_name-readiness.log" \
-    "$platform" 2
-  assert_one_restart "$before" "$daily_home/events.log"
-
-  prior_service_content="$(cat "$proxy_service")"
-  prior_ports_content="$(cat "$daily_home/data/service-ports.json")"
-  prior_generation="$(readlink "$daily_home/data/model-config/current")"
-  prior_model_content="$(cat "$daily_home/data/model-config/current/claudex.toml")"
-  prior_binary_digest="$(shasum -a 256 "$daily_home/data/bin/claudex" | awk '{print $1}')"
-  rm -f -- "$daily_home/user-bin/claudex-models"
-  printf 'prior user launcher\n' >"$daily_home/user-bin/claudex-models"
-  chmod 0700 "$daily_home/user-bin/claudex-models"
-  rm -f -- "$daily_home/user-bin/claudex-provider"
-  printf 'prior provider launcher\n' >"$daily_home/user-bin/claudex-provider"
-  chmod 0700 "$daily_home/user-bin/claudex-provider"
-  prior_proxy_port="$(jq -r .claudexProxyPort "$daily_home/data/service-ports.json")"
-  rollback_proxy_port="$(python3 - "$prior_proxy_port" \
-    "$(jq -r .cliproxyPort "$daily_home/data/service-ports.json")" \
-    "$(jq -r .headroomPort "$daily_home/data/service-ports.json")" <<'PY'
-import socket
-import sys
-
-reserved = {int(value) for value in sys.argv[1:]}
-while True:
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    if port not in reserved:
-        print(port)
-        break
-PY
-)"
-  rollback_event_start="$(wc -l <"$daily_home/events.log" | tr -d ' ')"
-  if invoke_install "$daily_home" full "$fixture/$platform_name-rollback.log" \
-      "$platform" 2 0 1 "$rollback_proxy_port"; then
-    printf 'injected %s proxy readiness failure reported success\n' \
-      "$platform" >&2
-    return 1
-  fi
-  [[ "$(cat "$proxy_service")" == "$prior_service_content" ]]
-  [[ "$(cat "$daily_home/data/service-ports.json")" == "$prior_ports_content" ]]
-  [[ "$(readlink "$daily_home/data/model-config/current")" == "$prior_generation" ]]
-  [[ "$(cat "$daily_home/data/model-config/current/claudex.toml")" == "$prior_model_content" ]]
-  [[ "$(shasum -a 256 "$daily_home/data/bin/claudex" | awk '{print $1}')" == \
-     "$prior_binary_digest" ]]
-  [[ ! -L "$daily_home/user-bin/claudex-models" ]]
-  [[ "$(cat "$daily_home/user-bin/claudex-models")" == \
-     'prior user launcher' ]]
-  [[ ! -L "$daily_home/user-bin/claudex-provider" ]]
-  [[ "$(cat "$daily_home/user-bin/claudex-provider")" == \
-     'prior provider launcher' ]]
-  restored_launcher_mode="$(
-    stat -f '%Lp' "$daily_home/user-bin/claudex-models" 2>/dev/null || \
-      stat -c '%a' "$daily_home/user-bin/claudex-models"
-  )"
-  [[ "$restored_launcher_mode" == 700 ]]
-  restored_provider_mode="$(
-    stat -f '%Lp' "$daily_home/user-bin/claudex-provider" 2>/dev/null || \
-      stat -c '%a' "$daily_home/user-bin/claudex-provider"
-  )"
-  [[ "$restored_provider_mode" == 700 ]]
-  [[ -f "$daily_home/service-state/proxy.loaded" ]]
-  [[ ! -f "$daily_home/service-state/proxy.unready" ]]
-  python3 - "$daily_home/events.log" "$rollback_event_start" <<'PY'
-import sys
-
-events = open(sys.argv[1], encoding="utf-8").read().splitlines()[int(sys.argv[2]):]
-start = events.index("cutover-start")
-unready = events.index("cutover-unready")
-stop = events.index("cutover-stop", unready + 1)
-recovery = events.index("cutover-start", start + 1)
-if not start < unready < stop < recovery:
-    raise SystemExit("post-start failure did not stop before prior-service recovery")
-PY
-
-  printf '\n' >>"$proxy_service"
-  before="$(proxy_mutation_count "$daily_home/events.log")"
-  if invoke_install "$daily_home" full "$fixture/$platform_name-race.log" \
-      "$platform" 2 0 0 '' 1; then
-    printf 'post-preflight %s definition swap was accepted\n' "$platform" >&2
-    return 1
-  fi
-  [[ "$(proxy_mutation_count "$daily_home/events.log")" == "$before" ]]
-  [[ -f "$daily_home/service-state/proxy.loaded" ]]
-  rg -Fq 'refusing to stop ownership-drifted Claudex proxy runtime' \
-    "$fixture/$platform_name-race.log"
-}
-
-exercise_platform Darwin darwin
-exercise_platform Linux linux
-
-foreign_home="$fixture/foreign"
-install -d "$foreign_home"
-listener_port_file="$foreign_home/listener.port"
-python3 - "$listener_port_file" <<'PY' &
+python3 - "$fixture/occupied.port" <<'PY' &
 import socket
 import sys
 import time
+
 listener = socket.socket()
 listener.bind(("127.0.0.1", 0))
 listener.listen()
-open(sys.argv[1], "w", encoding="utf-8").write(str(listener.getsockname()[1]))
-time.sleep(300)
+with open(sys.argv[1], "w", encoding="ascii") as handle:
+    handle.write(str(listener.getsockname()[1]))
+while True:
+    time.sleep(1)
 PY
-foreign_listener_pid=$!
-background_pids+=("$foreign_listener_pid")
-for _ in {1..50}; do [[ -s "$listener_port_file" ]] && break; sleep 0.05; done
-foreign_port="$(cat "$listener_port_file")"
-install -d "$foreign_home/data"
-printf '{"claudexProxyPort":%s,"cliproxyPort":8317,"headroomPort":8787}\n' \
-  "$foreign_port" >"$foreign_home/data/service-ports.json"
-run_install "$foreign_home" full "$fixture/foreign.log" Darwin 1
-kill -0 "$foreign_listener_pid"
-selected_proxy_port="$(jq -r .claudexProxyPort "$foreign_home/data/service-ports.json")"
-[[ "$selected_proxy_port" != "$foreign_port" ]]
+listener_pid=$!
+trap 'kill "$listener_pid" 2>/dev/null || true; wait "$listener_pid" 2>/dev/null || true; rm -rf -- "$fixture"' EXIT
+for _ in {1..100}; do
+  [[ -s "$fixture/occupied.port" ]] && break
+  sleep 0.01
+done
+occupied="$(cat "$fixture/occupied.port")"
+selected="$(
+  select_service_port 'Route proxy' TEST_PORT "$occupied" false false
+)"
+[[ "$selected" != "$occupied" ]]
+valid_service_port "$selected"
+port_is_available "$selected"
 
-printf 'PASS: installer proxy transaction\n'
+TEST_PORT="$occupied"
+if select_service_port 'Route proxy' TEST_PORT "$occupied" false false \
+    >"$fixture/override.stdout" 2>"$fixture/override.stderr"; then
+  printf 'explicit occupied port was silently replaced\n' >&2
+  exit 1
+fi
+rg -Fq 'from TEST_PORT is unavailable' "$fixture/override.stderr"
+
+rg -Fq 'snapshot_path "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
+rg -Fq 'orichum_launcher_mutated=true' "$ROOT/install.sh"
+rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
+rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
+rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
+settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
+  "$ROOT/install.sh" | cut -d: -f1)"
+transaction_end_line="$(rg -n -F 'WORKFLOW_TRANSACTION_ACTIVE=false' \
+  "$ROOT/install.sh" | tail -1 | cut -d: -f1)"
+[[ "$settings_line" -gt "$transaction_end_line" ]]
+
+python3 - "$ROOT/install.sh" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+start = source.index("rollback_install_transaction()")
+end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
+rollback = source[start:end]
+
+stop_route = rollback.index("claudex_proxy_runtime_mutated")
+restore_cliproxy = rollback.index(
+    'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
+)
+restore_endpoint = rollback.index("restore_model_config_generation")
+restore_route = rollback.index("restore_claudex_proxy_service")
+restore_headroom = rollback.index("restore_headroom_service")
+if not (
+    stop_route
+    < restore_cliproxy
+    < restore_endpoint
+    < restore_route
+    < restore_headroom
+):
+    raise SystemExit("combined service rollback dependency order is unsafe")
+
+if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:
+    raise SystemExit("final Headroom readiness is not tied to usable route state")
+PY
+
+printf 'PASS: Orichum installer rollback and port selection\n'

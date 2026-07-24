@@ -37,7 +37,7 @@ def deny() -> int:
     emit({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": "MemPalace call is not bound to a verified Claudex project context",
+        "permissionDecisionReason": "MemPalace call is not bound to a verified Orichum project context",
     }})
     return 0
 

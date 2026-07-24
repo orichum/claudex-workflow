@@ -13,7 +13,7 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 
 if [[ "$#" -eq 0 || "$1" == -* ]]; then
-  workflow_die "usage: claudex-login <installed-oauth-provider> [arguments...]"
+  workflow_die "usage: orichum provider login <installed-oauth-provider> [arguments...]"
   exit 2
 fi
 provider="$1"
@@ -42,6 +42,6 @@ if [[ "$login_status" -eq 0 ]]; then
       "authentication succeeded, but the provider routing priority was not applied"
     exit 1
   fi
-  printf 'Authentication complete. Next: claudex-models validate; claudex-gpt\n'
+  printf 'Authentication complete. Next: orichum provider account add ...; orichum models validate\n'
 fi
 exit "$login_status"

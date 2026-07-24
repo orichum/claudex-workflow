@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import os
@@ -19,6 +21,9 @@ from typing import Mapping, Sequence
 DEFAULT_PRIORITIES = {"claude": 100, "antigravity": 50}
 PROVIDER_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 ACCOUNT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._+:-]{0,127}")
+CREDENTIAL_REF_PATTERN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}\.json"
+)
 MAX_CREDENTIAL_BYTES = 4 * 1024 * 1024
 
 
@@ -33,6 +38,7 @@ class Credential:
     account: str
     priority: int | None
     disabled: bool
+    prefix: str | None
 
 
 @dataclass(frozen=True)
@@ -188,12 +194,21 @@ def _load_credential(auth_dir: Path, dir_fd: int, name: str) -> _LoadedCredentia
     disabled = document.get("disabled", False)
     if not isinstance(disabled, bool):
         raise CredentialError(f"credential {name!r} has invalid disabled state")
+    prefix = document.get("prefix")
+    if prefix == "":
+        prefix = None
+    elif prefix is not None and (
+        not isinstance(prefix, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", prefix)
+    ):
+        raise CredentialError(f"credential {name!r} has invalid routing prefix")
     metadata = Credential(
         path=path,
         provider=provider,
         account=_safe_account(document, name),
         priority=priority,
         disabled=disabled,
+        prefix=prefix,
     )
     return _LoadedCredential(
         metadata,
@@ -224,6 +239,67 @@ def list_credentials(auth_dir: Path) -> tuple[Credential, ...]:
             item.metadata for item in _load_all_from_fd(auth_dir, dir_fd)
         )
     finally:
+        os.close(dir_fd)
+
+
+def resolve_credential_ref(
+    auth_dir: Path,
+    credential_ref: str,
+    *,
+    expected_provider: str | None = None,
+) -> Credential:
+    """Resolve one safe credential basename without exposing its document."""
+    if (
+        not isinstance(credential_ref, str)
+        or not CREDENTIAL_REF_PATTERN.fullmatch(credential_ref)
+        or Path(credential_ref).name != credential_ref
+    ):
+        raise CredentialError("credential reference is invalid")
+    expected = (
+        None
+        if expected_provider is None
+        else _validate_provider(expected_provider)
+    )
+    auth_dir = Path(auth_dir)
+    dir_fd = _open_auth_directory(auth_dir)
+    try:
+        credential = _load_credential(
+            auth_dir, dir_fd, credential_ref
+        ).metadata
+    finally:
+        os.close(dir_fd)
+    if expected is not None and credential.provider != expected:
+        raise CredentialError("credential provider does not match account provider")
+    return credential
+
+
+@contextmanager
+def credential_metadata_transaction(auth_dir: Path):
+    """Serialize every Orichum metadata writer for one CLIProxy auth store."""
+    auth_dir = Path(auth_dir)
+    dir_fd = _open_auth_directory(auth_dir)
+    descriptor = -1
+    try:
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(
+            ".orichum-metadata.lock", flags, 0o600, dir_fd=dir_fd
+        )
+        os.fchmod(descriptor, 0o600)
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != os.getuid()
+            or stat.S_IMODE(details.st_mode) != 0o600
+        ):
+            raise CredentialError("credential metadata lock is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    except OSError as error:
+        raise CredentialError("credential metadata lock is unavailable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         os.close(dir_fd)
 
 
@@ -324,31 +400,33 @@ def set_provider_priority(auth_dir: Path, provider: str, priority: int) -> int:
     provider = _validate_provider(provider)
     priority = _validate_priority(priority)
     auth_dir = Path(auth_dir)
-    dir_fd = _open_auth_directory(auth_dir)
-    try:
-        credentials = _load_all_from_fd(auth_dir, dir_fd)
-        matches = tuple(
-            item for item in credentials if item.metadata.provider == provider
-        )
-        if not matches:
-            raise CredentialError(f"provider {provider!r} is not installed")
-        return _update_loaded(
-            auth_dir, dir_fd, matches, {provider: priority}
-        )
-    finally:
-        os.close(dir_fd)
+    with credential_metadata_transaction(auth_dir):
+        dir_fd = _open_auth_directory(auth_dir)
+        try:
+            credentials = _load_all_from_fd(auth_dir, dir_fd)
+            matches = tuple(
+                item for item in credentials if item.metadata.provider == provider
+            )
+            if not matches:
+                raise CredentialError(f"provider {provider!r} is not installed")
+            return _update_loaded(
+                auth_dir, dir_fd, matches, {provider: priority}
+            )
+        finally:
+            os.close(dir_fd)
 
 
 def set_default_priorities(auth_dir: Path) -> int:
     auth_dir = Path(auth_dir)
-    dir_fd = _open_auth_directory(auth_dir)
-    try:
-        credentials = _load_all_from_fd(auth_dir, dir_fd)
-        return _update_loaded(
-            auth_dir, dir_fd, credentials, DEFAULT_PRIORITIES
-        )
-    finally:
-        os.close(dir_fd)
+    with credential_metadata_transaction(auth_dir):
+        dir_fd = _open_auth_directory(auth_dir)
+        try:
+            credentials = _load_all_from_fd(auth_dir, dir_fd)
+            return _update_loaded(
+                auth_dir, dir_fd, credentials, DEFAULT_PRIORITIES
+            )
+        finally:
+            os.close(dir_fd)
 
 
 def _render_table(credentials: Sequence[Credential]) -> str:
@@ -383,7 +461,7 @@ def _render_table(credentials: Sequence[Credential]) -> str:
 
 
 def _create_parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="claudex-provider")
+    parser = _Parser(prog="orichum provider credential")
     parser.add_argument("--auth-dir", required=True, type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list")

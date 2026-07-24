@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workflow_root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$workflow_root/lib/workflow.sh"
+
+[[ "$#" -eq 3 ]] || exit 2
+data_root="$1"
+port="$2"
+client_port="$3"
+valid_service_port "$port" || exit 2
+valid_service_port "$client_port" || exit 2
+[[ -d "$data_root" && ! -L "$data_root" ]] || exit 1
+
+case "$(uname -s)" in
+  Darwin)
+    platform=darwin
+    service_file="$HOME/Library/LaunchAgents/io.orichum.cliproxy.plist"
+    label=io.orichum.cliproxy
+    unit=-
+    ;;
+  Linux)
+    platform=systemd
+    service_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-cliproxy.service"
+    label=-
+    unit=orichum-cliproxy.service
+    ;;
+  *) exit 1 ;;
+esac
+
+cliproxy_service_is_owned "$service_file" "$data_root" || exit 1
+managed_service_target_is_loaded "$platform" "$label" "$unit" || exit 1
+active_definition="$(
+  managed_service_definition_path "$platform" "$label" "$unit"
+)" || exit 1
+[[ "$active_definition" == "$service_file" ]] || exit 1
+service_pid="$(managed_service_main_pid "$platform" "$label" "$unit")" || exit 1
+pid_owns_loopback_listener "$service_pid" "$port" || exit 1
+pid_owns_loopback_connection "$service_pid" "$port" "$client_port"

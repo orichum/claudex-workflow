@@ -92,13 +92,48 @@ class ProjectContextTests(unittest.TestCase):
         self.assertEqual(result["repoRootReal"], str(repo_root))
 
     def test_longest_component_boundary_and_unmapped(self):
-        self.assertEqual(self.resolve(self.xebia / "repo")["route"]["id"], "xebia")
-        self.assertEqual(
-            self.resolve(self.complion / "nested" / "repo")["route"]["id"],
-            "complion",
-        )
+        xebia = self.resolve(self.xebia / "repo")["route"]
+        self.assertEqual(xebia["id"], "xebia")
+        self.assertEqual(xebia["contextRootReal"], str(self.xebia))
+        self.assertEqual(xebia["dockerProfile"], "xebia")
+
+        complion = self.resolve(self.complion / "nested" / "repo")["route"]
+        self.assertEqual(complion["id"], "complion")
+        self.assertEqual(complion["contextRootReal"], str(self.complion))
+        self.assertEqual(complion["dockerProfile"], "realtime")
         self.assertIsNone(self.resolve(self.root / "xebia-old")["route"])
         self.assertIsNone(self.resolve(self.root / "elsewhere")["route"])
+
+    def test_resolver_selects_the_deepest_matching_normalized_root(self):
+        nested_palace = self.root / "palaces" / "nested"
+        nested_palace.mkdir()
+        nested_palace.chmod(0o700)
+        normalized = {
+            "contexts": [
+                {
+                    "root": self.xebia,
+                    "dockerProfile": "xebia",
+                    "modelStack": None,
+                    "memoryPalace": self.palace,
+                    "memoryWing": "xebia",
+                },
+                {
+                    "root": self.xebia_repo,
+                    "dockerProfile": "nested",
+                    "modelStack": None,
+                    "memoryPalace": nested_palace,
+                    "memoryWing": "nested",
+                },
+            ]
+        }
+
+        result = resolve_context(normalized, self.xebia_repo)
+
+        self.assertEqual(result["route"]["id"], "nested")
+        self.assertEqual(
+            result["route"]["contextRootReal"], str(self.xebia_repo)
+        )
+        self.assertEqual(result["route"]["dockerProfile"], "nested")
 
     def test_overlapping_canonical_roots_fail_closed(self):
         nested = json.loads(json.dumps(self.config))
@@ -357,37 +392,6 @@ class ProjectContextTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.resolve(self.root / "missing-launch")
 
-    def test_authoritative_configuration_is_exact(self):
-        payload = json.loads((REPO_ROOT / "controller/project-context.json").read_text())
-        self.assertEqual(
-            payload,
-            {
-                "contexts": [
-                    {
-                        "root": "~/xebia",
-                        "dockerProfile": "xebia",
-                        "modelStack": None,
-                        "memoryPalace": "~/.mempalace/palaces/xebia",
-                        "memoryWing": "xebia",
-                    },
-                    {
-                        "root": "~/complion",
-                        "dockerProfile": "realtime",
-                        "modelStack": None,
-                        "memoryPalace": "~/.mempalace/palaces/complion",
-                        "memoryWing": "complion",
-                    },
-                    {
-                        "root": "~/claudex-workflow",
-                        "dockerProfile": None,
-                        "modelStack": None,
-                        "memoryPalace": "~/.mempalace/palaces/claudex-workflow",
-                        "memoryWing": "claudex-workflow",
-                    },
-                ],
-            },
-        )
-
     def test_cli_writes_canonical_atomic_private_output(self):
         output = self.root / "context-output.json"
         output.write_text("old contents", encoding="utf-8")
@@ -515,6 +519,28 @@ raise SystemExit(0)
             + "\n",
             encoding="utf-8",
         )
+        self.providers_path = self.root / "providers.json"
+        self.providers_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "providers": {},
+                    "accountPools": {
+                        "docker-dev": {"providers": []},
+                        "shared": {"providers": []},
+                    },
+                    "fallbackRoutes": {},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.focused_routing_path = self.root / "model-stacks.json"
+        focused_routing = json.loads(self.routing_path.read_text(encoding="utf-8"))
+        focused_routing["models"] = {}
+        self.focused_routing_path.write_text(
+            json.dumps(focused_routing) + "\n", encoding="utf-8"
+        )
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -541,6 +567,40 @@ raise SystemExit(0)
                 str(self.config_path),
                 "--routing-config",
                 str(self.routing_path),
+                *arguments,
+            ],
+            cwd=REPO_ROOT,
+            env=command_environment,
+            input=input_text,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def run_focused_context(self, *arguments, input_text=None, environment=None):
+        command_environment = os.environ.copy()
+        command_environment.update(
+            {
+                "HOME": str(self.root),
+                "PATH": f"{self.tool_directory}{os.pathsep}{command_environment.get('PATH', '')}",
+                "PYTHONPATH": str(self.fake_package_directory),
+                "FAKE_TOOL_CALLS": str(self.tool_calls_path),
+            }
+        )
+        if environment is not None:
+            command_environment.update(environment)
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "integrations.common.project_context",
+                "context",
+                "--config",
+                str(self.config_path),
+                "--routing-config",
+                str(self.focused_routing_path),
+                "--providers-config",
+                str(self.providers_path),
                 *arguments,
             ],
             cwd=REPO_ROOT,
@@ -605,7 +665,10 @@ raise SystemExit(0)
         listed = self.run_context("list")
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("| PROJECT ROOT", listed.stdout)
-        self.assertIn("| MCP_DOCKER PROFILE | MEMPALACE PATH", listed.stdout)
+        self.assertIn(
+            "| MCP_DOCKER PROFILE | GITHUB ACCOUNT | MEMPALACE PATH",
+            listed.stdout,
+        )
         self.assertIn("docker-dev", listed.stdout)
 
         updated = self.run_context(
@@ -614,6 +677,61 @@ raise SystemExit(0)
         self.assertEqual(updated.returncode, 0, updated.stderr)
         self.assertEqual(self.load_contexts()[0]["dockerProfile"], "docker-prod")
         self.assertEqual(self.load_contexts()[0]["memoryWing"], "prod")
+
+    def test_focused_add_preserves_schema_and_assigns_ordered_account_pools(self):
+        self.config_path.write_text(
+            '{"schemaVersion":1,"contexts":[]}\n', encoding="utf-8"
+        )
+
+        added = self.run_focused_context(
+            "add",
+            str(self.workspace),
+            "--docker",
+            "docker-dev",
+            "--github-account",
+            "work-account",
+        )
+
+        self.assertEqual(added.returncode, 0, added.stderr)
+        document = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(document["schemaVersion"], 1)
+        self.assertEqual(
+            document["contexts"][0]["accountPools"],
+            ["docker-dev", "shared"],
+        )
+        self.assertEqual(
+            document["contexts"][0]["githubAccount"], "work-account"
+        )
+
+        updated = self.run_focused_context(
+            "update",
+            str(self.workspace),
+            "--pool",
+            "shared",
+            "--no-docker",
+            "--no-github-account",
+        )
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        document = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertIsNone(document["contexts"][0]["dockerProfile"])
+        self.assertIsNone(document["contexts"][0]["githubAccount"])
+        self.assertEqual(document["contexts"][0]["accountPools"], ["shared"])
+
+    def test_focused_unknown_account_pool_fails_before_population(self):
+        self.config_path.write_text(
+            '{"schemaVersion":1,"contexts":[]}\n', encoding="utf-8"
+        )
+
+        rejected = self.run_focused_context(
+            "add", str(self.workspace), "--pool", "missing"
+        )
+
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(
+            json.loads(self.config_path.read_text(encoding="utf-8"))["contexts"],
+            [],
+        )
+        self.assertEqual(self.read_tool_calls(), [])
 
     def test_add_rejects_unknown_model_stack_without_population(self):
         other_project = self.root / "other-project"
@@ -1102,12 +1220,15 @@ raise SystemExit(0)
         self.assertEqual(marker.read_text(encoding="utf-8"), "context data")
 
     def test_launcher_resolves_an_installed_symlink(self):
-        installed = self.root / "bin" / "claudex-context"
+        installed = self.root / "bin" / "orichum-context"
         installed.parent.mkdir()
-        installed.symlink_to(REPO_ROOT / "bin" / "claudex-context")
+        installed.symlink_to(REPO_ROOT / "bin" / "orichum-context")
+        environment = os.environ.copy()
+        environment["ORICHUM_CONFIG_HOME"] = str(REPO_ROOT / "config")
         completed = subprocess.run(
             [str(installed), "list"],
             cwd=self.root,
+            env=environment,
             check=False,
             capture_output=True,
             text=True,

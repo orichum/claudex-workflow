@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+python_entrypoint=(
+  python3 -I -B -c
+  'import sys; sys.path.insert(0, sys.argv.pop(1)); import runpy; runpy.run_module("integrations.common.orichum_cli", run_name="__main__")'
+  "$WORKFLOW_ROOT"
+)
+case "${1:-}" in
+  -h|--help|config|context|models|provider|plugin|headroom|doctor|session|sessions|resume|fork|run)
+    exec "${python_entrypoint[@]}" "$@"
+    ;;
+  *)
+    exec "${python_entrypoint[@]}" run -- "$@"
+    ;;
+esac

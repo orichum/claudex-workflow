@@ -1,8 +1,8 @@
 {
-  "name": "claudex-controller",
-  "description": "Bounded automatic mixed-model orchestration for claudex-gpt",
+  "name": "orichum-controller",
+  "description": "Bounded automatic mixed-model orchestration for orichum",
   "version": "1.0.0",
   "author": {
-    "name": "Local Claudex Workflow"
+    "name": "Local Orichum Workflow"
   }
 }

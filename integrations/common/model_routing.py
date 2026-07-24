@@ -70,11 +70,8 @@ def validate_model_id(value: object, label: str) -> str:
     return value
 
 
-def load_routing(path: Path) -> dict[str, object]:
-    try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise RoutingError("model routing could not be parsed") from error
+def validate_routing_document(raw: object) -> dict[str, object]:
+    """Validate and normalize one already-parsed model-routing document."""
     document = _exact_object(
         raw, {"schemaVersion", "defaultStack", "stacks"}, "routing"
     )
@@ -123,6 +120,34 @@ def load_routing(path: Path) -> dict[str, object]:
         "defaultStack": default,
         "stacks": normalized,
     }
+
+
+def load_routing(path: Path) -> dict[str, object]:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RoutingError("model routing could not be parsed") from error
+    return validate_routing_document(raw)
+
+
+def load_routing_view(path: Path) -> dict[str, object]:
+    """Load the routing portion of either routing.json or model-stacks.json."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RoutingError("model routing could not be parsed") from error
+    if isinstance(raw, dict) and set(raw) == {
+        "schemaVersion",
+        "defaultStack",
+        "models",
+        "stacks",
+    }:
+        raw = {
+            "schemaVersion": raw["schemaVersion"],
+            "defaultStack": raw["defaultStack"],
+            "stacks": raw["stacks"],
+        }
+    return validate_routing_document(raw)
 
 
 def load_catalog(path: Path) -> tuple[str, ...]:
@@ -334,7 +359,7 @@ def _write_effective(path: Path, effective: EffectiveStack) -> None:
 
 
 def _create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="claudex-models")
+    parser = argparse.ArgumentParser(prog="orichum models")
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ("list", "validate"):
         subcommand = commands.add_parser(command)
@@ -349,7 +374,7 @@ def _create_parser() -> argparse.ArgumentParser:
 def main(arguments: Optional[list[str]] = None) -> int:
     parsed = _create_parser().parse_args(arguments)
     try:
-        routing = load_routing(parsed.routing_config)
+        routing = load_routing_view(parsed.routing_config)
         catalogue = load_catalog(parsed.models_file)
         if parsed.command == "list":
             scope = "selected" if parsed.stack is not None else "global"

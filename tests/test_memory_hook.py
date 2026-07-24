@@ -50,7 +50,7 @@ class MemoryHookTests(unittest.TestCase):
                 self.workflow,
                 self.project,
                 self.config,
-                routing_path=REPOSITORY_ROOT / "controller" / "model-routing.json",
+                routing_path=REPOSITORY_ROOT / "config" / "model-stacks.json",
                 models_path=models,
                 plugin_source=REPOSITORY_ROOT / "controller" / "plugin",
             )

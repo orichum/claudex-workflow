@@ -11,18 +11,17 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 
-PLUGIN_MANIFEST="$WORKFLOW_ROOT/controller/plugins.json"
+PLUGIN_MANIFEST="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}/plugins.json"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 CLAUDEX_CLAUDE_CONFIG="$WORKFLOW_DATA_ROOT/claude-config"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  claudex-plugin add PLUGIN@MARKETPLACE [--source MARKETPLACE_SOURCE]
-  claudex-plugin list
-  claudex-plugin sync
-  claudex-plugin update
-  claudex-plugin remove PLUGIN@MARKETPLACE
+  orichum plugin add PLUGIN@MARKETPLACE [--source MARKETPLACE_SOURCE]
+  orichum plugin list
+  orichum plugin sync
+  orichum plugin remove PLUGIN@MARKETPLACE
 USAGE
 }
 
@@ -76,10 +75,10 @@ write_manifest() {
   local jq_filter="$1"
   shift
   local temporary
-  temporary="$(mktemp "$WORKFLOW_ROOT/controller/.plugins.json.XXXXXX")" || \
+  temporary="$(mktemp "$(dirname "$PLUGIN_MANIFEST")/.plugins.json.XXXXXX")" || \
     die "could not create plugin declaration update"
   if ! jq "$@" "$jq_filter" "$PLUGIN_MANIFEST" >"$temporary" || \
-     ! chmod 0644 "$temporary" || ! mv -f "$temporary" "$PLUGIN_MANIFEST"; then
+     ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$PLUGIN_MANIFEST"; then
     rm -f -- "$temporary"
     die "could not update plugin declaration"
   fi
@@ -108,7 +107,7 @@ read_installed_plugins() {
 
 sync_plugins() {
   local marketplaces installed name source plugin_id refreshed
-  printf 'Claudex plugin config: %s\n' "$CLAUDEX_CLAUDE_CONFIG"
+  printf 'Orichum plugin config: %s\n' "$CLAUDEX_CLAUDE_CONFIG"
   if jq -e '.plugins | length == 0' "$PLUGIN_MANIFEST" >/dev/null; then
     printf '[plugin] no declared plugins\n'
     return 0
@@ -150,7 +149,7 @@ sync_plugins() {
 list_plugins() {
   local installed
   installed="$(read_installed_plugins)" || die "could not list installed Claude plugins"
-  printf 'Claudex plugin config: %s\n\n' "$CLAUDEX_CLAUDE_CONFIG"
+  printf 'Orichum plugin config: %s\n\n' "$CLAUDEX_CLAUDE_CONFIG"
   python3 - "$PLUGIN_MANIFEST" "$installed" <<'PY'
 import json
 import sys

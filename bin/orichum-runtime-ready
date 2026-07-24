@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workflow_root="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$workflow_root/lib/workflow.sh"
+
+[[ "$#" -eq 1 ]] || exit 2
+data_root="$1"
+[[ -d "$data_root" && ! -L "$data_root" ]] || exit 1
+IFS=$'\t' read -r cliproxy_port headroom_port route_port \
+  < <(read_service_ports "$data_root")
+
+case "$(uname -s)" in
+  Darwin)
+    platform=darwin
+    clip_file="$HOME/Library/LaunchAgents/io.orichum.cliproxy.plist"
+    clip_label=io.orichum.cliproxy
+    clip_unit=-
+    head_file="$HOME/Library/LaunchAgents/io.orichum.headroom.plist"
+    head_label=io.orichum.headroom
+    head_unit=-
+    route_file="$HOME/Library/LaunchAgents/io.orichum.route-proxy.plist"
+    route_label=io.orichum.route-proxy
+    route_unit=-
+    ;;
+  Linux)
+    platform=systemd
+    unit_root="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    clip_file="$unit_root/orichum-cliproxy.service"
+    clip_label=-
+    clip_unit=orichum-cliproxy.service
+    head_file="$unit_root/orichum-headroom.service"
+    head_label=-
+    head_unit=orichum-headroom.service
+    route_file="$unit_root/orichum-route-proxy.service"
+    route_label=-
+    route_unit=orichum-route-proxy.service
+    ;;
+  *) exit 1 ;;
+esac
+
+verify_service() {
+  local file="$1" kind="$2" label="$3" unit="$4" port="$5" mode="${6:-}"
+  if [[ -n "$mode" ]]; then
+    service_definition_is_owned "$file" "$data_root" "$kind" "$mode"
+  else
+    service_definition_is_owned "$file" "$data_root" "$kind"
+  fi
+  managed_service_target_is_loaded "$platform" "$label" "$unit"
+  [[ "$(managed_service_definition_path \
+    "$platform" "$label" "$unit")" == "$file" ]]
+  local pid
+  pid="$(managed_service_main_pid "$platform" "$label" "$unit")"
+  pid_owns_loopback_listener "$pid" "$port"
+}
+
+verify_service \
+  "$clip_file" cliproxy "$clip_label" "$clip_unit" "$cliproxy_port"
+verify_service \
+  "$head_file" headroom "$head_label" "$head_unit" "$headroom_port" new
+verify_service \
+  "$route_file" claudex-proxy "$route_label" "$route_unit" "$route_port"
+
+temporary="$(mktemp "${TMPDIR:-/tmp}/orichum-models.XXXXXX")"
+trap 'rm -f -- "$temporary"' EXIT
+curl -fsS --connect-timeout 1 --max-time 3 \
+  "http://127.0.0.1:$cliproxy_port/v1/models" >"$temporary"
+cliproxy_models_response_is_ready "$temporary"
+curl -fsS --connect-timeout 1 --max-time 3 \
+  "http://127.0.0.1:$route_port/v1/models" >"$temporary"
+cliproxy_models_response_is_ready "$temporary"
+curl -fsS --connect-timeout 1 --max-time 3 \
+  "http://127.0.0.1:$headroom_port/health" | jq -e '
+    .service == "headroom-proxy" and .status == "healthy" and .ready == true
+  ' >/dev/null
