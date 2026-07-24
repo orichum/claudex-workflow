@@ -298,5 +298,18 @@ rg -Fq 'report_test_failure()' "$ROOT/tests/test_installer.sh"
 rg -Fq 'trap report_test_failure ERR' "$ROOT/tests/test_installer.sh"
 rg -Fq 'ERROR: test_installer.sh:%s exited %s: %s' \
   "$ROOT/tests/test_installer.sh"
+python3 - "$ROOT/install.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+start = source.index("claudex_proxy_runtime_is_owned()")
+end = source.index("\n}\n", start) + 3
+runtime_check = source[start:end]
+if "claudex_proxy_health_is_owned_at" not in runtime_check:
+    raise SystemExit("route proxy readiness does not verify health identity")
+if "pid_owns_loopback_listener" in runtime_check:
+    raise SystemExit("route proxy readiness still depends on socket metadata")
+PY
 
 printf 'PASS: Orichum installer rollback and port selection\n'

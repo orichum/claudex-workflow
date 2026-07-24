@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import threading
@@ -195,7 +196,11 @@ class RouteProxyTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             json.loads(body),
-            {"ready": True, "service": "orichum-route-proxy"},
+            {
+                "pid": os.getpid(),
+                "ready": True,
+                "service": "orichum-route-proxy",
+            },
         )
 
     def test_normalizes_claudex_profile_path_for_cliproxy(self) -> None:

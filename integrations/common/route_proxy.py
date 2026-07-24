@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -296,7 +297,11 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
 
     def _health(self) -> None:
         body = json.dumps(
-            {"ready": True, "service": "orichum-route-proxy"},
+            {
+                "pid": os.getpid(),
+                "ready": True,
+                "service": "orichum-route-proxy",
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")

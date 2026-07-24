@@ -474,6 +474,18 @@ claudex_proxy_endpoint_ready_at() {
     claudex_proxy_models_response_is_ready /dev/stdin "$expected_model"
 }
 
+claudex_proxy_health_is_owned_at() {
+  local port="$1"
+  local service_pid="$2"
+  curl -fsS --connect-timeout 1 --max-time 2 \
+    "http://127.0.0.1:$port/health" 2>/dev/null | \
+    jq -e --argjson pid "$service_pid" '
+      .service == "orichum-route-proxy" and
+      .ready == true and
+      .pid == $pid
+    ' >/dev/null 2>&1
+}
+
 claudex_proxy_runtime_is_owned() {
   local port="$1"
   local expected_model="$2"
@@ -481,7 +493,7 @@ claudex_proxy_runtime_is_owned() {
   service_pid="$(managed_service_main_pid \
     "$platform" "$claudex_proxy_service_label" \
     "$claudex_proxy_service_unit")" || return 1
-  pid_owns_loopback_listener "$service_pid" "$port" || return 1
+  claudex_proxy_health_is_owned_at "$port" "$service_pid" || return 1
   claudex_proxy_endpoint_ready_at "$port" "$expected_model"
 }
 
