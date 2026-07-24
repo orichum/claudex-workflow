@@ -158,4 +158,45 @@ case "$secret_scan_rc" in
     ;;
 esac
 
+macos_workflow="$ROOT/.github/workflows/macos-arm64-acceptance.yml"
+[[ -f "$macos_workflow" ]]
+for required_contract in \
+    'name: Native macOS ARM64 acceptance' \
+    'pull_request:' \
+    'workflow_dispatch:' \
+    'permissions:' \
+    'contents: read' \
+    'runs-on: macos-15' \
+    'test "$(uname -m)" = arm64' \
+    'brew install ripgrep' \
+    'launchctl print "gui/$(id -u)/io.orichum.cliproxy"' \
+    'launchctl print "gui/$(id -u)/io.orichum.headroom"' \
+    'launchctl print "gui/$(id -u)/io.orichum.route-proxy"' \
+    'Fresh install without providers' \
+    'Activate disposable multi-family routes' \
+    'Verify idempotent upgrade' \
+    'Clean up launch agents'; do
+  rg -Fq "$required_contract" "$macos_workflow"
+done
+if rg -Fq 'macos-15-intel' "$macos_workflow"; then
+  printf 'macOS acceptance must run on Apple Silicon only\n' >&2
+  exit 1
+fi
+set +e
+rg -q 'secrets[.]|\$\{\{[[:space:]]*secrets' "$macos_workflow"
+macos_secret_scan_rc=$?
+set -e
+case "$macos_secret_scan_rc" in
+  0)
+    printf 'macOS acceptance workflow must not consume repository secrets\n' >&2
+    exit 1
+    ;;
+  1) ;;
+  *)
+    printf 'macOS acceptance workflow secret scan failed (rc=%s)\n' \
+      "$macos_secret_scan_rc" >&2
+    exit 1
+    ;;
+esac
+
 printf 'PASS: Orichum command and control-plane smoke\n'
