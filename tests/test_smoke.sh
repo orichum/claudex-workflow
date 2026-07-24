@@ -101,6 +101,7 @@ for required_contract in \
     'runs-on: ubuntu-24.04' \
     'timeout-minutes: 30' \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
+    'sudo apt-get install --yes ripgrep' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'Verify idempotent upgrade'; do

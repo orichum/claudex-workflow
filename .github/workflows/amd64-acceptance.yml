@@ -27,6 +27,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
           sudo npm install --global @anthropic-ai/claude-code
           export ORICHUM_DATA_HOME="$RUNNER_TEMP/orichum-data"
           export ORICHUM_CONFIG_HOME="$RUNNER_TEMP/orichum-config"
