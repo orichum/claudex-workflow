@@ -73,8 +73,10 @@ jobs:
           test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
           curl -fsS "http://127.0.0.1:$(jq -r .cliproxyPort "$ORICHUM_DATA_HOME/service-ports.json")/v1/models" |
             jq -e '.data | type == "array"' >/dev/null
+          systemctl --user show orichum-headroom.service --property=ExecStart --value |
+            rg -Fq -- '--disable-kompress'
           curl -fsS "http://127.0.0.1:$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")/health" |
-            jq -e '.service == "headroom-proxy" and .config.disable_kompress == true' >/dev/null
+            jq -e '.service == "headroom-proxy"' >/dev/null
           set +e
           doctor_output="$(orichum doctor 2>&1)"
           doctor_rc=$?
