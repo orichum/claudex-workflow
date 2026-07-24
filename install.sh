@@ -1398,8 +1398,16 @@ preflight_claudex_translation_proxy() (
 require_activation_port_available() {
   local service_name="$1"
   local port="$2"
-  port_is_available "$port" || workflow_die \
-    "$service_name activation port $port became occupied; prior state will be restored"
+  local activation_port_ready=false
+  for _ in {1..150}; do
+    if port_is_available "$port"; then
+      activation_port_ready=true
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$activation_port_ready" == true ]] || workflow_die \
+    "$service_name activation port $port remained occupied; prior state will be restored"
 }
 
 if [[ "$platform" == darwin ]]; then
