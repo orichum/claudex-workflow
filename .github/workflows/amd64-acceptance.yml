@@ -60,13 +60,25 @@ jobs:
               tests/test_plugins.sh \
               tests/test_installer.sh \
               tests/test_install_transaction.sh; do
-            bash "$test_script"
+            if ! bash "$test_script"; then
+              printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
+                "$test_script"
+              bash -x "$test_script"
+              exit 1
+            fi
           done
 
       - name: Fresh install without providers
         shell: bash
         run: |
           set -euo pipefail
+          report_acceptance_failure() {
+            local status="$?"
+            printf '::error title=Native acceptance failure::line %s exited %s: %s\n' \
+              "${BASH_LINENO[0]:-$LINENO}" "$status" "$BASH_COMMAND"
+            exit "$status"
+          }
+          trap report_acceptance_failure ERR
           ./install.sh
           managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
           test -x "$managed_python"

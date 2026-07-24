@@ -275,6 +275,11 @@ for acceptance_workflow in \
   rg -Fq 'test "$headroom_status" = 503' "$acceptance_workflow"
   rg -Fq '.status == "unhealthy"' "$acceptance_workflow"
   rg -Fq '.ready == false' "$acceptance_workflow"
+  rg -Fq 'if ! bash "$test_script"; then' "$acceptance_workflow"
+  rg -Fq 'bash -x "$test_script"' "$acceptance_workflow"
+  rg -Fq 'report_acceptance_failure()' "$acceptance_workflow"
+  rg -Fq 'trap report_acceptance_failure ERR' "$acceptance_workflow"
+  rg -Fq 'Native acceptance failure' "$acceptance_workflow"
 done
 
 rg -Fq 'report_test_failure()' "$ROOT/tests/test_installer.sh"
