@@ -267,4 +267,19 @@ if not (
     raise SystemExit("private tool snapshot does not precede all three upgrades")
 PY
 
+for acceptance_workflow in \
+    "$ROOT/.github/workflows/amd64-acceptance.yml" \
+    "$ROOT/.github/workflows/macos-arm64-acceptance.yml"; do
+  rg -Fq 'headroom-provider-pending.json' "$acceptance_workflow"
+  rg -Fq -- "--write-out '%{http_code}'" "$acceptance_workflow"
+  rg -Fq 'test "$headroom_status" = 503' "$acceptance_workflow"
+  rg -Fq '.status == "unhealthy"' "$acceptance_workflow"
+  rg -Fq '.ready == false' "$acceptance_workflow"
+done
+
+rg -Fq 'report_test_failure()' "$ROOT/tests/test_installer.sh"
+rg -Fq 'trap report_test_failure ERR' "$ROOT/tests/test_installer.sh"
+rg -Fq 'ERROR: test_installer.sh:%s exited %s: %s' \
+  "$ROOT/tests/test_installer.sh"
+
 printf 'PASS: Orichum installer rollback and port selection\n'

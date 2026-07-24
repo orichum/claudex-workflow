@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_test_failure() {
+  local status="$?"
+  printf 'ERROR: test_installer.sh:%s exited %s: %s\n' \
+    "${BASH_LINENO[0]:-$LINENO}" "$status" "$BASH_COMMAND" >&2
+  exit "$status"
+}
+trap report_test_failure ERR
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"

@@ -106,8 +106,18 @@ jobs:
           headroom_port="$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")"
           curl -fsS "http://127.0.0.1:$cliproxy_port/v1/models" |
             jq -e '.data | type == "array"' >/dev/null
-          curl -fsS "http://127.0.0.1:$headroom_port/health" |
-            jq -e '.service == "headroom-proxy"' >/dev/null
+          headroom_health="$RUNNER_TEMP/headroom-provider-pending.json"
+          headroom_status="$(
+            curl -sS --output "$headroom_health" \
+              --write-out '%{http_code}' \
+              "http://127.0.0.1:$headroom_port/health"
+          )"
+          test "$headroom_status" = 503
+          jq -e '
+            .service == "headroom-proxy" and
+            .status == "unhealthy" and
+            .ready == false
+          ' "$headroom_health" >/dev/null
           set +e
           poison_bin="$RUNNER_TEMP/poison-python"
           mkdir -p "$poison_bin"

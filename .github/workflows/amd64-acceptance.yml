@@ -91,8 +91,21 @@ jobs:
             jq -e '.data | type == "array"' >/dev/null
           systemctl --user show orichum-headroom.service --property=ExecStart --value |
             rg -Fq -- '--disable-kompress'
-          curl -fsS "http://127.0.0.1:$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")/health" |
-            jq -e '.service == "headroom-proxy"' >/dev/null
+          headroom_port="$(
+            jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json"
+          )"
+          headroom_health="$RUNNER_TEMP/headroom-provider-pending.json"
+          headroom_status="$(
+            curl -sS --output "$headroom_health" \
+              --write-out '%{http_code}' \
+              "http://127.0.0.1:$headroom_port/health"
+          )"
+          test "$headroom_status" = 503
+          jq -e '
+            .service == "headroom-proxy" and
+            .status == "unhealthy" and
+            .ready == false
+          ' "$headroom_health" >/dev/null
           set +e
           poison_bin="$RUNNER_TEMP/poison-python"
           mkdir -p "$poison_bin"
