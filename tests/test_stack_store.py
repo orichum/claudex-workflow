@@ -38,12 +38,11 @@ class StackStoreTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
-        self.portable = self.root / "portable"
         self.private = self.root / "private"
-        self.portable.mkdir()
         self.private.mkdir()
         self.private.chmod(0o700)
-        self.model_path = self.portable / "model-stacks.json"
+        self.portable = self.private
+        self.model_path = self.private / "model-stacks.json"
         self.binding_path = self.private / "stack-bindings.json"
         self.account_id = "oc-a-1111111111111111"
         self.register_account(self.account_id)
@@ -139,6 +138,7 @@ class StackStoreTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        self.model_path.chmod(0o600)
 
     def read_model_document(self) -> dict[str, object]:
         return json.loads(self.model_path.read_text(encoding="utf-8"))
@@ -320,10 +320,13 @@ class StackStoreTests(unittest.TestCase):
         original_binding = self.binding_path.read_bytes()
         real_replace = os.replace
         targets: list[Path] = []
+        failed = False
 
         def fail_binding(source: object, target: object) -> None:
+            nonlocal failed
             targets.append(Path(target))
-            if Path(target) == self.binding_path:
+            if Path(target) == self.binding_path and not failed:
+                failed = True
                 raise OSError("injected first rename failure")
             real_replace(source, target)
 
@@ -333,13 +336,20 @@ class StackStoreTests(unittest.TestCase):
         ), self.assertRaisesRegex(StackStoreError, "could not be saved"):
             save_stack(snapshot, snapshot.stacks, snapshot.bindings)
 
-        self.assertEqual(targets, [self.binding_path])
+        self.assertEqual(
+            [
+                target
+                for target in targets
+                if target in (self.binding_path, self.model_path)
+            ],
+            [self.binding_path, self.model_path, self.binding_path],
+        )
         self.assertEqual(self.model_path.read_bytes(), original_model)
         self.assertEqual(self.binding_path.read_bytes(), original_binding)
         self.assertEqual(
             [
                 path
-                for path in (*self.portable.iterdir(), *self.private.iterdir())
+                for path in self.private.iterdir()
                 if path.name.startswith((".model-stacks.json.", ".stack-bindings.json."))
             ],
             [],
@@ -376,8 +386,17 @@ class StackStoreTests(unittest.TestCase):
             save_stack(snapshot, snapshot.stacks, updated_bindings)
 
         self.assertEqual(
-            targets,
-            [self.binding_path, self.model_path, self.binding_path],
+            [
+                target
+                for target in targets
+                if target in (self.binding_path, self.model_path)
+            ],
+            [
+                self.binding_path,
+                self.model_path,
+                self.model_path,
+                self.binding_path,
+            ],
         )
         self.assertEqual(self.model_path.read_bytes(), original_model)
         self.assertEqual(self.binding_path.read_bytes(), original_binding)
@@ -389,23 +408,27 @@ class StackStoreTests(unittest.TestCase):
         snapshot = load_stack_snapshot(
             self.model_path, self.binding_path
         )
+        original_model = self.model_path.read_bytes()
         original_binding = self.binding_path.read_bytes()
         updated_bindings = StackBindings(
             {"oc-c-2000000000000001": self.account_id}
         )
         real_replace = os.replace
         binding_replacements = 0
+        model_replacements = 0
 
         def fail_model_and_restore(
             source: object, target: object
         ) -> None:
-            nonlocal binding_replacements
+            nonlocal binding_replacements, model_replacements
             if Path(target) == self.binding_path:
                 binding_replacements += 1
                 if binding_replacements == 2:
                     raise OSError("injected rollback failure")
             if Path(target) == self.model_path:
-                raise OSError("injected model rename failure")
+                model_replacements += 1
+                if model_replacements == 1:
+                    raise OSError("injected model rename failure")
             real_replace(source, target)
 
         with mock.patch(
@@ -414,14 +437,38 @@ class StackStoreTests(unittest.TestCase):
         ), self.assertRaisesRegex(StackStoreError, "rollback failed"):
             save_stack(snapshot, snapshot.stacks, updated_bindings)
 
-        recovery = [
-            path
-            for path in self.private.iterdir()
-            if path.name.startswith(".stack-bindings.json.")
-        ]
-        self.assertEqual(len(recovery), 1)
-        self.assertEqual(recovery[0].read_bytes(), original_binding)
-        self.assertEqual(stat.S_IMODE(recovery[0].stat().st_mode), 0o600)
+        model_recovery = (
+            self.private
+            / ".model-stacks.transaction.model.original"
+        )
+        binding_recovery = (
+            self.private
+            / ".model-stacks.transaction.bindings.original"
+        )
+        marker = self.private / ".model-stacks.transaction.json"
+        self.assertEqual(model_recovery.read_bytes(), original_model)
+        self.assertEqual(binding_recovery.read_bytes(), original_binding)
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["state"],
+            "pending",
+        )
+        for recovery in (model_recovery, binding_recovery, marker):
+            self.assertEqual(
+                stat.S_IMODE(recovery.stat().st_mode), 0o600
+            )
+
+        recovered = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), original_binding)
+        self.assertEqual(
+            dict(recovered.bindings.candidate_accounts),
+            {"oc-c-1000000000000001": self.account_id},
+        )
+        self.assertEqual(
+            list(self.private.glob(".model-stacks.transaction*")), []
+        )
 
     def test_second_rename_failure_removes_new_binding_when_none_existed(self):
         snapshot = load_stack_snapshot(
@@ -432,9 +479,12 @@ class StackStoreTests(unittest.TestCase):
             {"oc-c-2000000000000001": self.account_id}
         )
         real_replace = os.replace
+        failed = False
 
         def fail_model(source: object, target: object) -> None:
-            if Path(target) == self.model_path:
+            nonlocal failed
+            if Path(target) == self.model_path and not failed:
+                failed = True
                 raise OSError("injected model rename failure")
             real_replace(source, target)
 
@@ -446,6 +496,269 @@ class StackStoreTests(unittest.TestCase):
 
         self.assertEqual(self.model_path.read_bytes(), original_model)
         self.assertFalse(self.binding_path.exists())
+
+    def test_post_second_rename_interrupt_restores_both_originals(self):
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_model = self.model_path.read_bytes()
+        original_binding = self.binding_path.read_bytes()
+        updated_stacks = normalize_model_stacks(
+            self.document_with_stack("updated")
+        )
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+        real_replace = os.replace
+        interrupted = False
+
+        def interrupt_after_model(
+            source: object, target: object
+        ) -> None:
+            nonlocal interrupted
+            real_replace(source, target)
+            if Path(target) == self.model_path and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt(
+                    "injected post-model-replace interrupt"
+                )
+
+        with mock.patch(
+            "integrations.common.stack_store.os.replace",
+            side_effect=interrupt_after_model,
+        ), self.assertRaises(StackStoreError):
+            save_stack(snapshot, updated_stacks, updated_bindings)
+
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), original_binding)
+
+    def test_every_directory_fsync_boundary_has_defined_outcome(self):
+        from integrations.common import stack_store
+
+        for boundary in (1, 2, 3, 4):
+            with self.subTest(boundary=boundary):
+                self.write_model_document(self.document())
+                self.write_bindings(
+                    {"oc-c-1000000000000001": self.account_id}
+                )
+                for name in (
+                    ".model-stacks.transaction.json",
+                    ".model-stacks.transaction.model.original",
+                    ".model-stacks.transaction.bindings.original",
+                ):
+                    try:
+                        (self.private / name).unlink()
+                    except FileNotFoundError:
+                        pass
+                snapshot = load_stack_snapshot(
+                    self.model_path, self.binding_path
+                )
+                original_model = self.model_path.read_bytes()
+                original_binding = self.binding_path.read_bytes()
+                updated_bindings = StackBindings(
+                    {"oc-c-2000000000000001": self.account_id}
+                )
+                calls = 0
+                real_fsync_directory = stack_store._fsync_directory
+
+                def fail_boundary(path: Path) -> None:
+                    nonlocal calls
+                    calls += 1
+                    if calls == boundary:
+                        raise OSError(
+                            f"injected directory fsync {boundary}"
+                        )
+                    real_fsync_directory(path)
+
+                with mock.patch.object(
+                    stack_store,
+                    "_fsync_directory",
+                    side_effect=fail_boundary,
+                ):
+                    if boundary < 4:
+                        with self.assertRaises(StackStoreError):
+                            save_stack(
+                                snapshot,
+                                snapshot.stacks,
+                                updated_bindings,
+                            )
+                        self.assertEqual(
+                            self.model_path.read_bytes(), original_model
+                        )
+                        self.assertEqual(
+                            self.binding_path.read_bytes(), original_binding
+                        )
+                    else:
+                        save_stack(
+                            snapshot,
+                            snapshot.stacks,
+                            updated_bindings,
+                        )
+                        self.assertEqual(
+                            json.loads(
+                                self.binding_path.read_text(
+                                    encoding="utf-8"
+                                )
+                            )["candidateAccounts"],
+                            {
+                                "oc-c-2000000000000001": self.account_id
+                            },
+                        )
+                self.assertGreaterEqual(calls, boundary)
+
+    def write_recovery_file(self, name: str, payload: bytes) -> Path:
+        path = self.private / name
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        return path
+
+    def write_transaction_marker(
+        self, state: str, *, binding_existed: bool
+    ) -> Path:
+        return self.write_recovery_file(
+            ".model-stacks.transaction.json",
+            (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "state": state,
+                        "bindingExisted": binding_existed,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+
+    def test_restart_recovers_pending_transaction_before_loading(self):
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        original_model = self.model_path.read_bytes()
+        original_binding = self.binding_path.read_bytes()
+        self.write_recovery_file(
+            ".model-stacks.transaction.model.original",
+            original_model,
+        )
+        self.write_recovery_file(
+            ".model-stacks.transaction.bindings.original",
+            original_binding,
+        )
+        self.write_transaction_marker("pending", binding_existed=True)
+        self.write_model_document(self.document_with_stack("external"))
+        self.write_bindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), original_binding)
+        self.assertNotIn("external", snapshot.stacks.stacks)
+        self.assertEqual(
+            dict(snapshot.bindings.candidate_accounts),
+            {"oc-c-1000000000000001": self.account_id},
+        )
+        self.assertEqual(
+            list(self.private.glob(".model-stacks.transaction*")), []
+        )
+
+    def test_restart_preserves_committed_targets_and_cleans_recovery(self):
+        original_model = self.model_path.read_bytes()
+        self.write_recovery_file(
+            ".model-stacks.transaction.model.original",
+            original_model,
+        )
+        self.write_recovery_file(
+            ".model-stacks.transaction.bindings.original",
+            b'{"schemaVersion":1,"candidateAccounts":{}}\n',
+        )
+        self.write_transaction_marker("committed", binding_existed=True)
+        committed = self.document_with_stack("committed")
+        self.write_model_document(committed)
+        self.write_bindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+
+        self.assertIn("committed", snapshot.stacks.stacks)
+        self.assertEqual(
+            dict(snapshot.bindings.candidate_accounts),
+            {"oc-c-2000000000000001": self.account_id},
+        )
+        self.assertEqual(
+            list(self.private.glob(".model-stacks.transaction*")), []
+        )
+
+    def test_committed_cleanup_interrupt_returns_success_and_next_load_cleans(self):
+        from integrations.common import stack_store
+
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+
+        with mock.patch.object(
+            stack_store,
+            "_remove_recovery_artifacts",
+            side_effect=KeyboardInterrupt(
+                "injected committed cleanup interrupt"
+            ),
+        ):
+            save_stack(
+                self.snapshot,
+                self.snapshot.stacks,
+                updated_bindings,
+            )
+
+        marker = self.private / ".model-stacks.transaction.json"
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["state"],
+            "committed",
+        )
+        loaded = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        self.assertEqual(
+            dict(loaded.bindings.candidate_accounts),
+            {"oc-c-2000000000000001": self.account_id},
+        )
+        self.assertEqual(
+            list(self.private.glob(".model-stacks.transaction*")), []
+        )
+
+    def test_model_staging_is_private_at_replacement(self):
+        modes: list[int] = []
+        real_replace = os.replace
+
+        def inspect_model_stage(
+            source: object, target: object
+        ) -> None:
+            if Path(target) == self.model_path:
+                modes.append(stat.S_IMODE(Path(source).stat().st_mode))
+            real_replace(source, target)
+
+        with mock.patch(
+            "integrations.common.stack_store.os.replace",
+            side_effect=inspect_model_stage,
+        ):
+            save_stack(
+                self.snapshot,
+                self.snapshot.stacks,
+                StackBindings(
+                    {"oc-c-2000000000000001": self.account_id}
+                ),
+            )
+
+        self.assertEqual(modes, [0o600])
 
     def test_save_writes_private_binding_and_lock_with_canonical_documents(self):
         updated_bindings = StackBindings(
@@ -466,6 +779,7 @@ class StackStoreTests(unittest.TestCase):
             },
         )
         self.assertEqual(stat.S_IMODE(self.binding_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.model_path.stat().st_mode), 0o600)
         self.assertEqual(
             stat.S_IMODE(
                 (self.private / ".model-stacks.lock").stat().st_mode
@@ -482,10 +796,11 @@ class StackStoreTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             StackStoreError, "unknown candidate"
-        ):
+        ) as missing:
             save_stack(
                 self.snapshot, self.snapshot.stacks, missing_candidate
             )
+        self.assertNotIn("oc-c-", str(missing.exception))
 
         inactive_id = "oc-a-2222222222222222"
         self.register_account(inactive_id, state="disabled")
@@ -518,6 +833,10 @@ class StackStoreTests(unittest.TestCase):
 
         self.model_path.unlink()
         model_target.replace(self.model_path)
+        self.model_path.chmod(0o640)
+        with self.assertRaisesRegex(StackStoreError, "unsafe"):
+            load_stack_snapshot(self.model_path, self.binding_path)
+        self.model_path.chmod(0o600)
         snapshot = load_stack_snapshot(
             self.model_path, self.binding_path
         )
@@ -535,6 +854,16 @@ class StackStoreTests(unittest.TestCase):
         self.binding_path.chmod(0o644)
         with self.assertRaisesRegex(StackStoreError, "unsafe"):
             load_stack_snapshot(self.model_path, self.binding_path)
+
+    def test_model_and_binding_must_share_the_private_parent(self):
+        other = self.root / "other"
+        other.mkdir()
+        other_model = other / "model-stacks.json"
+        other_model.write_bytes(self.model_path.read_bytes())
+        other_model.chmod(0o600)
+
+        with self.assertRaisesRegex(StackStoreError, "same private parent"):
+            load_stack_snapshot(other_model, self.binding_path)
 
     def live_catalog(
         self, *, include_worker: bool = True
@@ -635,7 +964,7 @@ class StackStoreTests(unittest.TestCase):
                 pool=account.pool
             ), self.assertRaisesRegex(
                 StackStoreError, "locked candidate"
-            ):
+            ) as rejected:
                 validate_stack_assignment(
                     "heavy",
                     {"accountPools": ["shared"]},
@@ -645,6 +974,7 @@ class StackStoreTests(unittest.TestCase):
                     {"openai": {"families": ["gpt"]}},
                     catalog,
                 )
+            self.assertNotIn("oc-c-", str(rejected.exception))
 
     def test_invalid_assignment_does_not_mutate_saved_stack_or_projects(self):
         original_model = self.model_path.read_bytes()

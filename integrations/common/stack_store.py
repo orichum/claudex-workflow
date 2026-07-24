@@ -32,6 +32,12 @@ from .stack_definition import (
 from .stack_catalog import LiveCatalog
 
 
+_TRANSACTION_MARKER = ".model-stacks.transaction.json"
+_MODEL_ORIGINAL = ".model-stacks.transaction.model.original"
+_BINDING_ORIGINAL = ".model-stacks.transaction.bindings.original"
+_TRANSACTION_STATES = frozenset({"pending", "committed"})
+
+
 class StackStoreError(RuntimeError):
     """A coordinated stack update failed validation or safe persistence."""
 
@@ -48,6 +54,22 @@ class StackSnapshot:
     _binding_path: Path | None = field(
         default=None, repr=False, compare=False
     )
+
+
+@dataclass(frozen=True)
+class _TransactionState:
+    state: str
+    binding_existed: bool
+
+
+def _require_shared_private_parent(
+    model_path: Path, binding_path: Path
+) -> Path:
+    if model_path.parent != binding_path.parent:
+        raise StackStoreError(
+            "model stacks and bindings must share the same private parent"
+        )
+    return binding_path.parent
 
 
 def _file_bytes(
@@ -195,13 +217,18 @@ def load_stack_snapshot(
 ) -> StackSnapshot:
     model_path = Path(model_path)
     binding_path = Path(binding_path)
+    private_parent = _require_shared_private_parent(
+        model_path, binding_path
+    )
     try:
         with stack_binding_transaction(binding_path) as transaction:
-            with _model_lock(binding_path.parent):
+            with _model_lock(private_parent):
+                _recover_transaction(model_path, binding_path)
                 model_content = _file_bytes(
                     model_path,
                     label="model stacks",
                     limit=MAX_CONFIG_BYTES,
+                    required_mode=0o600,
                 )
                 stacks = _decode_stacks(model_content)
                 binding_digest = transaction.digest()
@@ -278,7 +305,7 @@ def _validate_bindings(
     )
     if missing:
         raise StackStoreError(
-            f"stack binding references unknown candidate {missing[0]}"
+            "stack binding references an unknown candidate"
         )
     try:
         accounts = load_accounts(binding_path.parent / "accounts.json")
@@ -299,12 +326,14 @@ def _validate_bindings(
 
 
 def _stage(path: Path, payload: bytes, mode: int) -> Path:
+    if mode != 0o600:
+        raise StackStoreError("stack store staging mode is unsafe")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent
     )
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, mode)
+        os.fchmod(descriptor, 0o600)
         offset = 0
         while offset < len(payload):
             written = os.write(descriptor, payload[offset:])
@@ -313,9 +342,11 @@ def _stage(path: Path, payload: bytes, mode: int) -> Path:
             offset += written
         os.fsync(descriptor)
         os.close(descriptor)
+        descriptor = -1
         return temporary
     except BaseException:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
         try:
             temporary.unlink()
         except FileNotFoundError:
@@ -340,6 +371,251 @@ def _unlink(path: Path | None) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def _recovery_path(parent: Path, name: str) -> Path:
+    return parent / name
+
+
+def _optional_private_bytes(
+    path: Path, *, label: str, limit: int
+) -> bytes | None:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise StackStoreError(f"{label} is unavailable") from error
+    return _file_bytes(
+        path,
+        label=label,
+        limit=limit,
+        required_mode=0o600,
+    )
+
+
+def _replace_private_file(path: Path, payload: bytes) -> None:
+    staged = _stage(path, payload, 0o600)
+    try:
+        os.replace(staged, path)
+        staged = None
+    finally:
+        _unlink(staged)
+
+
+def _marker_payload(
+    state: str, binding_existed: bool
+) -> bytes:
+    return (
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "state": state,
+                "bindingExisted": binding_existed,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_transaction_marker(
+    parent: Path, state: str, binding_existed: bool
+) -> None:
+    if state not in _TRANSACTION_STATES:
+        raise StackStoreError("stack transaction state is invalid")
+    _replace_private_file(
+        _recovery_path(parent, _TRANSACTION_MARKER),
+        _marker_payload(state, binding_existed),
+    )
+
+
+def _load_transaction_marker(
+    parent: Path,
+) -> _TransactionState | None:
+    content = _optional_private_bytes(
+        _recovery_path(parent, _TRANSACTION_MARKER),
+        label="stack transaction marker",
+        limit=4096,
+    )
+    if content is None:
+        return None
+    try:
+        raw = json.loads(
+            content.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+        )
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        StackStoreError,
+    ) as error:
+        raise StackStoreError(
+            "stack transaction marker is invalid"
+        ) from error
+    if (
+        not isinstance(raw, dict)
+        or set(raw)
+        != {"schemaVersion", "state", "bindingExisted"}
+        or type(raw["schemaVersion"]) is not int
+        or raw["schemaVersion"] != 1
+        or raw["state"] not in _TRANSACTION_STATES
+        or type(raw["bindingExisted"]) is not bool
+    ):
+        raise StackStoreError("stack transaction marker is invalid")
+    return _TransactionState(
+        state=raw["state"],
+        binding_existed=raw["bindingExisted"],
+    )
+
+
+def _remove_recovery_artifacts(parent: Path) -> None:
+    for name in (_MODEL_ORIGINAL, _BINDING_ORIGINAL):
+        path = _recovery_path(parent, name)
+        content = _optional_private_bytes(
+            path,
+            label="stack recovery file",
+            limit=max(MAX_CONFIG_BYTES, MAX_BINDING_BYTES),
+        )
+        if content is not None:
+            path.unlink()
+    marker = _recovery_path(parent, _TRANSACTION_MARKER)
+    if _optional_private_bytes(
+        marker, label="stack transaction marker", limit=4096
+    ) is not None:
+        marker.unlink()
+    _fsync_directory(parent)
+
+
+def _cleanup_after_commit(parent: Path) -> None:
+    try:
+        _remove_recovery_artifacts(parent)
+    except BaseException:
+        pass
+
+
+def _restore_originals(
+    model_path: Path,
+    binding_path: Path,
+    *,
+    binding_existed: bool,
+) -> None:
+    parent = model_path.parent
+    original_model = _optional_private_bytes(
+        _recovery_path(parent, _MODEL_ORIGINAL),
+        label="model stack recovery file",
+        limit=MAX_CONFIG_BYTES,
+    )
+    if original_model is None:
+        raise StackStoreError(
+            "model stack recovery file is unavailable"
+        )
+    original_binding = _optional_private_bytes(
+        _recovery_path(parent, _BINDING_ORIGINAL),
+        label="stack binding recovery file",
+        limit=MAX_BINDING_BYTES,
+    )
+    if binding_existed and original_binding is None:
+        raise StackStoreError(
+            "stack binding recovery file is unavailable"
+        )
+    staged_model = _stage(model_path, original_model, 0o600)
+    staged_binding = (
+        _stage(binding_path, original_binding, 0o600)
+        if original_binding is not None
+        else None
+    )
+    try:
+        os.replace(staged_model, model_path)
+        staged_model = None
+        if binding_existed:
+            os.replace(staged_binding, binding_path)
+            staged_binding = None
+        else:
+            _unlink(binding_path)
+        _fsync_directory(parent)
+    finally:
+        _unlink(staged_model)
+        _unlink(staged_binding)
+
+
+def _finish_recovery(
+    parent: Path, binding_existed: bool
+) -> None:
+    _write_transaction_marker(
+        parent, "committed", binding_existed
+    )
+    _fsync_directory(parent)
+    _cleanup_after_commit(parent)
+
+
+def _recover_transaction(
+    model_path: Path, binding_path: Path
+) -> None:
+    parent = model_path.parent
+    marker = _load_transaction_marker(parent)
+    if marker is None:
+        if any(
+            _optional_private_bytes(
+                _recovery_path(parent, name),
+                label="stack recovery file",
+                limit=max(MAX_CONFIG_BYTES, MAX_BINDING_BYTES),
+            )
+            is not None
+            for name in (_MODEL_ORIGINAL, _BINDING_ORIGINAL)
+        ):
+            _cleanup_after_commit(parent)
+        return
+    if marker.state == "pending":
+        _restore_originals(
+            model_path,
+            binding_path,
+            binding_existed=marker.binding_existed,
+        )
+        _finish_recovery(parent, marker.binding_existed)
+        return
+    _cleanup_after_commit(parent)
+
+
+def _rollback_transaction(
+    model_path: Path,
+    binding_path: Path,
+    *,
+    binding_existed: bool,
+) -> None:
+    parent = model_path.parent
+    marker_error: BaseException | None = None
+    try:
+        _write_transaction_marker(
+            parent, "pending", binding_existed
+        )
+    except BaseException as error:
+        marker_error = error
+    try:
+        _restore_originals(
+            model_path,
+            binding_path,
+            binding_existed=binding_existed,
+        )
+        _finish_recovery(parent, binding_existed)
+    except BaseException as error:
+        raise StackStoreError(
+            "stack transaction rollback failed"
+        ) from error
+    if marker_error is not None:
+        raise StackStoreError(
+            "stack transaction rollback marker failed"
+        ) from marker_error
+
+
+def _discard_staged(*paths: Path | None) -> None:
+    for path in paths:
+        try:
+            _unlink(path)
+        except BaseException:
+            pass
 
 
 def save_stack(
@@ -369,13 +645,19 @@ def _save_stack_at(
     updated: NormalizedStacks,
     updated_bindings: StackBindings,
 ) -> None:
+    parent = _require_shared_private_parent(
+        model_path, binding_path
+    )
+    durable_commit = False
     try:
         with stack_binding_transaction(binding_path) as transaction:
-            with _model_lock(binding_path.parent):
+            with _model_lock(parent):
+                _recover_transaction(model_path, binding_path)
                 current_model = _file_bytes(
                     model_path,
                     label="model stacks",
                     limit=MAX_CONFIG_BYTES,
+                    required_mode=0o600,
                 )
                 if (
                     hashlib.sha256(current_model).hexdigest()
@@ -402,65 +684,77 @@ def _save_stack_at(
                         required_mode=0o600,
                     )
                 )
-                model_mode = stat.S_IMODE(os.lstat(model_path).st_mode)
                 staged_model: Path | None = None
                 staged_binding: Path | None = None
-                binding_backup: Path | None = None
-                binding_replaced = False
-                model_replaced = False
-                preserve_backup = False
+                recovery_ready = False
+                binding_existed = original_binding is not None
                 try:
                     staged_model = _stage(
-                        model_path, model_payload, model_mode
+                        model_path, model_payload, 0o600
                     )
                     staged_binding = _stage(
                         binding_path, binding_payload, 0o600
                     )
-                    if original_binding is not None:
-                        binding_backup = _stage(
-                            binding_path, original_binding, 0o600
+                    _replace_private_file(
+                        _recovery_path(parent, _MODEL_ORIGINAL),
+                        current_model,
+                    )
+                    if binding_existed:
+                        _replace_private_file(
+                            _recovery_path(
+                                parent, _BINDING_ORIGINAL
+                            ),
+                            original_binding,
                         )
+                    else:
+                        _unlink(
+                            _recovery_path(
+                                parent, _BINDING_ORIGINAL
+                            )
+                        )
+                    _write_transaction_marker(
+                        parent, "pending", binding_existed
+                    )
+                    recovery_ready = True
+                    _fsync_directory(parent)
                     os.replace(staged_binding, binding_path)
                     staged_binding = None
-                    binding_replaced = True
                     os.replace(staged_model, model_path)
                     staged_model = None
-                    model_replaced = True
-                    _fsync_directory(binding_path.parent)
-                    if model_path.parent != binding_path.parent:
-                        _fsync_directory(model_path.parent)
-                    _unlink(binding_backup)
-                    binding_backup = None
-                    _fsync_directory(binding_path.parent)
+                    _fsync_directory(parent)
+                    _write_transaction_marker(
+                        parent, "committed", binding_existed
+                    )
+                    _fsync_directory(parent)
+                    durable_commit = True
                 except BaseException as error:
-                    if binding_replaced and not model_replaced:
+                    _discard_staged(staged_model, staged_binding)
+                    if recovery_ready:
                         try:
-                            if binding_backup is None:
-                                binding_path.unlink()
-                            else:
-                                os.replace(binding_backup, binding_path)
-                                binding_backup = None
-                            _fsync_directory(binding_path.parent)
-                        except BaseException as rollback_error:
-                            preserve_backup = (
-                                binding_backup is not None
+                            _rollback_transaction(
+                                model_path,
+                                binding_path,
+                                binding_existed=binding_existed,
                             )
+                        except BaseException as rollback_error:
                             raise StackStoreError(
-                                "stack binding rollback failed"
+                                "stack transaction rollback failed"
                             ) from rollback_error
+                    else:
+                        _cleanup_after_commit(parent)
                     if isinstance(error, StackStoreError):
                         raise
                     raise StackStoreError(
                         "stack files could not be saved"
                     ) from error
                 finally:
-                    _unlink(staged_model)
-                    _unlink(staged_binding)
-                    if not preserve_backup:
-                        _unlink(binding_backup)
-    except StackStoreError:
-        raise
-    except (StackBindingError, OSError) as error:
+                    _discard_staged(staged_model, staged_binding)
+                _cleanup_after_commit(parent)
+    except BaseException as error:
+        if durable_commit:
+            return
+        if isinstance(error, StackStoreError):
+            raise
         raise StackStoreError("stack files could not be saved") from error
 
 
@@ -600,7 +894,7 @@ def validate_stack_assignment(
             and not viable(candidate)
         ):
             raise StackStoreError(
-                f"locked candidate {candidate.id} is not viable"
+                f"stack {stack} has a non-viable locked candidate"
             )
     if not any(viable(candidate) for candidate in selected.controller):
         raise StackStoreError("stack has no viable controller candidate")

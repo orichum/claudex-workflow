@@ -512,6 +512,17 @@ class StackContextAssignmentTests(unittest.TestCase):
             self.assign(unmatched, "heavy")
         self.assertEqual(self.config_path.read_bytes(), original)
 
+    def test_assignment_requires_parent_directory_fsync(self):
+        with mock.patch.object(
+            project_context,
+            "_fsync_context_directory",
+            side_effect=OSError("injected context directory fsync"),
+        ), self.assertRaisesRegex(ContextError, "durability"):
+            self.assign(self.nested, "heavy")
+
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["contexts"][0]["modelStack"], "heavy")
+
 
 class ContextCommandTests(unittest.TestCase):
     def setUp(self):

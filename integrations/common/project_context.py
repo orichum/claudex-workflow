@@ -512,6 +512,16 @@ def _read_context_document(
     return document
 
 
+def _fsync_context_directory(parent: Path) -> None:
+    descriptor = os.open(
+        parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_context_document(config_path: Path, document: dict) -> None:
     config_path = Path(config_path)
     mode = stat.S_IMODE(config_path.stat().st_mode)
@@ -527,6 +537,12 @@ def _write_context_document(config_path: Path, document: dict) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, config_path)
+        try:
+            _fsync_context_directory(config_path.parent)
+        except OSError as error:
+            raise ContextError(
+                "configuration durability could not be confirmed"
+            ) from error
     except BaseException:
         os.close(descriptor) if _descriptor_is_open(descriptor) else None
         try:
