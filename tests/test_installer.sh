@@ -381,11 +381,8 @@ fi
 rg -Fq '<string>io.orichum.cliproxy</string>' "$fixture/cliproxy.plist"
 rg -Fq '<string>io.orichum.route-proxy</string>' "$fixture/route.plist"
 rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' "$fixture/route.plist"
-rg -Fq "<string>$data_root/bin/orichum-python</string>" \
+rg -Fq "<string>$data_root/bin/orichum-route-proxy</string>" \
   "$fixture/route.plist"
-rg -Fq '<string>-I</string>' "$fixture/route.plist"
-rg -Fq '<string>-B</string>' "$fixture/route.plist"
-rg -Fq 'integrations.common.route_proxy' "$fixture/route.plist"
 rg -Fq '<string>--data-home</string>' "$fixture/route.plist"
 rg -Fq '<string>io.orichum.headroom</string>' "$fixture/headroom.plist"
 rg -Fq '<string>--anthropic-api-url</string>' "$fixture/headroom.plist"
@@ -411,9 +408,9 @@ rg -Fq 'Description=Orichum same-family recovery proxy' \
   "$fixture/route.service"
 rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' \
   "$fixture/route.service"
-rg -Fq "$data_root/bin/orichum-python" "$fixture/route.service"
-rg -Fq 'integrations.common.route_proxy' "$fixture/route.service"
+rg -Fq "$data_root/bin/orichum-route-proxy" "$fixture/route.service"
 rg -Fq 'Wants=orichum-cliproxy.service' "$fixture/route.service"
+rg -Fq 'resolve_orichum_python' "$ROOT/bin/orichum-route-proxy"
 rg -Fq -- '--anthropic-api-url http://127.0.0.1:13457' \
   "$fixture/headroom.service"
 rg -Fq -- '--disable-kompress' "$fixture/headroom.service"

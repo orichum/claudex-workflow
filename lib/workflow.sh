@@ -2959,22 +2959,17 @@ render_claudex_proxy_launch_agent() {
   local port="${4:-13456}"
   local upstream_port="${5:-8317}"
   local runtime_digest="${6:-}"
-  local route_runner
   local escaped_binary escaped_state escaped_data escaped_log escaped_home
-  local escaped_workflow escaped_runner
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
   [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
-  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
-  escaped_binary="$(xml_escape "$data_root/bin/orichum-python")"
+  escaped_binary="$(xml_escape "$data_root/bin/orichum-route-proxy")"
   escaped_state="$(xml_escape "$data_root/state")"
   escaped_data="$(xml_escape "$data_root")"
   escaped_log="$(xml_escape "$data_root/logs/route-proxy.log")"
   escaped_home="$(xml_escape "$HOME")"
-  escaped_workflow="$(xml_escape "$workflow_root")"
-  escaped_runner="$(xml_escape "$route_runner")"
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -2986,10 +2981,6 @@ render_claudex_proxy_launch_agent() {
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
-    '    <string>-I</string>' \
-    '    <string>-B</string>' \
-    '    <string>-c</string>' \
-    "    <string>$escaped_runner</string>" \
     '    <string>--port</string>' \
     "    <string>$port</string>" \
     '    <string>--upstream-port</string>' \
@@ -3015,10 +3006,6 @@ render_claudex_proxy_launch_agent() {
     '  <dict>' \
     '    <key>HOME</key>' \
     "    <string>$escaped_home</string>" \
-    '    <key>ORICHUM_WORKFLOW_ROOT</key>' \
-    "    <string>$escaped_workflow</string>" \
-    '    <key>ORICHUM_PYTHON</key>' \
-    "    <string>$escaped_binary</string>" \
     '  </dict>' \
     '</dict>' \
     '</plist>' >"$output_file"
@@ -3031,26 +3018,16 @@ render_claudex_proxy_systemd_user_unit() {
   local port="${4:-13456}"
   local upstream_port="${5:-8317}"
   local runtime_digest="${6:-}"
-  local route_runner executable state data home_environment
-  local workflow_environment python_environment runner
+  local executable state data home_environment
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
   [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
-  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
-  executable="$(systemd_quote "$data_root/bin/orichum-python")"
-  runner="$(systemd_quote "$route_runner")"
+  executable="$(systemd_quote "$data_root/bin/orichum-route-proxy")"
   state="$(systemd_quote "$data_root/state")"
   data="$(systemd_quote "$data_root")"
   home_environment="$(systemd_environment_quote "HOME=$HOME")"
-  workflow_environment="$(
-    systemd_environment_quote "ORICHUM_WORKFLOW_ROOT=$workflow_root"
-  )"
-  python_environment="$(
-    systemd_environment_quote \
-      "ORICHUM_PYTHON=$data_root/bin/orichum-python"
-  )"
   printf '%s\n' \
     "# Orichum route runtime SHA-256: $runtime_digest" \
     '[Unit]' \
@@ -3060,12 +3037,10 @@ render_claudex_proxy_systemd_user_unit() {
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable -I -B -c $runner --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
+    "ExecStart=$executable --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
     'Restart=always' \
     'RestartSec=3' \
     "Environment=$home_environment" \
-    "Environment=$workflow_environment" \
-    "Environment=$python_environment" \
     'StandardOutput=journal' \
     'StandardError=journal' \
     '' \
