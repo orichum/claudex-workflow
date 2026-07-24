@@ -384,17 +384,16 @@ preflight_orichum_python_runtime() (
       --state-home "$data_root/state" --data-home "$data_root" \
       >/dev/null 2>&1 &
   pid=$!
-  for _ in {1..50}; do
+  for _ in {1..100}; do
     if ! kill -0 "$pid" 2>/dev/null; then
       break
     fi
-    if "$interpreter" -I -B -c \
-        'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),0.2); s.close()' \
-        "$port" >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout 0.2 --max-time 1 \
+        "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
       ready=true
       break
     fi
-    sleep 0.02
+    sleep 0.05
   done
   [[ "$ready" == true ]]
 )

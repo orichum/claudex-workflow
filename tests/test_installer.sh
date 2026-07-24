@@ -43,6 +43,15 @@ IFS=$'\t' read -r managed_version managed_realpath < <(
    "$python_data/bin/orichum-python" ]]
 preflight_orichum_python_runtime \
   "$python_bin/python3.14" "$ROOT" "$python_data"
+preflight_source="$(
+  sed -n '/^preflight_orichum_python_runtime() (/,/^)/p' \
+    "$ROOT/lib/workflow.sh"
+)"
+rg -Fq '"http://127.0.0.1:$port/health"' <<<"$preflight_source"
+if rg -Fq 'socket.create_connection' <<<"$preflight_source"; then
+  printf 'Python runtime preflight still launches an interpreter per poll\n' >&2
+  exit 1
+fi
 chmod 0770 "$python_bin"
 if validate_orichum_python "$python_data" "$python_bin/python3.14" \
     >"$fixture/writable-python.stdout" \

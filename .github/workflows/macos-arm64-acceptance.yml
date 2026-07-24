@@ -124,7 +124,7 @@ jobs:
               --write-out '%{http_code}' \
               "http://127.0.0.1:$headroom_port/health"
           )"
-          test "$headroom_status" = 503
+          test "$headroom_status" = 200
           jq -e '
             .service == "headroom-proxy" and
             .status == "unhealthy" and

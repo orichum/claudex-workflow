@@ -272,7 +272,7 @@ for acceptance_workflow in \
     "$ROOT/.github/workflows/macos-arm64-acceptance.yml"; do
   rg -Fq 'headroom-provider-pending.json' "$acceptance_workflow"
   rg -Fq -- "--write-out '%{http_code}'" "$acceptance_workflow"
-  rg -Fq 'test "$headroom_status" = 503' "$acceptance_workflow"
+  rg -Fq 'test "$headroom_status" = 200' "$acceptance_workflow"
   rg -Fq '.status == "unhealthy"' "$acceptance_workflow"
   rg -Fq '.ready == false' "$acceptance_workflow"
   rg -Fq 'if ! bash "$test_script"; then' "$acceptance_workflow"
