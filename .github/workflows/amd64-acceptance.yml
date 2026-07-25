@@ -289,16 +289,32 @@ jobs:
           if [[ "$#" -eq 1 && "$1" == --version ]]; then
             exec "$ACCEPTANCE_REAL_CLAUDEX" "$@"
           fi
-          jq -e --arg root "$ORICHUM_DATA_HOME/graphs/" '
-            .mcpServers.graphify as $server |
-            ($server.command | endswith("/graphify-mcp")) and
-            $server.args[0] == "--graph" and
-            ($server.args[1] | startswith($root)) and
-            ($server.args[1] | endswith("/graph.json"))
-          ' "$CLAUDEX_MCP_CONFIG" >/dev/null
-          graph_file="$(jq -r '.mcpServers.graphify.args[1]' \
-            "$CLAUDEX_MCP_CONFIG")"
+          graphify_command="$(jq -er '
+            .mcpServers.graphify.command |
+            select(
+              type == "string" and
+              endswith("/graphify-mcp")
+            )
+          ' "$CLAUDEX_MCP_CONFIG")"
+          graph_file="$(jq -er --arg root "$ORICHUM_DATA_HOME/graphs/" '
+            .mcpServers.graphify.args as $args |
+            select(
+              ($args | type) == "array" and
+              ($args | length) == 2 and
+              $args[0] == "--graph" and
+              ($args[1] | startswith($root)) and
+              ($args[1] | endswith("/graph.json"))
+            ) |
+            $args[1]
+          ' "$CLAUDEX_MCP_CONFIG")"
+          test -x "$graphify_command"
           test -f "$graph_file"
+          PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -I -B \
+            "$CLAUDEX_WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+            --timeout 10 \
+            --require-tool query_graph \
+            --require-tool graph_stats \
+            -- "$graphify_command" --graph "$graph_file"
           : >"$ACCEPTANCE_SESSION_MARKER"
           WRAPPER
           chmod 0755 "$claudex"

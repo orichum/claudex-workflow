@@ -264,6 +264,10 @@ for required_contract in \
     'orichum graph status "$graph_project"' \
     'test ! -e "$graph_project/graphify-out"' \
     'CLAUDEX_MCP_CONFIG' \
+    'integrations/common/mcp_probe.py' \
+    '--require-tool query_graph' \
+    '--require-tool graph_stats' \
+    'graphify_command="$(jq -er' \
     'run-graph-session-fixture' \
     'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
@@ -317,10 +321,14 @@ for required_contract in \
     'orichum graph status "$graph_project"' \
     'test ! -e "$graph_project/graphify-out"' \
     'CLAUDEX_MCP_CONFIG' \
+    'integrations/common/mcp_probe.py' \
+    '--require-tool query_graph' \
+    '--require-tool graph_stats' \
+    'graphify_command="$(jq -er' \
     'run-graph-session-fixture' \
     'Verify idempotent upgrade' \
     'Clean up launch agents'; do
-  rg -Fq "$required_contract" "$macos_workflow"
+  rg -Fq -- "$required_contract" "$macos_workflow"
 done
 if rg -Fq 'macos-15-intel' "$macos_workflow"; then
   printf 'macOS acceptance must run on Apple Silicon only\n' >&2

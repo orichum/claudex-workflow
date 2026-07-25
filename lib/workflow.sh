@@ -1966,11 +1966,35 @@ probe_graphify_capabilities() (
     workflow_die "Graphify absolute output probe wrote inside its repository"
     return 1
   }
+  if rg -Fq 'graphify_probe_updated' "$output/graph.json"; then
+    workflow_die "Graphify extract probe returned unexpected updated source"
+    return 1
+  fi
+  printf 'def graphify_probe_updated():\n    return "refreshed"\n' \
+    >"$repository/probe.py"
+  git -C "$repository" add probe.py || return 1
+  git -C "$repository" \
+    -c user.name=orichum-probe \
+    -c user.email=orichum-probe@example.invalid \
+    commit --quiet -m update-probe || return 1
+  git -C "$repository" diff --quiet HEAD -- || {
+    workflow_die "Graphify update probe repository is not committed"
+    return 1
+  }
   GRAPHIFY_OUT="$output" run_bounded_graphify_command \
     "$python_runtime" 20 "$repository" \
     "$graphify_binary" update "$repository" || return 1
   [[ -f "$output/graph.json" && ! -L "$output/graph.json" ]] || {
     workflow_die "Graphify update probe removed graph.json"
+    return 1
+  }
+  rg -Fq 'graphify_probe_updated' "$output/graph.json" || {
+    workflow_die "Graphify update probe left stale central output"
+    return 1
+  }
+  [[ ! -e "$repository/graphify-out" && \
+     ! -L "$repository/graphify-out" ]] || {
+    workflow_die "Graphify update probe wrote inside its repository"
     return 1
   }
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B \

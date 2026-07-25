@@ -120,11 +120,19 @@ printf '%s\n' \
   '  extract)' \
   '    [[ "$3" == --code-only ]]' \
   '    install -d -m 0700 "$GRAPHIFY_OUT"' \
-  '    printf "%s\n" "{\"directed\":false,\"multigraph\":false,\"graph\":{},\"nodes\":[],\"links\":[]}" >"$GRAPHIFY_OUT/graph.json"' \
+  '    printf "%s\n" "{\"directed\":false,\"multigraph\":false,\"graph\":{},\"nodes\":[{\"id\":\"graphify_probe\",\"label\":\"graphify_probe\"}],\"links\":[]}" >"$GRAPHIFY_OUT/graph.json"' \
   '    ;;' \
   '  update)' \
   '    [[ "$#" -eq 2 && -f "$GRAPHIFY_OUT/graph.json" ]]' \
   '    [[ "${GRAPHIFY_FAIL_UPDATE:-false}" != true ]] || exit 73' \
+  '    git -C "$repository" diff --quiet HEAD --' \
+  '    git -C "$repository" show HEAD:probe.py | grep -Fq graphify_probe_updated' \
+  '    [[ "${GRAPHIFY_STALE_UPDATE:-false}" != true ]] || exit 0' \
+  '    printf "%s\n" "{\"directed\":false,\"multigraph\":false,\"graph\":{},\"nodes\":[{\"id\":\"graphify_probe_updated\",\"label\":\"graphify_probe_updated\"}],\"links\":[]}" >"$GRAPHIFY_OUT/graph.json"' \
+  '    if [[ "${GRAPHIFY_LOCAL_UPDATE:-false}" == true ]]; then' \
+  '      install -d -m 0700 "$repository/graphify-out"' \
+  '      cp "$GRAPHIFY_OUT/graph.json" "$repository/graphify-out/graph.json"' \
+  '    fi' \
   '    ;;' \
   '  *) exit 64 ;;' \
   'esac' >"$graph_probe_bin/graphify"
@@ -190,6 +198,25 @@ fi
 [[ "$(<"$graph_root/prior-state")" == preserve ]]
 [[ "$(path_mode "$graph_root")" == 700 ]]
 diff -qr -- "$fixture/skill-home-before" "$skill_home" >/dev/null
+
+for unsafe_update_mode in GRAPHIFY_STALE_UPDATE GRAPHIFY_LOCAL_UPDATE; do
+  if (
+    export "$unsafe_update_mode=true"
+    GRAPH_PROBE_LOG="$graph_probe_log" HOME="$skill_home" \
+      reconcile_graphify_storage \
+        "$graph_data" "$graph_probe_bin/graphify" \
+        "$graph_probe_bin/graphify-mcp" "$(command -v python3)" \
+        "$ROOT" "$fixture" \
+        >"$fixture/$unsafe_update_mode.stdout" \
+        2>"$fixture/$unsafe_update_mode.stderr"
+  ); then
+    printf '%s capability probe unexpectedly succeeded\n' \
+      "$unsafe_update_mode" >&2
+    exit 1
+  fi
+  [[ "$(<"$graph_root/prior-state")" == preserve ]]
+  [[ "$(path_mode "$graph_root")" == 700 ]]
+done
 
 doctor_project="$fixture/doctor-project"
 doctor_config="$fixture/doctor-config"
