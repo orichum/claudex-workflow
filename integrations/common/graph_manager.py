@@ -7,18 +7,24 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import tempfile
-from typing import Literal
+from typing import Callable, Literal
 from urllib.parse import quote, unquote, urlsplit
 import uuid
 
 
 class GraphManagerError(RuntimeError):
     """A repository cannot be mapped to a safe, unique graph location."""
+
+
+class GraphError(GraphManagerError):
+    """A centrally managed graph operation failed."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,26 @@ class GraphTarget:
     output_dir: Path
     graph_file: Path
     metadata_file: Path
+
+
+@dataclass(frozen=True)
+class GraphOperationResult:
+    repository: Path
+    identity: str
+    revision: str
+    state_id: str
+    output_dir: Path
+    graph_file: Path
+    action: Literal["created", "updated", "migrated", "not-applicable"]
+    node_count: int
+
+
+@dataclass(frozen=True)
+class GraphStatus:
+    target: GraphTarget
+    status: Literal["current", "stale", "missing", "invalid"]
+    node_count: int | None
+    hook_status: str
 
 
 def _path_without_symlink(path: Path, label: str) -> Path:
@@ -441,3 +467,654 @@ def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
         graph_file=output_dir / "graph.json",
         metadata_file=output_dir / "metadata.json",
     )
+
+
+_LEGACY_GRAPHIFY_ENTRIES = frozenset(
+    {
+        ".graphify_ast.json",
+        ".graphify_analysis.json",
+        ".graphify_cached.json",
+        ".graphify_detect.json",
+        ".graphify_labels.json",
+        ".graphify_python",
+        ".graphify_root",
+        ".graphify_semantic.json",
+        ".graphify_uncached.txt",
+        ".needs_update",
+        "GRAPH_REPORT.md",
+        "cost.json",
+        "cypher.txt",
+        "graph.graphml",
+        "graph.html",
+        "graph.json",
+        "graph.svg",
+        "obsidian",
+        "wiki",
+    }
+)
+
+
+def _private_directory(path: Path, label: str, *, create: bool = False) -> Path:
+    path = _path_without_symlink(path, label)
+    if create:
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as error:
+            raise GraphError(f"{label} directory cannot be created") from error
+    try:
+        observed = os.lstat(path)
+    except OSError as error:
+        raise GraphError(f"{label} directory is unavailable") from error
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) != 0o700
+    ):
+        raise GraphError(f"{label} directory is unsafe")
+    return path
+
+
+def _graph_identity_root(
+    identity: RepositoryIdentity, data_root: Path
+) -> Path:
+    data_root = _directory_without_symlink(
+        data_root, "Graph data", require_private=True
+    )
+    graphs = _private_directory(
+        data_root / "graphs", "Graph root", create=True
+    )
+    current = graphs
+    for segment in identity.key.split("/"):
+        current = _private_directory(
+            current / segment, "Repository graph root", create=True
+        )
+    return current
+
+
+@contextmanager
+def _graph_lock(identity: RepositoryIdentity, data_root: Path):
+    root = _graph_identity_root(identity, data_root)
+    descriptor = None
+    try:
+        descriptor = os.open(
+            root / ".orichum.lock",
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or stat.S_IMODE(observed.st_mode) != 0o600
+        ):
+            raise GraphError("Repository graph lock is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    except GraphError:
+        raise
+    except OSError as error:
+        raise GraphError("Repository graph lock failed") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _read_json_file(path: Path, label: str) -> object:
+    descriptor = None
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(path, flags)
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.getuid()
+        ):
+            raise GraphError(f"{label} is unsafe")
+        with os.fdopen(descriptor, encoding="utf-8") as source:
+            descriptor = None
+            return json.load(source)
+    except GraphError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise GraphError(f"{label} is invalid") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _validate_graph_file(graph_file: Path) -> int:
+    parsed = _read_json_file(graph_file, "Graphify graph")
+    nodes = parsed.get("nodes") if isinstance(parsed, dict) else None
+    if not isinstance(nodes, list) or not nodes:
+        raise GraphError("Graphify graph is invalid")
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise GraphError("Graphify graph is invalid")
+        source_file = node.get("source_file")
+        if source_file is None:
+            continue
+        if not isinstance(source_file, str) or not source_file:
+            raise GraphError("Graphify graph source path is invalid")
+        relative = Path(source_file)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise GraphError("Graphify graph source path is invalid")
+    return len(nodes)
+
+
+def _metadata(target: GraphTarget) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "repository_identity": target.identity.key,
+        "revision": target.revision,
+        "state_id": target.state_id,
+        "kind": target.kind,
+        "checkout_path": str(target.repository),
+        "built_at_commit": target.revision,
+    }
+
+
+def _valid_working_metadata(
+    metadata: object,
+    identity: RepositoryIdentity,
+    state_id: str,
+) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    revision = metadata.get("revision")
+    checkout = metadata.get("checkout_path")
+    if (
+        metadata.get("schema_version") != 1
+        or metadata.get("repository_identity") != identity.key
+        or metadata.get("kind") != "working"
+        or metadata.get("state_id") != state_id
+        or not isinstance(revision, str)
+        or not revision
+        or metadata.get("built_at_commit") != revision
+        or not isinstance(checkout, str)
+        or not Path(checkout).is_absolute()
+    ):
+        return None
+    return checkout
+
+
+def _write_metadata(target: GraphTarget, output_dir: Path) -> None:
+    metadata_file = output_dir / "metadata.json"
+    temporary = output_dir / f".metadata.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            os.chmod(temporary, 0o600)
+            json.dump(_metadata(target), stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, metadata_file)
+    except OSError as error:
+        raise GraphError("Graph metadata cannot be written") from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _validate_output(target: GraphTarget, output_dir: Path) -> int:
+    output_dir = _private_directory(output_dir, "Graph output")
+    node_count = _validate_graph_file(output_dir / "graph.json")
+    metadata = _read_json_file(output_dir / "metadata.json", "Graph metadata")
+    if not isinstance(metadata, dict):
+        raise GraphError("Graph metadata is invalid")
+    expected = _metadata(target)
+    for key in (
+        "schema_version",
+        "repository_identity",
+        "revision",
+        "state_id",
+        "kind",
+        "checkout_path",
+    ):
+        if metadata.get(key) != expected[key]:
+            raise GraphError("Graph metadata does not match its target")
+    return node_count
+
+
+def inspect_graph(target: GraphTarget) -> GraphStatus:
+    """Inspect an existing central graph without modifying it."""
+    if not os.path.lexists(target.output_dir):
+        return GraphStatus(target, "missing", None, "unknown")
+    try:
+        node_count = _validate_output(target, target.output_dir)
+        metadata = _read_json_file(target.metadata_file, "Graph metadata")
+    except GraphError:
+        return GraphStatus(target, "invalid", None, "unknown")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("built_at_commit") != target.revision
+    ):
+        return GraphStatus(target, "stale", node_count, "unknown")
+    return GraphStatus(target, "current", node_count, "unknown")
+
+
+def discover_graph_targets(path: Path) -> tuple[Path, ...]:
+    """Discover canonical Git repositories below a project path."""
+    from integrations.common.context_population import discover_git_worktrees
+
+    return discover_git_worktrees(path)
+
+
+def _tree_hashes(root: Path) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in [*directories, *files]:
+            candidate = current_path / name
+            observed = os.lstat(candidate)
+            if stat.S_ISLNK(observed.st_mode) or observed.st_uid != os.getuid():
+                raise GraphError("Legacy Graphify output is unsafe")
+        for filename in files:
+            candidate = current_path / filename
+            if not stat.S_ISREG(os.lstat(candidate).st_mode):
+                raise GraphError("Legacy Graphify output is unsafe")
+            digest = hashlib.sha256()
+            with candidate.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            hashes[str(candidate.relative_to(root))] = digest.hexdigest()
+    return hashes
+
+
+def _copy_legacy_tree(source: Path, destination: Path) -> dict[str, str]:
+    """Copy an owned tree through no-follow descriptors and hash its files."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        root_descriptor = os.open(source, flags)
+    except OSError as error:
+        raise GraphError("Legacy Graphify output is unsafe") from error
+    hashes: dict[str, str] = {}
+
+    def copy_directory(
+        source_descriptor: int,
+        target: Path,
+        relative: Path,
+    ) -> None:
+        for name in sorted(os.listdir(source_descriptor)):
+            observed = os.stat(
+                name, dir_fd=source_descriptor, follow_symlinks=False
+            )
+            child_relative = relative / name
+            child_target = target / name
+            if observed.st_uid != os.getuid() or stat.S_ISLNK(observed.st_mode):
+                raise GraphError("Legacy Graphify output is unsafe")
+            if stat.S_ISDIR(observed.st_mode):
+                child_target.mkdir(mode=0o700)
+                child_descriptor = os.open(
+                    name, flags, dir_fd=source_descriptor
+                )
+                try:
+                    opened = os.fstat(child_descriptor)
+                    if (
+                        not stat.S_ISDIR(opened.st_mode)
+                        or opened.st_uid != os.getuid()
+                        or (opened.st_dev, opened.st_ino)
+                        != (observed.st_dev, observed.st_ino)
+                    ):
+                        raise GraphError("Legacy Graphify output changed")
+                    copy_directory(
+                        child_descriptor, child_target, child_relative
+                    )
+                finally:
+                    os.close(child_descriptor)
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise GraphError("Legacy Graphify output is unsafe")
+            file_descriptor = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=source_descriptor,
+            )
+            try:
+                opened = os.fstat(file_descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                    or (opened.st_dev, opened.st_ino)
+                    != (observed.st_dev, observed.st_ino)
+                ):
+                    raise GraphError("Legacy Graphify output changed")
+                digest = hashlib.sha256()
+                with os.fdopen(file_descriptor, "rb") as source_stream:
+                    file_descriptor = -1
+                    with child_target.open("xb") as target_stream:
+                        os.chmod(child_target, 0o600)
+                        for chunk in iter(
+                            lambda: source_stream.read(1024 * 1024), b""
+                        ):
+                            digest.update(chunk)
+                            target_stream.write(chunk)
+                hashes[str(child_relative)] = digest.hexdigest()
+            finally:
+                if file_descriptor >= 0:
+                    os.close(file_descriptor)
+
+    try:
+        root_observed = os.fstat(root_descriptor)
+        if (
+            not stat.S_ISDIR(root_observed.st_mode)
+            or root_observed.st_uid != os.getuid()
+        ):
+            raise GraphError("Legacy Graphify output is unsafe")
+        entries = set(os.listdir(root_descriptor))
+        if entries - _LEGACY_GRAPHIFY_ENTRIES:
+            raise GraphError(
+                "Legacy Graphify output contains unknown entries"
+            )
+        destination.mkdir(mode=0o700)
+        copy_directory(root_descriptor, destination, Path())
+    except GraphError:
+        raise
+    except OSError as error:
+        raise GraphError("Legacy Graphify migration failed") from error
+    finally:
+        os.close(root_descriptor)
+    return hashes
+
+
+def _prepare_target_parent(target: GraphTarget) -> None:
+    identity_root = _graph_identity_root(target.identity, _target_data_root(target))
+    relative_parent = target.output_dir.parent.relative_to(identity_root)
+    current = identity_root
+    for segment in relative_parent.parts:
+        current = _private_directory(
+            current / segment, "Graph state directory", create=True
+        )
+
+
+def _target_data_root(target: GraphTarget) -> Path:
+    marker = target.identity.key.split("/")
+    candidate = target.output_dir
+    for _ in range(4 + len(marker)):
+        candidate = candidate.parent
+    return candidate
+
+
+def _activate_staged_output(staged: Path, active: Path) -> None:
+    backup = active.parent / f".graphify-out.backup-{uuid.uuid4().hex}"
+    moved_active = False
+    safe_to_remove_backup = False
+    try:
+        if os.path.lexists(active):
+            os.replace(active, backup)
+            moved_active = True
+        os.replace(staged, active)
+        safe_to_remove_backup = True
+    except OSError as error:
+        if moved_active and not os.path.lexists(active):
+            try:
+                os.replace(backup, active)
+            except OSError:
+                try:
+                    shutil.copytree(backup, active)
+                except OSError as copy_error:
+                    raise GraphError(
+                        "Graph activation and rollback failed"
+                    ) from copy_error
+                safe_to_remove_backup = True
+            else:
+                safe_to_remove_backup = True
+        raise GraphError("Graph activation failed") from error
+    finally:
+        if safe_to_remove_backup and backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+
+
+def migrate_legacy_graph(target: GraphTarget) -> bool:
+    """Move a recognized repository-local Graphify directory into storage."""
+    legacy = target.repository / "graphify-out"
+    if not os.path.lexists(legacy):
+        return False
+    if os.path.lexists(target.output_dir):
+        raise GraphError(
+            "Legacy Graphify output cannot replace an active graph"
+        )
+    try:
+        repository = _directory_without_symlink(
+            target.repository, "Repository"
+        )
+        legacy = _directory_without_symlink(
+            legacy, "Legacy Graphify output"
+        )
+    except GraphManagerError as error:
+        raise GraphError(str(error)) from error
+    try:
+        legacy.relative_to(repository)
+    except ValueError as error:
+        raise GraphError("Legacy Graphify output escapes the repository") from error
+    _prepare_target_parent(target)
+    staged = target.output_dir.parent / (
+        f".graphify-out.migration-{uuid.uuid4().hex}"
+    )
+    quarantined = repository / (
+        f".orichum-legacy-graphify-{uuid.uuid4().hex}"
+    )
+    source_quarantined = False
+    try:
+        os.replace(legacy, quarantined)
+        source_quarantined = True
+        source_hashes = _copy_legacy_tree(quarantined, staged)
+        if source_hashes != _tree_hashes(staged):
+            raise GraphError("Legacy Graphify output copy verification failed")
+        _write_metadata(target, staged)
+        _validate_output(target, staged)
+        _activate_staged_output(staged, target.output_dir)
+        shutil.rmtree(quarantined)
+        source_quarantined = False
+    except GraphError:
+        raise
+    except OSError as error:
+        raise GraphError("Legacy Graphify migration failed") from error
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged, ignore_errors=True)
+        if source_quarantined and not os.path.lexists(legacy):
+            try:
+                os.replace(quarantined, legacy)
+                source_quarantined = False
+            except OSError:
+                pass
+    return True
+
+
+def _graphify_failure(completed: subprocess.CompletedProcess[str]) -> GraphError:
+    diagnostics = "\n".join(
+        line
+        for output in (completed.stdout, completed.stderr)
+        for line in output.splitlines()[-20:]
+        if line.strip()
+    )
+    prefix = f"Graphify failed with exit code {completed.returncode}"
+    return GraphError(f"{prefix}: {diagnostics[-3500:]}" if diagnostics else prefix)
+
+
+def _not_applicable(completed: subprocess.CompletedProcess[str]) -> bool:
+    return (
+        completed.returncode != 0
+        and "found 0 code" in completed.stdout.lower()
+        and "graph is empty" in completed.stderr.lower()
+    )
+
+
+def _run_graphify(
+    graphify: str,
+    arguments: list[str],
+    output_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["GRAPHIFY_OUT"] = str(output_dir.absolute())
+    try:
+        return subprocess.run(
+            [graphify, *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    except OSError as error:
+        raise GraphError("Graphify executable is unavailable") from error
+
+
+def _result(
+    target: GraphTarget,
+    action: Literal["created", "updated", "migrated", "not-applicable"],
+    node_count: int,
+) -> GraphOperationResult:
+    return GraphOperationResult(
+        repository=target.repository,
+        identity=target.identity.key,
+        revision=target.revision,
+        state_id=target.state_id,
+        output_dir=target.output_dir,
+        graph_file=target.graph_file,
+        action=action,
+        node_count=node_count,
+    )
+
+
+def prune_orphaned_working_graphs(
+    identity: RepositoryIdentity, data_root: Path
+) -> tuple[Path, ...]:
+    """Remove only validated working targets whose checkout no longer exists."""
+    identity_root = _graph_identity_root(identity, data_root)
+    working = identity_root / "working"
+    if not working.exists():
+        return ()
+    working = _private_directory(working, "Working graph root")
+    removed = []
+    for state_root in sorted(working.iterdir(), key=lambda path: str(path)):
+        try:
+            state_root = _private_directory(
+                state_root, "Working graph state"
+            )
+            output = _private_directory(
+                state_root / "graphify-out", "Working graph output"
+            )
+            metadata = _read_json_file(
+                output / "metadata.json", "Graph metadata"
+            )
+            checkout = _valid_working_metadata(
+                metadata, identity, state_root.name
+            )
+            if checkout is None:
+                continue
+            if Path(checkout).exists():
+                continue
+            shutil.rmtree(state_root)
+            removed.append(state_root)
+        except (GraphError, OSError):
+            continue
+    return tuple(removed)
+
+
+def sync_graph(
+    repository: Path,
+    data_root: Path,
+    *,
+    graphify: str,
+    progress: Callable[[str], None] | None = None,
+) -> GraphOperationResult:
+    """Create or transactionally update one central repository graph."""
+    initial = resolve_graph_target(repository, data_root)
+    with _graph_lock(initial.identity, data_root):
+        target = resolve_graph_target(repository, data_root)
+        if target.identity.key != initial.identity.key:
+            raise GraphError("Repository identity changed during graph sync")
+        if migrate_legacy_graph(target):
+            node_count = inspect_graph(target).node_count
+            if node_count is None:
+                raise GraphError("Migrated graph is invalid")
+            prune_orphaned_working_graphs(target.identity, data_root)
+            return _result(target, "migrated", node_count)
+
+        status = inspect_graph(target)
+        if status.status in {"invalid", "stale"}:
+            raise GraphError(f"Existing graph is {status.status}")
+        _prepare_target_parent(target)
+        if status.status == "missing":
+            action: Literal["created", "updated"] = "created"
+            output_dir = target.output_dir.parent / (
+                f".graphify-out.staging-{uuid.uuid4().hex}"
+            )
+            _private_directory(output_dir, "Graph output", create=True)
+            arguments = ["extract", str(target.repository), "--code-only"]
+        else:
+            action = "updated"
+            output_dir = target.output_dir.parent / (
+                f".graphify-out.staging-{uuid.uuid4().hex}"
+            )
+            shutil.copytree(target.output_dir, output_dir)
+            os.chmod(output_dir, 0o700)
+            arguments = ["update", str(target.repository)]
+        if progress is not None:
+            progress(action)
+        try:
+            completed = _run_graphify(graphify, arguments, output_dir)
+            if _not_applicable(completed) and action == "created":
+                shutil.rmtree(output_dir, ignore_errors=True)
+                prune_orphaned_working_graphs(target.identity, data_root)
+                if progress is not None:
+                    progress("not-applicable")
+                return _result(target, "not-applicable", 0)
+            if completed.returncode != 0:
+                raise _graphify_failure(completed)
+            _write_metadata(target, output_dir)
+            node_count = _validate_output(target, output_dir)
+            _activate_staged_output(output_dir, target.output_dir)
+            prune_orphaned_working_graphs(target.identity, data_root)
+            return _result(target, action, node_count)
+        except BaseException:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            raise
+
+
+def sync_graphs(
+    path: Path,
+    data_root: Path,
+    *,
+    graphify: str,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[GraphOperationResult, ...]:
+    """Synchronize every canonical Git repository discovered below ``path``."""
+    repositories = discover_graph_targets(path)
+    results = []
+    total = len(repositories)
+    for index, repository in enumerate(repositories, start=1):
+        operation_progress = None
+        if progress is not None:
+            operation_progress = lambda action, i=index, item=repository: progress(
+                f"[graphify {i}/{total}] {action} {item.name}"
+            )
+        results.append(
+            sync_graph(
+                repository,
+                data_root,
+                graphify=graphify,
+                progress=operation_progress,
+            )
+        )
+    return tuple(results)
