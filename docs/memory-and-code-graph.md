@@ -60,13 +60,16 @@ currently point to the same commit.
 
 `orichum graph PATH` discovers repositories below `PATH` and creates or updates
 the graph for each repository's exact current state. It leaves no active
-Graphify output in the repository. Marked `post-commit` and `post-checkout`
-hook sections are installed only after a graph is successfully activated or
-migrated, while preserving unrelated user hook content. A not-applicable sync
-for a repository with no supported code installs no hooks; run an explicit
-sync after supported code is added. The hook launches a detached, serialized
-refresh, so Git does not wait for Graphify extraction. Hook output is kept in a
-bounded private log.
+Graphify output in the repository. Graphify runs with the repository as its
+working directory, while `GRAPHIFY_OUT` points at private staging. Before
+activation, Orichum validates repository-relative source paths and requires the
+graph's `built_at_commit` provenance to equal the repository revision selected
+for that graph state. Marked `post-commit` and `post-checkout` hook sections are
+installed only after a graph is successfully activated or migrated, while
+preserving unrelated user hook content. A not-applicable sync for a repository
+with no supported code installs no hooks; run an explicit sync after supported
+code is added. The hook launches a detached, serialized refresh, so Git does
+not wait for Graphify extraction. Hook output is kept in a bounded private log.
 
 Each successful sync also prunes only working graphs whose recorded checkout
 path no longer exists. Revision graphs remain reusable, and working graphs for
@@ -93,10 +96,17 @@ repository-local Graphify output.
 This on-demand design keeps the tools useful without paying their schema and
 retrieval cost on unrelated tasks.
 
-Session startup never builds, updates, migrates, or prunes graphs. It validates
-the graph for the exact repository state and adds the Graphify MCP only when
-that graph is current and stable. Build the graph first, then start a new
-session:
+Session startup never builds, updates, migrates, or prunes graphs. It accepts a
+central graph only when that graph is current and stable for the exact
+repository state. Each physical session then copies the validated bytes to
+private `run_dir/graph.json` with mode `0600`, records their digest in immutable
+context, and points the Graphify MCP at that snapshot rather than central
+storage.
+
+An existing physical session remains on its snapshot generation when the
+central graph changes. A resume or other new physical run snapshots the current
+valid central graph, or omits Graphify if the graph is unavailable or races
+with the copy. Build the graph first, then start a new session:
 
 ```bash
 orichum graph .

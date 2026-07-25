@@ -72,7 +72,7 @@ handoff.
 flowchart LR
     R["Git repository"] --> I["Repository identity and state"]
     I --> G["Private central Graphify output"]
-    G --> S["Immutable session binding"]
+    G --> S["Private physical-session snapshot"]
     S --> MCP["Per-session Graphify MCP"]
     Q["On-demand graph query"] --> MCP
     H["Post-commit or post-checkout hook"] -. "detached refresh" .-> G
@@ -85,10 +85,15 @@ not leak between clones or linked worktrees. Graph nodes keep source paths
 relative to the repository; generated output is stored below Orichum's private
 data directory.
 
-Session setup only validates and binds a graph that already matches the exact
-repository state. It never extracts or updates a graph. Graphify queries are
-made on demand through the bound MCP, and graph commands do not invoke
-Mempalace.
+Session setup only accepts a central graph that already matches the exact
+repository state. Each physical session securely copies those validated bytes
+to its private `run_dir/graph.json`, records the digest in immutable context,
+and points its MCP at that mode-`0600` snapshot. It never extracts or updates a
+graph. A running physical session therefore stays on its graph generation even
+when central storage changes. A resume or other new physical run snapshots the
+then-current valid central graph, or omits Graphify when no stable match is
+available. Graphify queries are made on demand through the bound MCP, and graph
+commands do not invoke Mempalace.
 
 ## Boundaries
 
