@@ -513,15 +513,118 @@ class StackContextAssignmentTests(unittest.TestCase):
         self.assertEqual(self.config_path.read_bytes(), original)
 
     def test_assignment_requires_parent_directory_fsync(self):
+        original = self.config_path.read_bytes()
+        calls = 0
+        real_fsync = project_context._fsync_context_directory
+
+        def fail_target_fsync(parent):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected context directory fsync")
+            real_fsync(parent)
+
         with mock.patch.object(
             project_context,
             "_fsync_context_directory",
-            side_effect=OSError("injected context directory fsync"),
+            side_effect=fail_target_fsync,
         ), self.assertRaisesRegex(ContextError, "durability"):
             self.assign(self.nested, "heavy")
 
-        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
-        self.assertEqual(saved["contexts"][0]["modelStack"], "heavy")
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(
+            list(self.root.glob(f".{self.config_path.name}.transaction*")),
+            [],
+        )
+
+    def test_assignment_rollback_double_fault_recovers_on_next_locked_read(self):
+        original = self.config_path.read_bytes()
+        real_fsync = project_context._fsync_context_directory
+        real_replace = os.replace
+        fsync_calls = 0
+        config_replacements = 0
+
+        def fail_target_fsync(parent):
+            nonlocal fsync_calls
+            fsync_calls += 1
+            if fsync_calls == 2:
+                raise OSError("injected target directory fsync")
+            real_fsync(parent)
+
+        def fail_rollback_replace(source, target):
+            nonlocal config_replacements
+            if Path(target) == self.config_path:
+                config_replacements += 1
+                if config_replacements == 2:
+                    raise OSError("injected context rollback failure")
+            real_replace(source, target)
+
+        with mock.patch.object(
+            project_context,
+            "_fsync_context_directory",
+            side_effect=fail_target_fsync,
+        ), mock.patch(
+            "integrations.common.project_context.os.replace",
+            side_effect=fail_rollback_replace,
+        ), self.assertRaisesRegex(ContextError, "rollback"):
+            self.assign(self.nested, "heavy")
+
+        marker = (
+            self.root / f".{self.config_path.name}.transaction.json"
+        )
+        backup = (
+            self.root / f".{self.config_path.name}.transaction.original"
+        )
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["state"],
+            "pending",
+        )
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with project_context._context_lock(self.config_path):
+                recovered = project_context._read_context_document(
+                    self.config_path, self.home
+                )
+
+        self.assertIsNone(recovered["contexts"][0]["modelStack"])
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(
+            list(self.root.glob(f".{self.config_path.name}.transaction*")),
+            [],
+        )
+
+    def test_committed_cleanup_interrupt_preserves_new_assignment(self):
+        with mock.patch.object(
+            project_context,
+            "_remove_context_recovery_artifacts",
+            side_effect=KeyboardInterrupt(
+                "injected committed cleanup interrupt"
+            ),
+        ):
+            matched = self.assign(self.nested, "heavy")
+
+        self.assertEqual(matched, self.workspace.resolve())
+        marker = (
+            self.root / f".{self.config_path.name}.transaction.json"
+        )
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["state"],
+            "committed",
+        )
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with project_context._context_lock(self.config_path):
+                recovered = project_context._read_context_document(
+                    self.config_path, self.home
+                )
+
+        self.assertEqual(recovered["contexts"][0]["modelStack"], "heavy")
+        self.assertEqual(
+            list(self.root.glob(f".{self.config_path.name}.transaction*")),
+            [],
+        )
 
 
 class ContextCommandTests(unittest.TestCase):
