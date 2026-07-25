@@ -60,10 +60,13 @@ currently point to the same commit.
 
 `orichum graph PATH` discovers repositories below `PATH` and creates or updates
 the graph for each repository's exact current state. It leaves no active
-Graphify output in the repository. A successful sync installs marked
-`post-commit` and `post-checkout` hook sections while preserving unrelated user
-hook content. The hook launches a detached, serialized refresh, so Git does not
-wait for Graphify extraction. Hook output is kept in a bounded private log.
+Graphify output in the repository. Marked `post-commit` and `post-checkout`
+hook sections are installed only after a graph is successfully activated or
+migrated, while preserving unrelated user hook content. A not-applicable sync
+for a repository with no supported code installs no hooks; run an explicit
+sync after supported code is added. The hook launches a detached, serialized
+refresh, so Git does not wait for Graphify extraction. Hook output is kept in a
+bounded private log.
 
 Each successful sync also prunes only working graphs whose recorded checkout
 path no longer exists. Revision graphs remain reusable, and working graphs for

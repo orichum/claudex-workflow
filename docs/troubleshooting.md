@@ -71,6 +71,13 @@ or does not match the current clean or dirty state. Session startup never
 rebuilds it. Run `orichum graph .`, confirm the status is `current`, then start
 a new session.
 
+The same command handles every graph condition: it creates a missing graph,
+incrementally updates a current graph, and repairs a stale or invalid graph
+with a fresh code-only extraction. Repair builds in a staging directory,
+validates the result, then activates it atomically. If extraction, validation,
+or activation fails, Orichum preserves the old stale or invalid target for
+diagnosis instead of replacing it with partial output.
+
 ## Wrong graph identity or no graph identity
 
 Graph status reports `(invalid)` when a repository has no configured identity
