@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import contextvars
 import fcntl
 import json
 import os
@@ -38,6 +39,9 @@ _CONTEXT_OPTIONAL_KEYS = {
     "accountPools",
     "githubAccount",
 }
+_CONTROL_PLANE_ROOT: contextvars.ContextVar[Path | None] = (
+    contextvars.ContextVar("control_plane_root", default=None)
+)
 
 
 def _context_object(value: object, label: str) -> dict:
@@ -858,22 +862,41 @@ def _write_context_document(config_path: Path, document: dict) -> None:
 
 
 @contextlib.contextmanager
-def _context_lock(config_path: Path):
-    config_path = Path(config_path)
+def control_plane_transaction(config_root: Path):
+    """Serialize mutations that depend on documents in one config root."""
+    root = Path(config_root).resolve(strict=False)
+    active_root = _CONTROL_PLANE_ROOT.get()
+    if active_root is not None:
+        if active_root != root:
+            raise ContextError(
+                "nested control-plane transactions require one config root"
+            )
+        yield
+        return
+
     descriptor = None
     try:
-        descriptor = os.open(config_path.parent, os.O_RDONLY)
+        descriptor = os.open(root, os.O_RDONLY)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
     except OSError as error:
         if descriptor is not None:
             os.close(descriptor)
         raise ContextError("configuration lock is unavailable") from error
+    token = _CONTROL_PLANE_ROOT.set(root)
     try:
-        _recover_context_transaction(config_path)
         yield
     finally:
+        _CONTROL_PLANE_ROOT.reset(token)
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _context_lock(config_path: Path):
+    config_path = Path(config_path)
+    with control_plane_transaction(config_path.parent):
+        _recover_context_transaction(config_path)
+        yield
 
 
 def assign_stack_to_context(
@@ -1139,12 +1162,9 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     home = Path.home()
 
     try:
-        routing = _load_context_routing(parsed.routing_config)
-        routing_stacks = routing["stacks"]
-        account_pools = _load_account_pool_names(parsed.providers_config)
         requested_stack = getattr(parsed, "model_stack", None)
         if requested_stack is not None:
-            requested_stack = _model_stack(requested_stack, routing_stacks)
+            requested_stack = _model_stack(requested_stack)
             parsed.model_stack = requested_stack
         if (
             parsed.command == "update"
@@ -1157,6 +1177,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
 
         if parsed.command == "add":
             with _context_lock(parsed.config):
+                routing = _load_context_routing(parsed.routing_config)
+                routing_stacks = routing["stacks"]
+                account_pools = _load_account_pool_names(
+                    parsed.providers_config
+                )
                 document = _read_context_document(parsed.config, home)
                 candidate, context, root, palace = _build_add_candidate(
                     document, parsed, home, account_pools
@@ -1174,6 +1199,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             )
 
             with _context_lock(parsed.config):
+                routing = _load_context_routing(parsed.routing_config)
+                routing_stacks = routing["stacks"]
+                account_pools = _load_account_pool_names(
+                    parsed.providers_config
+                )
                 current = _read_context_document(parsed.config, home)
                 final_candidate = {
                     **(
@@ -1193,6 +1223,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
 
         if parsed.command == "populate":
             with _context_lock(parsed.config):
+                routing = _load_context_routing(parsed.routing_config)
+                routing_stacks = routing["stacks"]
+                account_pools = _load_account_pool_names(
+                    parsed.providers_config
+                )
                 document = _read_context_document(
                     parsed.config, home, routing_stacks
                     , account_pools
@@ -1219,6 +1254,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
 
         lock = _context_lock(parsed.config)
         with lock:
+            routing = _load_context_routing(parsed.routing_config)
+            routing_stacks = routing["stacks"]
+            account_pools = _load_account_pool_names(
+                parsed.providers_config
+            )
             document = _read_context_document(
                 parsed.config,
                 home,

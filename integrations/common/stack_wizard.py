@@ -21,12 +21,14 @@ from .orichum_config import (
     ResolvedConfig,
     default_config_paths,
     load_control_plane,
+    validate_control_plane,
 )
 from .project_context import (
     assign_stack_to_context,
+    control_plane_transaction,
     resolve_control_plane_context,
 )
-from .stack_bindings import StackBindings
+from .stack_bindings import StackBindings, stack_binding_transaction
 from .stack_catalog import (
     LiveCatalog,
     LiveModelChoice,
@@ -161,70 +163,138 @@ class StackWizard:
             Choice("Edit existing"),
             Choice("Delete existing"),
         )
-        action_index = self._checked_choose(
-            "Step 1/5 · Stack", actions, searchable=False
-        )
-        if action_index == BACK:
-            raise WizardCancelled
-        action = actions[action_index].label
         names = tuple(sorted(self._snapshot.stacks.stacks))
-
-        if action == "Delete existing":
-            source = self._choose_stack(names)
-            if not self._io.confirm(
-                f"Delete stack {source}? This cannot be undone.",
-                default=False,
-            ):
-                return self._cancelled(source)
-            updated, bindings = delete_stack(
-                self._snapshot,
-                source,
-                self._projects or {"contexts": []},
-            )
-            return WizardResult(
-                updated,
-                bindings,
-                source,
-                True,
-                False,
-            )
-
-        if action == "Edit existing":
-            source = self._choose_stack(names)
-            stack_name = source
-        else:
-            source = (
-                self._choose_stack(names)
-                if action == "Clone existing"
-                else self._snapshot.stacks.default_stack
-            )
-            stack_name = self._new_stack_name(source)
-
-        draft = self._draft_from_stack(action, source, stack_name)
-        controller_action = self._checked_choose(
-            "Step 2/5 · Controller",
-            (
-                Choice("Keep inherited", marker="inherited"),
-                Choice("Configure controller"),
-            ),
-            selected=1 if action == "Create new" else 0,
-        )
-        if controller_action == BACK:
-            raise WizardCancelled
-        if controller_action == 1:
-            configured = self._configure_scope(
-                "controller", draft.controller
-            )
-            if configured is None:
-                raise WizardCancelled
-            draft = replace(draft, controller=configured)
-
-        draft = self._configure_agents(draft)
+        action_index = 0
+        draft: _Draft | None = None
+        stage = 1
         while True:
+            if stage == 1:
+                chosen_action = self._checked_choose(
+                    "Step 1/5 · Stack",
+                    actions,
+                    selected=action_index,
+                    searchable=False,
+                )
+                if chosen_action == BACK:
+                    raise WizardCancelled
+                action_index = chosen_action
+                action = actions[action_index].label
+
+                if action == "Delete existing":
+                    source = self._choose_stack(names)
+                    if source is None:
+                        continue
+                    if not self._io.confirm(
+                        f"Delete stack {source}? This cannot be undone.",
+                        default=False,
+                    ):
+                        return self._cancelled(source)
+                    updated, bindings = delete_stack(
+                        self._snapshot,
+                        source,
+                        self._projects or {"contexts": []},
+                    )
+                    return WizardResult(
+                        updated,
+                        bindings,
+                        source,
+                        True,
+                        False,
+                    )
+
+                source = (
+                    self._choose_stack(
+                        names,
+                        selected_name=(
+                            draft.source_name
+                            if draft is not None
+                            and draft.action == action
+                            else None
+                        ),
+                    )
+                    if action in ("Clone existing", "Edit existing")
+                    else self._snapshot.stacks.default_stack
+                )
+                if source is None:
+                    continue
+                if action == "Edit existing":
+                    stack_name = source
+                else:
+                    stack_name = self._new_stack_name(
+                        draft.stack_name
+                        if draft is not None
+                        and draft.action == action
+                        and draft.source_name == source
+                        else source,
+                        pending_name=(
+                            draft.stack_name
+                            if draft is not None
+                            and draft.action == action
+                            and draft.source_name == source
+                            else None
+                        ),
+                    )
+                if (
+                    draft is not None
+                    and draft.action == action
+                    and draft.source_name == source
+                ):
+                    draft = replace(draft, stack_name=stack_name)
+                else:
+                    draft = self._draft_from_stack(
+                        action, source, stack_name
+                    )
+                stage = 2
+                continue
+
+            if draft is None:
+                raise RoutingError("stack draft is unavailable")
+
+            if stage == 2:
+                controller_action = self._checked_choose(
+                    "Step 2/5 · Controller",
+                    (
+                        Choice("Keep inherited", marker="inherited"),
+                        Choice("Configure controller"),
+                    ),
+                    selected=1 if draft.action == "Create new" else 0,
+                )
+                if controller_action == BACK:
+                    stage = 1
+                    continue
+                if controller_action == 1:
+                    configured = self._configure_scope(
+                        "controller", draft.controller
+                    )
+                    if configured is None:
+                        continue
+                    draft = replace(draft, controller=configured)
+                stage = 3
+                continue
+
+            if stage == 3:
+                draft, went_back = self._configure_agents(draft)
+                if went_back:
+                    stage = 2
+                    continue
+                stage = 4
+                continue
+
             proposed_stacks, proposed_bindings = self._materialize(draft)
             self._io.show(
                 self._review(draft, proposed_stacks, proposed_bindings)
             )
+            review_action = self._checked_choose(
+                "Step 4/5 · Review action",
+                (
+                    Choice("Back to agents"),
+                    Choice("Continue to save"),
+                ),
+                selected=1,
+            )
+            if review_action in (BACK, 0):
+                stage = 3
+                continue
             if not self._io.confirm(
                 f"Save stack {draft.stack_name}?", default=False
             ):
@@ -247,6 +317,7 @@ class StackWizard:
                 f"{missing.provider}. Choose a current live model."
             )
             draft = self._repick_missing(draft, missing)
+            stage = 4
 
         assign = self._assignment_choice(launch_dir, draft.stack_name)
         return WizardResult(
@@ -288,7 +359,17 @@ class StackWizard:
             raise WizardCancelled
         return chosen
 
-    def _choose_stack(self, names: Sequence[str]) -> str:
+    def _choose_stack(
+        self,
+        names: Sequence[str],
+        *,
+        selected_name: str | None = None,
+    ) -> str | None:
+        selected = (
+            names.index(selected_name)
+            if selected_name in names
+            else 0
+        )
         chosen = self._checked_choose(
             "Step 1/5 · Existing stack",
             tuple(
@@ -302,14 +383,22 @@ class StackWizard:
                 )
                 for name in names
             ),
+            selected=selected,
             searchable=len(names) > 9,
         )
         if chosen == BACK:
-            raise WizardCancelled
+            return None
         return names[chosen]
 
-    def _new_stack_name(self, initial: str) -> str:
-        suggested = f"{initial}-copy"
+    def _new_stack_name(
+        self,
+        initial: str,
+        *,
+        pending_name: str | None = None,
+    ) -> str:
+        suggested = (
+            initial if pending_name is not None else f"{initial}-copy"
+        )
         while True:
             raw = self._io.text("New stack name", initial=suggested).strip()
             try:
@@ -317,7 +406,10 @@ class StackWizard:
             except RoutingError as error:
                 self._io.show(str(error))
                 continue
-            if name in self._snapshot.stacks.stacks:
+            if (
+                name in self._snapshot.stacks.stacks
+                and name != pending_name
+            ):
                 self._io.show(f"Stack {name} already exists.")
                 continue
             return name
@@ -361,7 +453,9 @@ class StackWizard:
             inherited=True,
         )
 
-    def _configure_agents(self, draft: _Draft) -> _Draft:
+    def _configure_agents(
+        self, draft: _Draft
+    ) -> tuple[_Draft, bool]:
         ordered_roles = (
             "architecture-advisor",
             *(role for role in ROLES if role != "architecture-advisor"),
@@ -392,9 +486,9 @@ class StackWizard:
                 searchable=False,
             )
             if chosen == BACK:
-                return draft
+                return draft, True
             if chosen == len(ordered_roles):
-                return draft
+                return draft, False
             role = ordered_roles[chosen]
             configured = self._configure_scope(role, draft.agents[role])
             if configured is not None:
@@ -838,9 +932,14 @@ class StackWizard:
                     and len(live.account_names) > 1
                     else "fixed"
                 )
+                definition = stacks.models[candidate.model]
+                routes = ", ".join(
+                    f"{provider}/{definition.routes[provider]}"
+                    for provider in candidate.providers
+                )
                 lines.append(
                     f"[{marker}] {scope} #{ordinal}: {candidate.model} · "
-                    f"provider {', '.join(candidate.providers)} · "
+                    f"routes {routes} · "
                     f"account {policy} · same-model recovery {recovery}"
                 )
         rendered = "\n".join(lines)
@@ -1064,9 +1163,7 @@ class TerminalWizardIO:
             tty.setraw(descriptor, when=termios.TCSANOW)
             while True:
                 matching = self._matching(options, query)
-                if not matching:
-                    matching = tuple(range(len(options)))
-                if selected not in matching:
+                if matching and selected not in matching:
                     selected = matching[0]
                 self._render_raw(
                     title, options, matching, selected, query
@@ -1089,21 +1186,24 @@ class TerminalWizardIO:
                         if len(sequence) >= 3:
                             break
                     if sequence in (b"\x1b[A", b"\x1bOA"):
-                        selected = matching[
-                            (matching.index(selected) - 1) % len(matching)
-                        ]
+                        if matching:
+                            selected = matching[
+                                (matching.index(selected) - 1)
+                                % len(matching)
+                            ]
                         continue
                     if sequence in (b"\x1b[B", b"\x1bOB"):
-                        selected = matching[
-                            (matching.index(selected) + 1) % len(matching)
-                        ]
-                        continue
-                    if query:
-                        query = ""
+                        if matching:
+                            selected = matching[
+                                (matching.index(selected) + 1)
+                                % len(matching)
+                            ]
                         continue
                     return BACK
                 if key in (b"\r", b"\n"):
-                    return selected
+                    if matching:
+                        return selected
+                    continue
                 if key in (b"\x7f", b"\x08") and query:
                     query = query[:-1]
                     continue
@@ -1112,7 +1212,7 @@ class TerminalWizardIO:
                     continue
                 if key.isdigit() and key != b"0" and not query:
                     ordinal = int(key)
-                    if ordinal <= len(matching):
+                    if matching and ordinal <= len(matching):
                         return matching[ordinal - 1]
                     continue
                 if searchable and key >= b" ":
@@ -1157,6 +1257,8 @@ class TerminalWizardIO:
         lines = [title]
         if query:
             lines.append(f"Search: {query}")
+        if not matching:
+            lines.append("No matches")
         for visible, index in enumerate(matching, 1):
             option = options[index]
             marker = f"[{option.marker}] " if option.marker else ""
@@ -1209,7 +1311,13 @@ class TerminalWizardIO:
                 raise WizardCancelled
             answer = answer.strip()
             if not answer:
-                return selected
+                if matching:
+                    return (
+                        selected
+                        if selected in matching
+                        else matching[0]
+                    )
+                continue
             if answer.casefold() in {"b", "back", "esc"}:
                 return BACK
             if searchable and answer.startswith("/"):
@@ -1221,7 +1329,6 @@ class TerminalWizardIO:
                 )
                 if not matching:
                     self._stdout.write("No matches.\n")
-                    matching = tuple(range(len(options)))
                 elif len(matching) == 1:
                     return matching[0]
                 continue
@@ -1273,6 +1380,45 @@ def _matched_context(
     raise RoutingError("matched project context disappeared")
 
 
+def _validate_proposed_live_routes(
+    stacks: NormalizedStacks,
+    bindings: StackBindings,
+    catalog: LiveCatalog,
+) -> None:
+    for stack_name, stack in stacks.stacks.items():
+        for scope, candidates in (
+            ("controller", stack.controller),
+            *((role, stack.agents[role]) for role in ROLES),
+        ):
+            for candidate in candidates:
+                definition = stacks.models[candidate.model]
+                locked_account = bindings.candidate_accounts.get(
+                    candidate.id
+                )
+                for provider in candidate.providers:
+                    live = next(
+                        (
+                            choice
+                            for choice in catalog.choices
+                            if choice.family == definition.family
+                            and choice.provider == provider
+                            and choice.upstream
+                            == definition.routes[provider]
+                            and (
+                                locked_account is None
+                                or locked_account in choice.account_ids
+                            )
+                        ),
+                        None,
+                    )
+                    if live is None:
+                        raise RoutingError(
+                            f"stack {stack_name} {scope} model "
+                            f"{candidate.model} is not live through "
+                            f"{provider}"
+                        )
+
+
 def run_stack_wizard(
     paths: Mapping[str, Path],
     config: ResolvedConfig,
@@ -1318,35 +1464,65 @@ def run_stack_wizard(
         print("No changes saved.")
         return 0
 
-    save_stack(snapshot, result.stacks, result.bindings)
-    reloaded = load_control_plane(default_config_paths(config_root))
-    reloaded_stacks = normalize_model_stacks(
-        reloaded.documents["model-stacks"]
-    )
-    if result.assign_current_project:
-        context = _matched_context(
-            reloaded.documents["projects"], Path(launch_dir)
-        )
-        if latest is None:
-            latest = refresh()
-        validate_stack_assignment(
-            result.stack_name,
-            context,
-            reloaded_stacks,
-            result.bindings,
-            accounts,
-            reloaded.documents["providers"],
-            latest,
-        )
-        matched = assign_stack_to_context(
-            config_root / "projects.json",
-            Path(launch_dir),
-            result.stack_name,
-            reloaded_stacks.stacks,
-        )
+    matched: Path | None = None
+    with control_plane_transaction(config_root):
+        with stack_binding_transaction(binding_path):
+            current = load_control_plane(
+                default_config_paths(config_root)
+            )
+            current_accounts = load_accounts(
+                config_root / "accounts.json"
+            )
+            validate_account_bindings(
+                current_accounts, current.documents["providers"]
+            )
+            current_catalog = project_live_catalog(
+                fetch_live_catalog(port),
+                current_accounts,
+                result.stacks.models,
+                current.documents["providers"],
+            )
+            proposed = ResolvedConfig(
+                documents={
+                    **current.documents,
+                    "model-stacks": serialize_model_stacks(
+                        result.stacks
+                    ),
+                },
+                sources=current.sources,
+            )
+            validate_control_plane(proposed)
+            _validate_proposed_live_routes(
+                result.stacks,
+                result.bindings,
+                current_catalog,
+            )
+            if result.assign_current_project:
+                context = _matched_context(
+                    current.documents["projects"], Path(launch_dir)
+                )
+                validate_stack_assignment(
+                    result.stack_name,
+                    context,
+                    result.stacks,
+                    result.bindings,
+                    current_accounts,
+                    current.documents["providers"],
+                    current_catalog,
+                )
+            save_stack(snapshot, result.stacks, result.bindings)
+            if result.assign_current_project:
+                matched = assign_stack_to_context(
+                    config_root / "projects.json",
+                    Path(launch_dir),
+                    result.stack_name,
+                    result.stacks.stacks,
+                )
+
+    if matched is not None:
         print(f"Saved stack {result.stack_name}.")
         print(f"Assigned project {matched}.")
-    elif result.stack_name in reloaded_stacks.stacks:
+    elif result.stack_name in result.stacks.stacks:
         print(f"Saved stack {result.stack_name}.")
     else:
         print(f"Deleted stack {result.stack_name}.")

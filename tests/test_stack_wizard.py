@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import io
+import json
 import os
 from pathlib import Path
 import pty
+import shutil
 import struct
 import termios
+import tempfile
 import threading
+from typing import Callable
 import unittest
 from unittest import mock
 
 from integrations.common import stack_wizard
-from integrations.common.account_registry import Account
+from integrations.common.account_registry import Account, update_accounts
 from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.stack_bindings import StackBindings
 from integrations.common.stack_catalog import LiveCatalog, LiveModelChoice
@@ -28,6 +33,9 @@ from integrations.common.stack_wizard import (
     WizardResult,
     run_stack_wizard,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _account(
@@ -62,6 +70,8 @@ class ScriptedIO:
         cancel_at: int | None = None,
         disconnect_at: int | None = None,
         back_at: int | None = None,
+        back_titles: list[str] | None = None,
+        back_title_occurrences: dict[str, list[int]] | None = None,
     ) -> None:
         self.choices = list(choices or [])
         self.confirmations = list(confirmations or [])
@@ -69,6 +79,14 @@ class ScriptedIO:
         self.cancel_at = cancel_at
         self.disconnect_at = disconnect_at
         self.back_at = back_at
+        self.back_titles = list(back_titles or [])
+        self.back_title_occurrences = {
+            title: list(occurrences)
+            for title, occurrences in (
+                back_title_occurrences or {}
+            ).items()
+        }
+        self.title_calls: dict[str, int] = {}
         self.calls = 0
         self.shown: list[str] = []
         self.titles: list[str] = []
@@ -89,7 +107,15 @@ class ScriptedIO:
     ) -> int:
         self._before()
         self.titles.append(title)
+        self.title_calls[title] = self.title_calls.get(title, 0) + 1
         if self.back_at == self.calls:
+            return BACK
+        if self.back_titles and self.back_titles[0] == title:
+            self.back_titles.pop(0)
+            return BACK
+        occurrences = self.back_title_occurrences.get(title, [])
+        if occurrences and occurrences[0] == self.title_calls[title]:
+            occurrences.pop(0)
             return BACK
         labels = [option.label for option in options]
         if self.choices and self.choices[0] in labels:
@@ -346,11 +372,57 @@ class StackWizardTests(unittest.TestCase):
             )
         )
 
-    def test_back_keeps_inherited_draft_and_returns_to_stack_stage(self) -> None:
+    def test_back_navigates_stages_and_preserves_changed_draft(self) -> None:
         io_adapter = ScriptedIO(
-            choices=["Clone existing", "balanced"],
+            choices=[
+                "Clone existing",
+                "balanced",
+                "antigravity",
+                "claude",
+                "claude-opus-4-6-thinking",
+                "Personal Antigravity",
+                "Back to agents",
+                "Continue to review",
+                "Continue to save",
+            ],
+            confirmations=[True, False],
             text=["heavy"],
-            back_at=4,
+            back_titles=[
+                "Step 2/5 · Controller",
+                "Step 3/5 · Agents",
+            ],
+        )
+
+        result = StackWizard(
+            self.snapshot,
+            self.catalog,
+            self.accounts,
+            io_adapter,
+        ).run(Path("/work/project"))
+
+        self.assertTrue(result.save)
+        self.assertFalse(result.assign_current_project)
+        candidate = result.stacks.stacks["heavy"].agents[
+            "architecture-advisor"
+        ][0]
+        self.assertEqual(candidate.model, "claude-opus-4-6-thinking")
+        self.assertEqual(candidate.providers, ("antigravity",))
+        self.assertEqual(
+            io_adapter.titles.count("Step 1/5 · Stack"), 2
+        )
+        self.assertEqual(
+            io_adapter.titles.count("Step 2/5 · Controller"), 3
+        )
+        self.assertGreaterEqual(
+            io_adapter.titles.count("Step 3/5 · Agents"), 3
+        )
+        self.assertEqual(
+            io_adapter.titles.count("Step 4/5 · Review action"), 2
+        )
+
+    def test_back_from_initial_stack_stage_cancels(self) -> None:
+        io_adapter = ScriptedIO(
+            back_titles=["Step 1/5 · Stack"]
         )
 
         result = StackWizard(
@@ -362,6 +434,44 @@ class StackWizardTests(unittest.TestCase):
 
         self.assertFalse(result.save)
         self.assertEqual(result.stacks, self.snapshot.stacks)
+
+    def test_rename_after_back_preserves_changed_draft(self) -> None:
+        io_adapter = ScriptedIO(
+            choices=[
+                "Clone existing",
+                "balanced",
+                "antigravity",
+                "claude",
+                "claude-opus-4-6-thinking",
+                "Personal Antigravity",
+                "Continue to review",
+                "Continue to save",
+            ],
+            confirmations=[True, False],
+            text=["heavy", "renamed-heavy"],
+            back_title_occurrences={
+                "Step 3/5 · Agents": [2],
+                "Step 2/5 · Controller": [2],
+            },
+        )
+
+        result = StackWizard(
+            self.snapshot,
+            self.catalog,
+            self.accounts,
+            io_adapter,
+        ).run(Path("/work/project"))
+
+        candidate = result.stacks.stacks["renamed-heavy"].agents[
+            "architecture-advisor"
+        ][0]
+        self.assertEqual(candidate.model, "claude-opus-4-6-thinking")
+        self.assertEqual(candidate.providers, ("antigravity",))
+        self.assertEqual(
+            result.bindings.candidate_accounts[candidate.id],
+            "oc-a-cccccccccccccccc",
+        )
+        self.assertNotIn("heavy", result.stacks.stacks)
 
     def test_final_catalog_refresh_repicks_only_disappeared_candidate(self) -> None:
         refreshed = LiveCatalog(
@@ -409,6 +519,53 @@ class StackWizardTests(unittest.TestCase):
             "claude-opus-4-6-thinking",
             "\n".join(io_adapter.shown).lower(),
         )
+
+    def test_review_shows_logical_alias_and_exact_provider_upstream(
+        self,
+    ) -> None:
+        document = stack_wizard.serialize_model_stacks(self.stacks)
+        definition = document["models"].pop("claude-opus-4-8")
+        definition["routes"]["antigravity"] = (
+            "claude-opus-4-6-thinking"
+        )
+        document["models"]["claude-opus"] = definition
+        architecture = document["stacks"]["balanced"]["agents"][
+            "architecture-advisor"
+        ][0]
+        architecture["model"] = "claude-opus"
+        architecture["providers"] = ["anthropic", "antigravity"]
+        architecture["id"] = stack_wizard.candidate_id(
+            "balanced", "architecture-advisor", 0, "claude-opus"
+        )
+        stacks = normalize_model_stacks(document)
+        snapshot = StackSnapshot(stacks, StackBindings({}), "0" * 64, None)
+        io_adapter = ScriptedIO(
+            choices=[
+                "Clone existing",
+                "balanced",
+                "Continue to review",
+            ],
+            confirmations=[False],
+            text=["alias-review"],
+        )
+
+        StackWizard(
+            snapshot,
+            self.catalog,
+            self.accounts,
+            io_adapter,
+        ).run(Path("/work/project"))
+
+        review = "\n".join(io_adapter.shown)
+        self.assertIn("claude-opus", review)
+        self.assertIn("anthropic/claude-opus-4-8", review)
+        self.assertIn(
+            "antigravity/claude-opus-4-6-thinking", review
+        )
+        self.assertNotIn("oc-a-", review)
+        self.assertNotIn("oc-c-", review)
+        self.assertNotIn("oc-r-", review)
+        self.assertNotIn(".json", review)
 
     def test_safe_delete_rejects_default_and_referenced_stack(self) -> None:
         for projects, expected in (
@@ -582,7 +739,7 @@ class StackWizardTests(unittest.TestCase):
         assign.assert_not_called()
         self.assertIn("No changes saved", terminal.getvalue())
 
-    def test_cli_runner_saves_reloads_validates_then_assigns(self) -> None:
+    def test_cli_runner_reloads_validates_saves_then_assigns(self) -> None:
         paths = {"config": Path("/private/config"), "data": Path("/data")}
         projects = {
             "schemaVersion": 1,
@@ -652,6 +809,23 @@ class StackWizardTests(unittest.TestCase):
             ),
             mock.patch.object(
                 stack_wizard,
+                "control_plane_transaction",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "stack_binding_transaction",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "validate_control_plane",
+                side_effect=lambda *_args: calls.append(
+                    "validate-control-plane"
+                ),
+            ),
+            mock.patch.object(
+                stack_wizard,
                 "save_stack",
                 side_effect=lambda *_args: calls.append("save"),
             ) as save,
@@ -689,7 +863,16 @@ class StackWizardTests(unittest.TestCase):
             )
 
         self.assertEqual(status, 0)
-        self.assertEqual(calls, ["save", "reload", "validate", "assign"])
+        self.assertEqual(
+            calls,
+            [
+                "reload",
+                "validate-control-plane",
+                "validate",
+                "save",
+                "assign",
+            ],
+        )
         save.assert_called_once_with(
             self.snapshot, result.stacks, result.bindings
         )
@@ -703,6 +886,376 @@ class StackWizardTests(unittest.TestCase):
         self.assertNotIn("oc-c-", output)
         self.assertNotIn("oc-r-", output)
         self.assertNotIn(".json", output)
+
+    def _config_root(
+        self,
+        stacks,
+        *,
+        projects: dict[str, object] | None = None,
+    ) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "config"
+        shutil.copytree(REPO_ROOT / "config", root)
+        root = root.resolve()
+        root.chmod(0o700)
+        (root / "model-stacks.json").write_text(
+            json.dumps(
+                stack_wizard.serialize_model_stacks(stacks),
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if projects is not None:
+            (root / "projects.json").write_text(
+                json.dumps(projects, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return root
+
+    def _created_heavy_result(self) -> WizardResult:
+        return StackWizard(
+            self.snapshot,
+            self.catalog,
+            self.accounts,
+            ScriptedIO(
+                choices=[
+                    "Clone existing",
+                    "balanced",
+                    "antigravity",
+                    "claude",
+                    "claude-opus-4-6-thinking",
+                    "Personal Antigravity",
+                ],
+                confirmations=[True, False],
+                text=["heavy"],
+            ),
+        ).run(Path("/work/project"))
+
+    def _run_while_control_plane_writer_holds_lock(
+        self,
+        config_root: Path,
+        initial: ResolvedConfig,
+        result: WizardResult,
+        mutate: Callable[[], None],
+    ) -> tuple[list[BaseException], mock.Mock]:
+        writer_entered = threading.Event()
+        commit_attempted = threading.Event()
+        release_writer = threading.Event()
+        runner_done = threading.Event()
+        failures: list[BaseException] = []
+        real_transaction = stack_wizard.control_plane_transaction
+        save = mock.Mock()
+
+        @contextlib.contextmanager
+        def observed_transaction(path: Path):
+            commit_attempted.set()
+            with real_transaction(path):
+                yield
+
+        def writer() -> None:
+            try:
+                with real_transaction(config_root):
+                    mutate()
+                    writer_entered.set()
+                    if not release_writer.wait(2):
+                        raise AssertionError(
+                            "test did not release control-plane writer"
+                        )
+            except BaseException as error:
+                failures.append(error)
+
+        def runner() -> None:
+            try:
+                run_stack_wizard(
+                    {"config": config_root, "data": config_root.parent},
+                    initial,
+                    Path("/work/project"),
+                )
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                runner_done.set()
+
+        writer_thread = threading.Thread(target=writer)
+        writer_thread.start()
+        self.assertTrue(writer_entered.wait(2))
+        terminal = _TTYStringIO()
+        with (
+            mock.patch.object(stack_wizard.sys, "stdin", terminal),
+            mock.patch.object(stack_wizard.sys, "stdout", terminal),
+            mock.patch.object(
+                stack_wizard, "_runtime_catalog_port", return_value=8317
+            ),
+            mock.patch.object(
+                stack_wizard, "load_accounts", return_value=self.accounts
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "fetch_live_catalog",
+                return_value={"object": "list", "data": []},
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "project_live_catalog",
+                return_value=self.catalog,
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "load_stack_snapshot",
+                return_value=self.snapshot,
+            ),
+            mock.patch.object(
+                stack_wizard.StackWizard, "run", return_value=result
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "control_plane_transaction",
+                side_effect=observed_transaction,
+            ),
+            mock.patch.object(stack_wizard, "save_stack", save),
+        ):
+            runner_thread = threading.Thread(target=runner)
+            runner_thread.start()
+            self.assertTrue(commit_attempted.wait(2))
+            self.assertFalse(runner_done.is_set())
+            release_writer.set()
+            runner_thread.join(2)
+            writer_thread.join(2)
+            self.assertFalse(runner_thread.is_alive())
+            self.assertFalse(writer_thread.is_alive())
+        return failures, save
+
+    def test_concurrent_provider_change_is_reloaded_before_save(self) -> None:
+        result = self._created_heavy_result()
+        config_root = self._config_root(self.snapshot.stacks)
+        initial = stack_wizard.load_control_plane(
+            stack_wizard.default_config_paths(config_root)
+        )
+
+        def remove_antigravity_claude_route() -> None:
+            path = config_root / "providers.json"
+            providers = json.loads(path.read_text(encoding="utf-8"))
+            antigravity = providers["providers"]["antigravity"]
+            antigravity["families"] = ["google"]
+            del antigravity["familyPrefixes"]["claude"]
+            providers["fallbackRoutes"]["claude"] = ["anthropic"]
+            path.write_text(
+                json.dumps(providers, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        failures, save = (
+            self._run_while_control_plane_writer_holds_lock(
+                config_root,
+                initial,
+                result,
+                remove_antigravity_claude_route,
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertRegex(
+            str(failures[0]), "does not support model family claude"
+        )
+        save.assert_not_called()
+
+    def test_concurrent_project_reference_blocks_stack_deletion(self) -> None:
+        created = self._created_heavy_result()
+        config_root = self._config_root(created.stacks)
+        initial = stack_wizard.load_control_plane(
+            stack_wizard.default_config_paths(config_root)
+        )
+        current_snapshot = StackSnapshot(
+            created.stacks,
+            created.bindings,
+            "1" * 64,
+            None,
+        )
+        deleted_stacks, deleted_bindings = stack_wizard.delete_stack(
+            current_snapshot,
+            "heavy",
+            initial.documents["projects"],
+        )
+        result = WizardResult(
+            deleted_stacks,
+            deleted_bindings,
+            "heavy",
+            True,
+            False,
+        )
+
+        def reference_heavy() -> None:
+            projects = {
+                "schemaVersion": 1,
+                "contexts": [
+                    {
+                        "root": "/work/project",
+                        "dockerProfile": None,
+                        "modelStack": "heavy",
+                        "accountPools": ["shared"],
+                        "memoryPalace": "/work/memory",
+                        "memoryWing": "project",
+                    }
+                ],
+            }
+            (config_root / "projects.json").write_text(
+                json.dumps(projects, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        failures, save = (
+            self._run_while_control_plane_writer_holds_lock(
+                config_root,
+                initial,
+                result,
+                reference_heavy,
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertRegex(str(failures[0]), "unknown model stack")
+        save.assert_not_called()
+
+    def test_concurrent_account_removal_is_reloaded_before_save(
+        self,
+    ) -> None:
+        config_root = self._config_root(self.snapshot.stacks)
+        initial = stack_wizard.load_control_plane(
+            stack_wizard.default_config_paths(config_root)
+        )
+        registry = config_root / "accounts.json"
+        update_accounts(registry, lambda _accounts: self.accounts)
+        raw_catalog = {
+            "object": "list",
+            "data": [
+                {
+                    "id": (
+                        f"{account.routing_prefix}/{choice.upstream}"
+                    )
+                }
+                for account in self.accounts
+                for choice in self.catalog.choices
+                if choice.provider == account.provider
+            ],
+        }
+        result = WizardResult(
+            self.snapshot.stacks,
+            self.snapshot.bindings,
+            "balanced",
+            True,
+            False,
+        )
+        confirmed = threading.Event()
+        writer_entered = threading.Event()
+        binding_attempted = threading.Event()
+        release_writer = threading.Event()
+        runner_done = threading.Event()
+        failures: list[BaseException] = []
+        save = mock.Mock()
+        real_binding_transaction = (
+            stack_wizard.stack_binding_transaction
+        )
+
+        def remove_openai_account() -> None:
+            try:
+                if not confirmed.wait(2):
+                    raise AssertionError(
+                        "wizard did not reach confirmation"
+                    )
+                with real_binding_transaction(
+                    config_root / "stack-bindings.json"
+                ):
+                    update_accounts(
+                        registry,
+                        lambda accounts: tuple(
+                            account
+                            for account in accounts
+                            if account.provider != "openai"
+                        ),
+                    )
+                    writer_entered.set()
+                    if not release_writer.wait(2):
+                        raise AssertionError(
+                            "test did not release account writer"
+                        )
+            except BaseException as error:
+                failures.append(error)
+
+        def confirmed_result(*_args) -> WizardResult:
+            confirmed.set()
+            if not writer_entered.wait(2):
+                raise AssertionError(
+                    "account writer did not acquire binding lock"
+                )
+            return result
+
+        @contextlib.contextmanager
+        def observed_binding_transaction(path: Path):
+            binding_attempted.set()
+            with real_binding_transaction(path) as transaction:
+                yield transaction
+
+        def runner() -> None:
+            try:
+                run_stack_wizard(
+                    {"config": config_root, "data": config_root.parent},
+                    initial,
+                    Path("/work/project"),
+                )
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                runner_done.set()
+
+        writer_thread = threading.Thread(target=remove_openai_account)
+        writer_thread.start()
+        terminal = _TTYStringIO()
+        with (
+            mock.patch.object(stack_wizard.sys, "stdin", terminal),
+            mock.patch.object(stack_wizard.sys, "stdout", terminal),
+            mock.patch.object(
+                stack_wizard, "_runtime_catalog_port", return_value=8317
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "fetch_live_catalog",
+                return_value=raw_catalog,
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "load_stack_snapshot",
+                return_value=self.snapshot,
+            ),
+            mock.patch.object(
+                stack_wizard.StackWizard,
+                "run",
+                side_effect=confirmed_result,
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "stack_binding_transaction",
+                side_effect=observed_binding_transaction,
+            ),
+            mock.patch.object(stack_wizard, "save_stack", save),
+        ):
+            runner_thread = threading.Thread(target=runner)
+            runner_thread.start()
+            self.assertTrue(binding_attempted.wait(2))
+            self.assertFalse(runner_done.is_set())
+            release_writer.set()
+            runner_thread.join(2)
+            writer_thread.join(2)
+            self.assertFalse(runner_thread.is_alive())
+            self.assertFalse(writer_thread.is_alive())
+
+        self.assertEqual(len(failures), 1)
+        self.assertRegex(
+            str(failures[0]),
+            "gpt-5.6-sol is not live through openai",
+        )
+        save.assert_not_called()
 
 
 class _TTYStringIO(io.StringIO):
@@ -744,6 +1297,7 @@ class TerminalWizardIOTests(unittest.TestCase):
         )
         primed = bytearray()
         failure: list[BaseException] = []
+        finished = threading.Event()
 
         def feed_after_render() -> None:
             try:
@@ -754,21 +1308,30 @@ class TerminalWizardIOTests(unittest.TestCase):
                     raise AssertionError("terminal adapter did not render")
                 primed.extend(os.read(master, 65536))
                 os.write(master, payload)
+                while not finished.is_set():
+                    readable, _, _ = __import__("select").select(
+                        [master], [], [], 0.05
+                    )
+                    if readable:
+                        primed.extend(os.read(master, 65536))
             except BaseException as error:
                 failure.append(error)
 
         feeder = threading.Thread(target=feed_after_render)
         feeder.start()
-        selected = adapter.choose(
-            "Step 2/5 · Model",
-            options
-            or [
-                Choice("first"),
-                Choice("second", marker="inherited"),
-                Choice("needle model"),
-            ],
-            searchable=True,
-        )
+        try:
+            selected = adapter.choose(
+                "Step 2/5 · Model",
+                options
+                or [
+                    Choice("first"),
+                    Choice("second", marker="inherited"),
+                    Choice("needle model"),
+                ],
+                searchable=True,
+            )
+        finally:
+            finished.set()
         feeder.join()
         if failure:
             raise failure[0]
@@ -792,6 +1355,12 @@ class TerminalWizardIOTests(unittest.TestCase):
         self.assertEqual(selected, 2)
         selected, _ = self._pty_choose(b"\x1b")
         self.assertEqual(selected, BACK)
+
+    def test_raw_adapter_empty_search_ignores_enter_until_back(self) -> None:
+        selected, output = self._pty_choose(b"/missing\r\x1b")
+
+        self.assertEqual(selected, BACK)
+        self.assertIn("No matches", output)
 
     def test_raw_adapter_ctrl_c_cancels_without_waiting(self) -> None:
         with self.assertRaises(WizardCancelled):

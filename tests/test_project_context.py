@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from integrations.common import project_context
 from integrations.common.project_context import (
     ContextError,
     assign_stack_to_context,
+    control_plane_transaction,
     load_config,
     resolve_context,
 )
@@ -498,6 +500,32 @@ class StackContextAssignmentTests(unittest.TestCase):
         self.assertEqual(
             list(self.root.glob(f".{self.config_path.name}.*")), []
         )
+
+    def test_assignment_uses_shared_control_plane_transaction(self):
+        attempted = threading.Event()
+        completed = threading.Event()
+        failures = []
+
+        def assign_in_thread():
+            attempted.set()
+            try:
+                self.assign(self.nested, "heavy")
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                completed.set()
+
+        with control_plane_transaction(self.config_path.parent):
+            worker = threading.Thread(target=assign_in_thread)
+            worker.start()
+            self.assertTrue(attempted.wait(2))
+            self.assertFalse(completed.is_set())
+
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["contexts"][0]["modelStack"], "heavy")
 
     def test_unknown_stack_and_unmatched_directory_do_not_mutate(self):
         original = self.config_path.read_bytes()

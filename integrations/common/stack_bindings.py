@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass
 import fcntl
 import hashlib
@@ -22,6 +23,9 @@ from .account_registry import AccountError, load_accounts
 MAX_BINDING_BYTES = 1024 * 1024
 _CANDIDATE_ID = re.compile(r"oc-c-[0-9a-f]{16}")
 _ACCOUNT_ID = re.compile(r"oc-a-[a-f0-9]{16}")
+_ACTIVE_TRANSACTION: contextvars.ContextVar[
+    tuple[Path, "StackBindingTransaction"] | None
+] = contextvars.ContextVar("active_stack_binding_transaction", default=None)
 
 
 class StackBindingError(RuntimeError):
@@ -313,6 +317,16 @@ def stack_binding_transaction(path: Path):
     """Serialize account lifecycle and stack-binding mutations."""
     path = Path(path)
     parent = _private_parent(path)
+    canonical = parent / path.name
+    active = _ACTIVE_TRANSACTION.get()
+    if active is not None:
+        active_path, transaction = active
+        if active_path != canonical:
+            raise StackBindingError(
+                "nested stack binding transactions require one path"
+            )
+        yield transaction
+        return
     lock_path = parent / ".account-stack-transaction.lock"
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -330,9 +344,11 @@ def stack_binding_transaction(path: Path):
             raise StackBindingError("stack binding lock is unsafe")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         transaction = StackBindingTransaction(path)
+        token = _ACTIVE_TRANSACTION.set((canonical, transaction))
         try:
             yield transaction
         finally:
+            _ACTIVE_TRANSACTION.reset(token)
             transaction._active = False
     finally:
         os.close(lock_descriptor)

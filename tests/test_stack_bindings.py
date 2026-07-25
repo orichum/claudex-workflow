@@ -13,6 +13,7 @@ from integrations.common.stack_bindings import (
     StackBindings,
     load_stack_bindings,
     save_stack_bindings,
+    stack_binding_transaction,
     stack_binding_digest,
 )
 
@@ -72,6 +73,11 @@ class StackBindingTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertEqual(load_stack_bindings(self.path), updated)
         self.assertIsNotNone(stack_binding_digest(self.path))
+
+    def test_transaction_is_reentrant_for_the_same_binding_path(self):
+        with stack_binding_transaction(self.path) as outer:
+            with stack_binding_transaction(self.path) as inner:
+                self.assertIs(inner, outer)
 
     def test_digest_conflict_does_not_overwrite(self):
         original = load_stack_bindings(self.path)
