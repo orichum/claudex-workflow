@@ -21,6 +21,14 @@ from typing import Callable, Literal
 from urllib.parse import quote, unquote, urlsplit
 import uuid
 
+from integrations.common.graph_hooks import (
+    GraphHookError,
+    _launch_detached_update,
+    graph_hook_status,
+    install_graph_hooks,
+    resolve_hook_repository,
+)
+
 
 class GraphManagerError(RuntimeError):
     """A repository cannot be mapped to a safe, unique graph location."""
@@ -1188,6 +1196,7 @@ def sync_graph(
             if node_count is None:
                 raise GraphError("Migrated graph is invalid")
             prune_orphaned_working_graphs(target.identity, data_root)
+            _install_graph_hooks(target.repository)
             return _result(target, "migrated", node_count)
 
         status = inspect_graph(target)
@@ -1225,6 +1234,7 @@ def sync_graph(
             node_count = _validate_output(target, output_dir)
             _activate_staged_output(output_dir, target.output_dir)
             prune_orphaned_working_graphs(target.identity, data_root)
+            _install_graph_hooks(target.repository)
             return _result(target, action, node_count)
         except BaseException:
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -1291,6 +1301,54 @@ def _resolve_graphify() -> str:
     return executable
 
 
+def _orichum_launcher() -> Path:
+    return Path(__file__).resolve().parents[2] / "bin" / "orichum"
+
+
+def _install_graph_hooks(repository: Path) -> None:
+    try:
+        install_graph_hooks(repository, _orichum_launcher())
+    except GraphHookError as error:
+        raise GraphError(str(error)) from error
+
+
+_HOOK_SYNC_LAUNCHER = (
+    "import sys\n"
+    "root = sys.argv.pop(1)\n"
+    "sys.path.insert(0, root)\n"
+    "from integrations.common.graph_manager import graph_main\n"
+    "raise SystemExit(graph_main(sys.argv[1:]))\n"
+)
+
+
+def _graph_hook_update(value: str) -> int:
+    repository = resolve_hook_repository(Path(value))
+    workflow_root = Path(__file__).resolve().parents[2]
+    command = [
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        _HOOK_SYNC_LAUNCHER,
+        str(workflow_root),
+        "__hook-sync",
+        str(repository),
+    ]
+    _launch_detached_update(repository, _graph_data_root(), command)
+    return 0
+
+
+def _graph_hook_sync(value: str) -> int:
+    repository = resolve_hook_repository(Path(value))
+    sync_graph(
+        repository,
+        _graph_data_root(),
+        graphify=_resolve_graphify(),
+        progress=print,
+    )
+    return 0
+
+
 def _bounded_command(
     arguments: list[str], *, cwd: Path | None = None
 ) -> subprocess.CompletedProcess[str] | None:
@@ -1305,22 +1363,6 @@ def _bounded_command(
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-
-
-def _hook_status(graphify: str | None, repository: Path) -> str:
-    if graphify is None:
-        return "unavailable"
-    completed = _bounded_command(
-        [graphify, "hook", "status"], cwd=repository
-    )
-    if completed is None:
-        return "unknown"
-    output = f"{completed.stdout}\n{completed.stderr}".lower()
-    if completed.returncode == 0 and "not installed" not in output:
-        return "installed"
-    if "not installed" in output:
-        return "missing"
-    return "unknown"
 
 
 def _package_version(graphify: str | None) -> str:
@@ -1417,7 +1459,7 @@ def _status_rows(
                     "dirty" if dirty else "clean",
                     graph_state,
                     nodes,
-                    _hook_status(graphify, repository),
+                    graph_hook_status(repository),
                     output,
                 )
             )
@@ -1501,6 +1543,14 @@ def graph_main(arguments: list[str] | None = None) -> int:
     """Run the repository-aware Orichum graph command."""
     arguments = list(sys.argv[1:] if arguments is None else arguments)
     try:
+        if arguments and arguments[0] == "hook-update":
+            if len(arguments) != 2:
+                raise GraphManagerError("graph hook-update requires PATH")
+            return _graph_hook_update(arguments[1])
+        if arguments and arguments[0] == "__hook-sync":
+            if len(arguments) != 2:
+                raise GraphManagerError("graph hook sync requires PATH")
+            return _graph_hook_sync(arguments[1])
         if arguments and arguments[0] == "status":
             if len(arguments) > 2:
                 raise GraphManagerError("graph status accepts at most one PATH")
@@ -1522,7 +1572,7 @@ def graph_main(arguments: list[str] | None = None) -> int:
             progress=print,
         )
         return 0
-    except (GraphManagerError, OSError) as error:
+    except (GraphHookError, GraphManagerError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
 

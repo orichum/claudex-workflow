@@ -142,12 +142,39 @@ else
   fail 'CLIProxyAPI management key is missing or unsafe'
 fi
 
-if [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/ensure-graphify-hook.py" ]] && \
+if [[ -n "$python_identity" ]] && \
+   [[ -f "$WORKFLOW_ROOT/integrations/common/graph_manager.py" && \
+      ! -L "$WORKFLOW_ROOT/integrations/common/graph_manager.py" ]] && \
+   [[ -f "$WORKFLOW_ROOT/integrations/common/graph_hooks.py" && \
+      ! -L "$WORKFLOW_ROOT/integrations/common/graph_hooks.py" ]] && \
    [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/check-local-services.sh" ]] && \
-   [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/route-mempalace-input.py" ]]; then
-  ok 'Graphify, service-health, and Mempalace hooks are executable'
+   [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/route-mempalace-input.py" ]] && \
+   PYTHONDONTWRITEBYTECODE=1 "$orichum_python" -I -B - \
+     "$WORKFLOW_ROOT" >/dev/null 2>&1 <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from integrations.common.graph_hooks import (
+    graph_hook_status,
+    install_graph_hooks,
+    remove_upstream_graphify_hooks,
+)
+from integrations.common.graph_manager import graph_main, sync_graph
+
+for interface in (
+    graph_hook_status,
+    install_graph_hooks,
+    remove_upstream_graphify_hooks,
+    graph_main,
+    sync_graph,
+):
+    if not callable(interface):
+        raise SystemExit(1)
+PY
+then
+  ok 'repository graph manager and hook contract are available'
 else
-  fail 'one or more Orichum integration hooks are unavailable'
+  fail 'repository graph manager or integration hook contract is unavailable'
 fi
 
 if (( failures > 0 )); then

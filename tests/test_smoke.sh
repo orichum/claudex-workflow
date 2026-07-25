@@ -191,6 +191,23 @@ rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
+rg -Fq 'repository graph manager and hook contract are available' \
+  "$ROOT/doctor.sh"
+[[ ! -e "$ROOT/controller/plugin/scripts/ensure-graphify-hook.py" ]]
+"$system_python" -I -B - "$ROOT" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from integrations.common.graph_hooks import (
+    graph_hook_status,
+    install_graph_hooks,
+    remove_upstream_graphify_hooks,
+)
+
+assert callable(graph_hook_status)
+assert callable(install_graph_hooks)
+assert callable(remove_upstream_graphify_hooks)
+PY
 rg -Fq \
   'Display names appear in explicit account and route inspection output.' \
   "$ROOT/docs/providers-and-accounts.md"
