@@ -817,6 +817,7 @@ def _write_context_document(config_path: Path, document: dict) -> None:
         _replace_private_context_artifact(
             original_path, original
         )
+        _fsync_context_directory(config_path.parent)
         _write_context_marker(config_path, "pending", mode)
         recovery_ready = True
         _fsync_context_directory(config_path.parent)

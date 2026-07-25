@@ -520,7 +520,7 @@ class StackContextAssignmentTests(unittest.TestCase):
         def fail_target_fsync(parent):
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if calls == 3:
                 raise OSError("injected context directory fsync")
             real_fsync(parent)
 
@@ -537,6 +537,125 @@ class StackContextAssignmentTests(unittest.TestCase):
             [],
         )
 
+    def test_assignment_fsyncs_backup_before_publishing_pending_marker(self):
+        original = self.config_path.read_bytes()
+        marker, backup = project_context._context_recovery_paths(
+            self.config_path
+        )
+        calls = 0
+        marker_at_backup_fsync = None
+        backup_at_backup_fsync = None
+
+        def fail_backup_fsync(parent):
+            nonlocal calls, marker_at_backup_fsync, backup_at_backup_fsync
+            calls += 1
+            if calls == 1:
+                backup_at_backup_fsync = backup.read_bytes()
+                marker_at_backup_fsync = marker.exists()
+                raise OSError("injected backup directory fsync")
+            raise AssertionError(
+                "unexpected directory fsync after backup failure"
+            )
+
+        with mock.patch.object(
+            project_context,
+            "_fsync_context_directory",
+            side_effect=fail_backup_fsync,
+        ), mock.patch.object(
+            project_context,
+            "_cleanup_context_recovery",
+            return_value=None,
+        ), mock.patch.object(
+            project_context,
+            "_rollback_context_transaction",
+            return_value=None,
+        ), self.assertRaisesRegex(ContextError, "durability"):
+            self.assign(self.nested, "heavy")
+
+        self.assertEqual(backup_at_backup_fsync, original)
+        self.assertFalse(marker_at_backup_fsync)
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertFalse(marker.exists())
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with project_context._context_lock(self.config_path):
+                recovered = project_context._read_context_document(
+                    self.config_path, self.home
+                )
+
+        self.assertIsNone(recovered["contexts"][0]["modelStack"])
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(
+            list(self.root.glob(f".{self.config_path.name}.transaction*")),
+            [],
+        )
+
+    def test_pending_marker_fsync_follows_durable_backup_and_recovers(self):
+        original = self.config_path.read_bytes()
+        marker, backup = project_context._context_recovery_paths(
+            self.config_path
+        )
+        real_fsync = project_context._fsync_context_directory
+        calls = 0
+        backup_synced = False
+        marker_at_backup_fsync = None
+        backup_at_pending_fsync = None
+        canonical_at_pending_fsync = None
+
+        def fail_pending_fsync(parent):
+            nonlocal calls, backup_synced, marker_at_backup_fsync
+            nonlocal backup_at_pending_fsync
+            nonlocal canonical_at_pending_fsync
+            calls += 1
+            if calls == 1:
+                marker_at_backup_fsync = marker.exists()
+                real_fsync(parent)
+                backup_synced = True
+                return
+            if calls == 2:
+                backup_at_pending_fsync = backup.read_bytes()
+                canonical_at_pending_fsync = self.config_path.read_bytes()
+                raise OSError("injected pending directory fsync")
+            raise AssertionError(
+                "unexpected directory fsync after pending failure"
+            )
+
+        with mock.patch.object(
+            project_context,
+            "_fsync_context_directory",
+            side_effect=fail_pending_fsync,
+        ), mock.patch.object(
+            project_context,
+            "_rollback_context_transaction",
+            side_effect=OSError("injected rollback interruption"),
+        ), self.assertRaisesRegex(ContextError, "rollback"):
+            self.assign(self.nested, "heavy")
+
+        self.assertFalse(marker_at_backup_fsync)
+        self.assertTrue(backup_synced)
+        self.assertEqual(backup_at_pending_fsync, original)
+        self.assertEqual(canonical_at_pending_fsync, original)
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["state"],
+            "pending",
+        )
+
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with project_context._context_lock(self.config_path):
+                recovered = project_context._read_context_document(
+                    self.config_path, self.home
+                )
+
+        self.assertIsNone(recovered["contexts"][0]["modelStack"])
+        self.assertEqual(self.config_path.read_bytes(), original)
+        self.assertEqual(
+            list(self.root.glob(f".{self.config_path.name}.transaction*")),
+            [],
+        )
+
     def test_assignment_rollback_double_fault_recovers_on_next_locked_read(self):
         original = self.config_path.read_bytes()
         real_fsync = project_context._fsync_context_directory
@@ -547,7 +666,7 @@ class StackContextAssignmentTests(unittest.TestCase):
         def fail_target_fsync(parent):
             nonlocal fsync_calls
             fsync_calls += 1
-            if fsync_calls == 2:
+            if fsync_calls == 3:
                 raise OSError("injected target directory fsync")
             real_fsync(parent)
 
