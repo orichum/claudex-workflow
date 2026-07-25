@@ -231,7 +231,7 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
-    'systemd-container:' \
+    'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
     '--privileged' \
     'loginctl enable-linger orichum' \
