@@ -294,7 +294,8 @@ os.chmod(projects_path, 0o600)
 PY
 
 port_file="$fixture/cliproxy.port"
-python3 - "$port_file" <<'PY' &
+server_log="$fixture/cliproxy.log"
+python3 - "$port_file" <<'PY' 2>"$server_log" &
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -354,11 +355,20 @@ Path(sys.argv[1]).write_text(
 server.serve_forever()
 PY
 server_pid=$!
-for _ in {1..100}; do
+for _ in {1..300}; do
   [[ -s "$port_file" ]] && break
-  sleep 0.02
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    printf 'ERROR: fake CLIProxyAPI server exited during startup\n' >&2
+    sed -n '1,120p' "$server_log" >&2
+    exit 1
+  fi
+  sleep 0.1
 done
-[[ -s "$port_file" ]]
+if [[ ! -s "$port_file" ]]; then
+  printf 'ERROR: fake CLIProxyAPI server did not become ready within 30 seconds\n' >&2
+  sed -n '1,120p' "$server_log" >&2
+  exit 1
+fi
 cliproxy_port="$(<"$port_file")"
 for _ in {1..100}; do
   if python3 - "$cliproxy_port" <<'PY' >/dev/null 2>&1
@@ -374,7 +384,7 @@ PY
   then
     break
   fi
-  sleep 0.02
+  sleep 0.1
 done
 python3 - "$cliproxy_port" <<'PY' >/dev/null
 import sys

@@ -143,6 +143,9 @@ Account display names are shown only by explicit account-management and stack
 inspection/configuration commands. Credential filenames, routing prefixes,
 tokens, and secrets are never printed by those commands.
 
+See [Multi-account routing](docs/multi-account-usage.md) for same-provider and
+mixed-provider setup examples.
+
 ### Configure live model stacks
 
 Build stacks from the models that the local CLIProxyAPI advertises for your
@@ -169,6 +172,9 @@ its exact primary route and at most one same-model, same-family account
 fallback. Existing logical sessions remain immutable when a stack is edited,
 deleted, or reassigned; create a new session or an explicit fork to use the new
 selection.
+
+The [multi-account guide](docs/multi-account-usage.md#configure-a-stack-with-the-wizard)
+explains automatic account selection, named-account locks, and priority.
 
 At the final wizard step, Orichum can assign the saved stack to the longest
 matching project context for the current directory. Launches from nested
@@ -273,6 +279,9 @@ orichum fork oc-s-0123456789abcdef \
 `TARGET_STACK` must be one of the names shown by `orichum models stacks`.
 The parent stays resumable. The child receives only the explicit bounded
 handoff, not a replay of hidden provider state.
+
+See [immutable sessions and recovery](docs/multi-account-usage.md#immutable-sessions-and-recovery)
+for the effect of later account and stack changes.
 
 ### Models and plugins
 
