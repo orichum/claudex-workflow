@@ -14,6 +14,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-installer-test.XXXXXX")"
+fixture="$(cd -P "$fixture" && pwd)"
 trap 'rm -rf -- "$fixture"' EXIT
 
 python_data="$fixture/python-data"

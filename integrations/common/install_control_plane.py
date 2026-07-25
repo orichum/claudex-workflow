@@ -149,14 +149,37 @@ def _require_private_root(path: Path) -> None:
 
 def _private_child(path: Path) -> Path:
     requested = Path(path).absolute()
+    requested_parent = requested.parent
     try:
-        parent = requested.parent.resolve(strict=True)
+        before = os.lstat(requested_parent)
+        resolved = requested_parent.resolve(strict=True)
+        after = os.lstat(requested_parent)
+        confirmed = os.lstat(resolved)
     except (OSError, RuntimeError) as error:
         raise InstallControlPlaneError(
             "installer journal parent is unavailable"
         ) from error
-    _require_private_root(parent)
-    return parent / requested.name
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o700
+        or resolved != requested_parent
+    ):
+        raise InstallControlPlaneError(
+            "installer journal parent is unsafe"
+        )
+    if (
+        (before.st_dev, before.st_ino)
+        != (after.st_dev, after.st_ino)
+        or (after.st_dev, after.st_ino)
+        != (confirmed.st_dev, confirmed.st_ino)
+    ):
+        raise InstallControlPlaneError(
+            "installer journal parent changed during validation"
+        )
+    _require_private_root(resolved)
+    return resolved / requested.name
 
 
 def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
@@ -395,8 +418,15 @@ def activate(
     installed_root = Path(installed_root).resolve(strict=True)
     snapshot_root = _private_child(snapshot_root)
     _require_private_root(installed_root)
-    snapshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    journal_created = False
+    try:
+        snapshot_root.mkdir(mode=0o700)
+        journal_created = True
+    except FileExistsError:
+        pass
     _require_private_root(snapshot_root)
+    if journal_created:
+        _fsync_directory(snapshot_root.parent)
     if _lexists(snapshot_root / _MANIFEST_NAME):
         raise InstallControlPlaneError(
             "unfinished installer control-plane journal exists"

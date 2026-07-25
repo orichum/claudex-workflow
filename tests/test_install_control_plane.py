@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ import threading
 import unittest
 from unittest import mock
 
+import integrations.common.install_control_plane as control_plane
 from integrations.common.account_registry import Account, update_accounts
 from integrations.common.install_control_plane import (
     InstallControlPlaneError,
@@ -99,6 +101,90 @@ class InstallControlPlaneTests(unittest.TestCase):
         snapshot.mkdir(mode=0o700)
         rollback(self.installed, snapshot)
         self._assert_original_state()
+
+    def test_activation_rejects_symlinked_journal_parent(self) -> None:
+        state = self.root / "real-state"
+        state.mkdir(mode=0o700)
+        linked_state = self.root / "linked-state"
+        linked_state.symlink_to(state, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            InstallControlPlaneError,
+            "journal parent is unsafe",
+        ):
+            activate(
+                self.candidate,
+                self.installed,
+                linked_state / "install-control-plane",
+            )
+
+        self.assertFalse((state / "install-control-plane").exists())
+        self._assert_original_state()
+
+    def test_journal_parent_identity_swap_fails_closed(self) -> None:
+        state = self.root / "swap-state"
+        state.mkdir(mode=0o700)
+        observed = os.lstat(state)
+        changed_fields = list(observed)
+        changed_fields[1] += 1
+        changed = os.stat_result(changed_fields)
+
+        with (
+            mock.patch.object(Path, "resolve", return_value=state),
+            mock.patch.object(
+                control_plane,
+                "_require_private_root",
+                return_value=None,
+            ),
+            mock.patch.object(
+                control_plane.os,
+                "lstat",
+                side_effect=(observed, changed, observed),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                InstallControlPlaneError,
+                "journal parent changed",
+            ):
+                control_plane._private_child(
+                    state / "install-control-plane"
+                )
+
+    def test_journal_mkdir_is_synced_before_first_snapshot(self) -> None:
+        state = self.root / "durable-state"
+        state.mkdir(mode=0o700)
+        journal = state / "install-control-plane"
+        events: list[tuple[str, Path]] = []
+        real_snapshot = control_plane._snapshot
+
+        def record_fsync(path: Path) -> None:
+            events.append(("fsync", Path(path)))
+
+        def record_snapshot(*args, **kwargs):
+            events.append(("snapshot", Path(args[0])))
+            return real_snapshot(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                control_plane,
+                "_fsync_directory",
+                side_effect=record_fsync,
+            ),
+            mock.patch.object(
+                control_plane,
+                "_snapshot",
+                side_effect=record_snapshot,
+            ),
+        ):
+            activate(self.candidate, self.installed, journal)
+
+        self.assertEqual(events[0], ("fsync", state))
+        first_snapshot = next(
+            index
+            for index, event in enumerate(events)
+            if event[0] == "snapshot"
+        )
+        self.assertLess(events.index(("fsync", state)), first_snapshot)
 
     def test_rollback_preserves_concurrently_updated_bootstrap_account(
         self,
