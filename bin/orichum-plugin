@@ -75,17 +75,72 @@ validate_source() {
      "$1" != *$'\t'* ]] || die "invalid marketplace source"
 }
 
-write_manifest() {
-  local jq_filter="$1"
-  shift
-  local temporary
-  temporary="$(mktemp "$(dirname "$PLUGIN_MANIFEST")/.plugins.json.XXXXXX")" || \
-    die "could not create plugin declaration update"
-  if ! jq "$@" "$jq_filter" "$PLUGIN_MANIFEST" >"$temporary" || \
-     ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$PLUGIN_MANIFEST"; then
-    rm -f -- "$temporary"
-    die "could not update plugin declaration"
-  fi
+mutate_manifest() {
+  local action="$1" plugin_id="$2" source="${3:-}"
+  (
+    cd "$WORKFLOW_ROOT"
+    PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -I -B - \
+      "$WORKFLOW_ROOT" "$PLUGIN_MANIFEST" \
+      "$action" "$plugin_id" "$source" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.plugin_registry import (
+    PluginRegistryError,
+    update_plugins,
+)
+
+path = Path(sys.argv[2])
+action = sys.argv[3]
+plugin_id = sys.argv[4]
+source = sys.argv[5]
+
+def transform(document):
+    marketplaces = list(document["marketplaces"])
+    plugins = list(document["plugins"])
+    if action == "add":
+        marketplace = plugin_id.rsplit("@", 1)[1]
+        matching = [
+            entry for entry in marketplaces
+            if entry["name"] == marketplace
+        ]
+        if matching and source and matching[0]["source"] != source:
+            raise PluginRegistryError(
+                "marketplace source conflicts with its declaration"
+            )
+        if not matching:
+            if not source:
+                raise PluginRegistryError(
+                    "plugin marketplace is not declared"
+                )
+            marketplaces.append(
+                {"name": marketplace, "source": source}
+            )
+        plugins.append(plugin_id)
+    elif action == "remove":
+        plugins = [
+            existing for existing in plugins
+            if existing != plugin_id
+        ]
+    else:
+        raise PluginRegistryError("plugin mutation is invalid")
+    return {
+        "schemaVersion": 1,
+        "marketplaces": sorted(
+            marketplaces, key=lambda entry: entry["name"]
+        ),
+        "plugins": sorted(set(plugins)),
+    }
+
+try:
+    update_plugins(path, transform)
+except PluginRegistryError as error:
+    print(f"ERROR: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  ) || die "could not update plugin declaration"
 }
 
 claude_plugin() {
@@ -195,15 +250,7 @@ add_plugin() {
   if [[ -n "$existing_source" && -n "$source" && "$existing_source" != "$source" ]]; then
     die "marketplace $marketplace is already declared from $existing_source"
   fi
-  # The jq program is intentionally single-quoted; jq, not Bash, expands its variables.
-  # shellcheck disable=SC2016
-  write_manifest '
-    if any(.marketplaces[]; .name == $marketplace) then .
-    else .marketplaces += [{name: $marketplace, source: $source}] end |
-    .marketplaces |= sort_by(.name) |
-    .plugins = ((.plugins + [$plugin]) | unique | sort)
-  ' --arg marketplace "$marketplace" --arg source "${existing_source:-$source}" \
-    --arg plugin "$plugin_id"
+  mutate_manifest add "$plugin_id" "${existing_source:-$source}"
   sync_plugins
 }
 
@@ -218,8 +265,7 @@ remove_plugin() {
     printf '[plugin] uninstall %s\n' "$plugin_id"
     claude_plugin uninstall "$plugin_id" --scope user
   fi
-  # shellcheck disable=SC2016
-  write_manifest '.plugins |= map(select(. != $plugin))' --arg plugin "$plugin_id"
+  mutate_manifest remove "$plugin_id"
 }
 
 require_runtime

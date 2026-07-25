@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -11,9 +15,12 @@ from integrations.common.account_registry import Account, update_accounts
 from integrations.common.install_control_plane import (
     InstallControlPlaneError,
     activate,
+    finalize,
+    recover,
     rollback,
     stage,
 )
+from integrations.common.plugin_registry import update_plugins
 
 
 class InstallControlPlaneTests(unittest.TestCase):
@@ -134,6 +141,220 @@ class InstallControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(manifest["phase"], "rollbackConflict")
         self.assertEqual(manifest["conflicts"], ["accounts.json"])
+
+    def test_rollback_serializes_concurrent_bootstrap_plugin_update(
+        self,
+    ) -> None:
+        (self.installed / "plugins.json").unlink()
+        shutil.rmtree(self.candidate)
+        stage(self.repository, self.installed, self.candidate)
+        journal = self.root / "plugin-journal"
+        activate(self.candidate, self.installed, journal)
+        writer_locked = threading.Event()
+        release_writer = threading.Event()
+        rollback_waiting = threading.Event()
+        writer_errors: list[BaseException] = []
+        rollback_errors: list[BaseException] = []
+
+        def add_plugin(document: dict[str, object]) -> dict[str, object]:
+            writer_locked.set()
+            if not release_writer.wait(5):
+                raise RuntimeError("plugin writer release timed out")
+            return {
+                **document,
+                "marketplaces": [
+                    {"name": "acme", "source": "example/acme"}
+                ],
+                "plugins": ["sample@acme"],
+            }
+
+        def write_plugin() -> None:
+            try:
+                update_plugins(
+                    self.installed / "plugins.json", add_plugin
+                )
+            except BaseException as error:
+                writer_errors.append(error)
+
+        def rollback_install() -> None:
+            try:
+                rollback(self.installed, journal)
+            except BaseException as error:
+                rollback_errors.append(error)
+
+        def checkpoint(name: str) -> None:
+            if name == "before-lock:plugins.json":
+                rollback_waiting.set()
+
+        writer = threading.Thread(target=write_plugin)
+        writer.start()
+        self.assertTrue(writer_locked.wait(5))
+        with mock.patch(
+            "integrations.common.install_control_plane."
+            "_rollback_checkpoint",
+            side_effect=checkpoint,
+        ):
+            restorer = threading.Thread(target=rollback_install)
+            restorer.start()
+            self.assertTrue(rollback_waiting.wait(5))
+            release_writer.set()
+            writer.join(5)
+            restorer.join(5)
+
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(restorer.is_alive())
+        self.assertEqual(writer_errors, [])
+        self.assertEqual(len(rollback_errors), 1)
+        self.assertIsInstance(
+            rollback_errors[0], InstallControlPlaneError
+        )
+        self.assertIn("plugins.json", str(rollback_errors[0]))
+        document = json.loads(
+            (self.installed / "plugins.json").read_text()
+        )
+        self.assertEqual(document["plugins"], ["sample@acme"])
+
+    def test_rollback_fsyncs_bootstrap_unlinks_before_terminal_state(
+        self,
+    ) -> None:
+        journal = self.root / "fsync-journal"
+        activate(self.candidate, self.installed, journal)
+        events: list[tuple[str, object]] = []
+        real_write_manifest = (
+            __import__(
+                "integrations.common.install_control_plane",
+                fromlist=["_write_manifest"],
+            )._write_manifest
+        )
+
+        def record_fsync(path: Path) -> None:
+            events.append(("fsync", Path(path)))
+
+        def record_manifest(
+            root: Path, manifest: dict[str, object]
+        ) -> None:
+            events.append(("manifest", manifest["phase"]))
+            real_write_manifest(root, manifest)
+
+        with (
+            mock.patch(
+                "integrations.common.install_control_plane."
+                "_fsync_directory",
+                side_effect=record_fsync,
+            ),
+            mock.patch(
+                "integrations.common.install_control_plane."
+                "_write_manifest",
+                side_effect=record_manifest,
+            ),
+        ):
+            rollback(self.installed, journal)
+
+        config_fsync = events.index(("fsync", self.installed))
+        terminal = events.index(("manifest", "rolledBack"))
+        self.assertLess(config_fsync, terminal)
+        self.assertFalse(journal.exists())
+
+    def test_next_install_recovers_journal_left_by_killed_process(
+        self,
+    ) -> None:
+        journal = self.root / "data/state/install-control-plane"
+        journal.parent.mkdir(mode=0o700, parents=True)
+        script = """
+import os
+from pathlib import Path
+import sys
+import integrations.common.install_control_plane as control
+
+def checkpoint(name):
+    if name == "stack-saved":
+        os._exit(91)
+
+control._activation_checkpoint = checkpoint
+control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+"""
+        killed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(self.candidate),
+                str(self.installed),
+                str(journal),
+            ],
+            cwd=self.repository,
+            check=False,
+        )
+        self.assertEqual(killed.returncode, 91)
+        self.assertTrue(journal.exists())
+        self.assertNotEqual(
+            (self.installed / "model-stacks.json").read_bytes(),
+            self.original_model,
+        )
+
+        recover(self.installed, journal)
+
+        self._assert_original_state()
+        self.assertFalse(journal.exists())
+
+    def test_recovery_refuses_a_different_installed_root(self) -> None:
+        journal = self.root / "target-bound-journal"
+        activate(self.candidate, self.installed, journal)
+        other = self.root / "other-installed"
+        other.mkdir(mode=0o700)
+
+        with self.assertRaisesRegex(
+            InstallControlPlaneError,
+            "different installed configuration root",
+        ):
+            recover(other, journal)
+
+        self.assertTrue(journal.exists())
+        self.assertTrue((self.installed / "accounts.json").exists())
+
+    def test_finalize_removes_committed_journal_without_rollback(
+        self,
+    ) -> None:
+        journal = self.root / "finalize-journal"
+        activate(self.candidate, self.installed, journal)
+        committed_model = (
+            self.installed / "model-stacks.json"
+        ).read_bytes()
+
+        finalize(journal)
+
+        self.assertFalse(journal.exists())
+        self.assertEqual(
+            (self.installed / "model-stacks.json").read_bytes(),
+            committed_model,
+        )
+
+    def test_recovery_does_not_rollback_durably_finalized_journal(
+        self,
+    ) -> None:
+        journal = self.root / "finalized-journal"
+        activate(self.candidate, self.installed, journal)
+        committed_model = (
+            self.installed / "model-stacks.json"
+        ).read_bytes()
+        with mock.patch(
+            "integrations.common.install_control_plane._remove_journal",
+            side_effect=OSError("injected journal cleanup failure"),
+        ):
+            with self.assertRaises(OSError):
+                finalize(journal)
+        manifest = json.loads(
+            (journal / "installed-control-plane.json").read_text()
+        )
+        self.assertEqual(manifest["phase"], "finalized")
+
+        recover(self.installed, journal)
+
+        self.assertFalse(journal.exists())
+        self.assertEqual(
+            (self.installed / "model-stacks.json").read_bytes(),
+            committed_model,
+        )
 
 
 if __name__ == "__main__":

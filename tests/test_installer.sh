@@ -388,6 +388,7 @@ set +e
 (
   workflow_cleanup_init
   snapshot_dir="$activation_snapshot"
+  control_plane_journal="$activation_snapshot"
   INSTALLED_CONFIG_ROOT="$v1_config"
   WORKFLOW_ROOT="$ROOT"
   ORICHUM_PYTHON="$python_bin/python3.14"
@@ -446,6 +447,9 @@ jq -e '.schemaVersion == 2 and .stacks.heavy' \
   "$v2_config/model-stacks.json" >/dev/null
 cp "$v2_config/model-stacks.json" "$fixture/v2-first-run.saved"
 cp "$v2_config/stack-bindings.json" "$fixture/v2-bindings.saved"
+finalize_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" \
+  "$fixture/v2-activation-snapshot"
 rm -rf -- "$v2_candidate"
 stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"

@@ -254,7 +254,19 @@ if not (
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
 
-stage_config = source.index("stage_installed_control_plane")
+stage_config = source.index(
+    "stage_installed_control_plane",
+    source.index("candidate_config_root="),
+)
+acquire_install_lock = source.index(
+    'acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"'
+)
+stable_journal = source.index(
+    'control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"'
+)
+recover_config = source.index(
+    "recover_installed_control_plane", stable_journal
+)
 validate_candidate = source.index(
     '"$WORKFLOW_ROOT/bin/orichum" config validate',
     stage_config,
@@ -269,7 +281,10 @@ transaction_end = source.index(
     "WORKFLOW_TRANSACTION_ACTIVE=false", activate_config
 )
 if not (
-    stage_config
+    acquire_install_lock
+    < stable_journal
+    < recover_config
+    < stage_config
     < validate_candidate
     < config_active
     < activate_config
@@ -278,6 +293,19 @@ if not (
     raise SystemExit(
         "installed control plane activation is not rollback-active before "
         "its first mutation"
+    )
+if '"$candidate_config_root" "$INSTALLED_CONFIG_ROOT" \\\n  "$control_plane_journal"' not in source:
+    raise SystemExit("activation does not use the stable control-plane journal")
+finalize_config = source.index(
+    "finalize_installed_control_plane", activate_config
+)
+config_inactive = source.index(
+    "config_transaction_active=false", finalize_config
+)
+if not activate_config < finalize_config < config_inactive < transaction_end:
+    raise SystemExit(
+        "stable control-plane journal is not finalized before disarming "
+        "rollback"
     )
 
 if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:

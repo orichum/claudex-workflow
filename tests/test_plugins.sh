@@ -10,13 +10,21 @@ trap 'rm -rf -- "$fixture"' EXIT
 
 checkout="$fixture/checkout"
 private_data="$fixture/private data"
-install -d "$checkout/bin" "$checkout/lib" "$checkout/config" \
+install -d "$checkout/bin" "$checkout/lib" \
   "$fixture/fake-bin" "$fixture/fake-state" \
   "$private_data/bin" \
   "$private_data/python/cpython-3.14.6/bin"
+install -d -m 0700 "$checkout/config" \
+  "$checkout/integrations/common"
 cp "$ROOT/lib/workflow.sh" "$checkout/lib/workflow.sh"
 cp "$ROOT/config/plugins.json" "$checkout/config/plugins.json"
 cp "$ROOT/bin/orichum-plugin" "$checkout/bin/orichum-plugin"
+cp "$ROOT/integrations/__init__.py" "$checkout/integrations/__init__.py"
+cp "$ROOT/integrations/common/__init__.py" \
+  "$checkout/integrations/common/__init__.py"
+cp "$ROOT/integrations/common/plugin_registry.py" \
+  "$checkout/integrations/common/plugin_registry.py"
+chmod 0600 "$checkout/config/plugins.json"
 chmod 0755 "$checkout/bin/orichum-plugin"
 system_python="$(command -v python3)"
 cat >"$private_data/python/cpython-3.14.6/bin/python3.14" <<PYTHON

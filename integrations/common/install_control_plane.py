@@ -22,6 +22,10 @@ from .orichum_config import (
     default_config_paths,
     load_control_plane,
 )
+from .plugin_registry import (
+    PluginRegistryError,
+    plugin_registry_lock,
+)
 from .project_context import control_plane_transaction
 from .stack_bindings import MAX_BINDING_BYTES, load_stack_bindings
 from .stack_definition import serialize_model_stacks
@@ -51,6 +55,7 @@ _MANIFEST_NAME = "installed-control-plane.json"
 _ACTIVE_PHASES = frozenset(
     {"prepared", "saving", "committed", "rollbackConflict"}
 )
+_TERMINAL_PHASES = frozenset({"rolledBack", "finalized"})
 
 
 def _lexists(path: Path) -> bool:
@@ -142,6 +147,18 @@ def _require_private_root(path: Path) -> None:
         )
 
 
+def _private_child(path: Path) -> Path:
+    requested = Path(path).absolute()
+    try:
+        parent = requested.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise InstallControlPlaneError(
+            "installer journal parent is unavailable"
+        ) from error
+    _require_private_root(parent)
+    return parent / requested.name
+
+
 def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
     if exclusive:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -167,14 +184,7 @@ def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
         if temporary is not None:
             os.replace(temporary, path)
             temporary = None
-        directory = os.open(
-            path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -219,6 +229,27 @@ def _activation_checkpoint(phase: str) -> None:
     """Test seam for deterministic interruption at durable phase boundaries."""
 
 
+def _rollback_checkpoint(phase: str) -> None:
+    """Test seam for deterministic rollback concurrency boundaries."""
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _remove_journal(snapshot_root: Path) -> None:
+    _require_private_root(snapshot_root)
+    parent = snapshot_root.parent
+    shutil.rmtree(snapshot_root)
+    _fsync_directory(parent)
+
+
 def _write_manifest(snapshot_root: Path, manifest: dict[str, object]) -> None:
     _atomic_private(
         snapshot_root / _MANIFEST_NAME,
@@ -255,9 +286,10 @@ def _load_manifest(snapshot_root: Path) -> dict[str, object]:
         not isinstance(manifest, dict)
         or manifest.get("schemaVersion") != 2
         or manifest.get("phase")
-        not in _ACTIVE_PHASES | {"rolledBack"}
+        not in _ACTIVE_PHASES | _TERMINAL_PHASES
         or not isinstance(manifest.get("priorModelPresent"), bool)
         or not isinstance(manifest.get("priorBindingPresent"), bool)
+        or not isinstance(manifest.get("installedRoot"), str)
         or not isinstance(manifest.get("bootstrapDigests"), dict)
         or not isinstance(manifest.get("activationStates"), list)
         or not isinstance(manifest.get("conflicts"), list)
@@ -361,10 +393,14 @@ def activate(
 ) -> None:
     candidate_root = Path(candidate_root).resolve(strict=True)
     installed_root = Path(installed_root).resolve(strict=True)
-    snapshot_root = Path(snapshot_root).resolve(strict=False)
+    snapshot_root = _private_child(snapshot_root)
     _require_private_root(installed_root)
     snapshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    snapshot_root.chmod(0o700)
+    _require_private_root(snapshot_root)
+    if _lexists(snapshot_root / _MANIFEST_NAME):
+        raise InstallControlPlaneError(
+            "unfinished installer control-plane journal exists"
+        )
     with control_plane_transaction(installed_root):
         model_path = installed_root / "model-stacks.json"
         binding_path = installed_root / "stack-bindings.json"
@@ -411,6 +447,7 @@ def activate(
         manifest: dict[str, object] = {
             "schemaVersion": 2,
             "phase": "prepared",
+            "installedRoot": str(installed_root),
             "priorModelPresent": prior_model is not None,
             "priorBindingPresent": prior_binding is not None,
             "priorState": prior_state,
@@ -471,12 +508,22 @@ def activate(
 
 def rollback(installed_root: Path, snapshot_root: Path) -> None:
     installed_root = Path(installed_root).resolve(strict=True)
-    snapshot_root = Path(snapshot_root).resolve(strict=True)
+    snapshot_root = _private_child(snapshot_root)
+    if not snapshot_root.exists():
+        return
+    _require_private_root(snapshot_root)
     if not _lexists(snapshot_root / _MANIFEST_NAME):
+        _remove_journal(snapshot_root)
         return
     manifest = _load_manifest(snapshot_root)
+    if manifest["installedRoot"] != str(installed_root):
+        raise InstallControlPlaneError(
+            "installer journal belongs to a different installed "
+            "configuration root"
+        )
     with control_plane_transaction(installed_root):
-        if manifest["phase"] == "rolledBack":
+        if manifest["phase"] in _TERMINAL_PHASES:
+            _remove_journal(snapshot_root)
             return
         original_model = (
             _private_bytes(
@@ -538,6 +585,7 @@ def rollback(installed_root: Path, snapshot_root: Path) -> None:
             raise InstallControlPlaneError(
                 "installer control-plane manifest is invalid"
             )
+        bootstrap_unlinked = False
         for name in reversed(_BOOTSTRAP_FILES):
             if name not in bootstrap_digests:
                 continue
@@ -548,11 +596,13 @@ def rollback(installed_root: Path, snapshot_root: Path) -> None:
                 )
             path = installed_root / name
             try:
-                guard = (
-                    account_registry_lock(path)
-                    if name == "accounts.json"
-                    else nullcontext()
-                )
+                if name == "accounts.json":
+                    guard = account_registry_lock(path)
+                elif name == "plugins.json":
+                    guard = plugin_registry_lock(path)
+                else:
+                    guard = nullcontext()
+                _rollback_checkpoint(f"before-lock:{name}")
                 with guard:
                     observed = _optional_digest(
                         path, name, MAX_CONFIG_BYTES
@@ -563,10 +613,17 @@ def rollback(installed_root: Path, snapshot_root: Path) -> None:
                         conflicts.append(name)
                         continue
                     path.unlink()
-            except (AccountError, InstallControlPlaneError):
+                    bootstrap_unlinked = True
+            except (
+                AccountError,
+                InstallControlPlaneError,
+                PluginRegistryError,
+            ):
                 conflicts.append(name)
                 continue
 
+        if bootstrap_unlinked:
+            _fsync_directory(installed_root)
         manifest["conflicts"] = conflicts
         manifest["phase"] = (
             "rollbackConflict" if conflicts else "rolledBack"
@@ -581,3 +638,25 @@ def rollback(installed_root: Path, snapshot_root: Path) -> None:
                     + ", ".join(conflicts)
                 )
             raise InstallControlPlaneError(detail)
+        _remove_journal(snapshot_root)
+
+
+def recover(installed_root: Path, snapshot_root: Path) -> None:
+    """Recover an unfinished journal while the installer lock is owned."""
+    rollback(installed_root, snapshot_root)
+
+
+def finalize(snapshot_root: Path) -> None:
+    """Remove a committed journal after the outer install is durable."""
+    snapshot_root = _private_child(snapshot_root)
+    if not snapshot_root.exists():
+        return
+    _require_private_root(snapshot_root)
+    manifest = _load_manifest(snapshot_root)
+    if manifest["phase"] != "committed":
+        raise InstallControlPlaneError(
+            "installer control-plane journal is not committed"
+        )
+    manifest["phase"] = "finalized"
+    _write_manifest(snapshot_root, manifest)
+    _remove_journal(snapshot_root)
