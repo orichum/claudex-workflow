@@ -217,6 +217,103 @@ jobs:
             ' >/dev/null
           orichum doctor
 
+      - name: Verify central repository graph lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          graph_project="$RUNNER_TEMP/graph-acceptance"
+          graph_palace="$RUNNER_TEMP/graph-acceptance-palace"
+          install -d -m 0700 "$graph_project" "$graph_palace"
+          git -C "$graph_project" init -q
+          git -C "$graph_project" remote add origin \
+            https://example.invalid/orichum/graph-acceptance.git
+          printf 'def acceptance():\n    return "central"\n' \
+            >"$graph_project/acceptance.py"
+          git -C "$graph_project" add acceptance.py
+          git -C "$graph_project" \
+            -c user.name=acceptance \
+            -c user.email=acceptance@example.invalid \
+            commit -q -m initial
+          python3 - \
+            "$ORICHUM_CONFIG_HOME/projects.json" \
+            "$graph_project" "$graph_palace" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          document = json.loads(path.read_text(encoding="utf-8"))
+          document["contexts"].append(
+              {
+                  "root": sys.argv[2],
+                  "dockerProfile": None,
+                  "modelStack": "balanced",
+                  "accountPools": ["shared"],
+                  "memoryPalace": sys.argv[3],
+                  "memoryWing": "graph-acceptance",
+              }
+          )
+          temporary = path.with_name(f".{path.name}.acceptance")
+          temporary.write_text(
+              json.dumps(document, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          os.chmod(temporary, 0o600)
+          os.replace(temporary, path)
+          PY
+          orichum graph "$graph_project"
+          test ! -e "$graph_project/graphify-out"
+          orichum graph status "$graph_project" |
+            tee "$RUNNER_TEMP/graph-status.log"
+          rg -Fq 'current' "$RUNNER_TEMP/graph-status.log"
+          test "$(find "$ORICHUM_DATA_HOME/graphs" -name graph.json \
+            -type f | wc -l)" -ge 1
+
+          cat >"$RUNNER_TEMP/run-graph-session-fixture" <<'FIXTURE'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          graph_project="$1"
+          marker="$2"
+          claudex="$ORICHUM_DATA_HOME/bin/claudex"
+          real_claudex="$ORICHUM_DATA_HOME/bin/.claudex-graph-acceptance"
+          mv "$claudex" "$real_claudex"
+          restore_claudex() {
+            rm -f -- "$claudex"
+            mv "$real_claudex" "$claudex"
+          }
+          trap restore_claudex EXIT
+          cat >"$claudex" <<'WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "$#" -eq 1 && "$1" == --version ]]; then
+            exec "$ACCEPTANCE_REAL_CLAUDEX" "$@"
+          fi
+          jq -e --arg root "$ORICHUM_DATA_HOME/graphs/" '
+            .mcpServers.graphify as $server |
+            ($server.command | endswith("/graphify-mcp")) and
+            $server.args[0] == "--graph" and
+            ($server.args[1] | startswith($root)) and
+            ($server.args[1] | endswith("/graph.json"))
+          ' "$CLAUDEX_MCP_CONFIG" >/dev/null
+          graph_file="$(jq -r '.mcpServers.graphify.args[1]' \
+            "$CLAUDEX_MCP_CONFIG")"
+          test -f "$graph_file"
+          : >"$ACCEPTANCE_SESSION_MARKER"
+          WRAPPER
+          chmod 0755 "$claudex"
+          (
+            cd "$graph_project"
+            ACCEPTANCE_REAL_CLAUDEX="$real_claudex" \
+            ACCEPTANCE_SESSION_MARKER="$marker" \
+              orichum run -- -p "central graph acceptance"
+          )
+          test -f "$marker"
+          FIXTURE
+          chmod 0755 "$RUNNER_TEMP/run-graph-session-fixture"
+          "$RUNNER_TEMP/run-graph-session-fixture" \
+            "$graph_project" "$RUNNER_TEMP/graph-session.initial"
+
       - name: Verify idempotent upgrade
         shell: bash
         run: |
@@ -241,6 +338,14 @@ jobs:
           grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Headroom:    reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          graph_project="$RUNNER_TEMP/graph-acceptance"
+          orichum graph "$graph_project"
+          test ! -e "$graph_project/graphify-out"
+          orichum graph status "$graph_project" |
+            tee "$RUNNER_TEMP/graph-status.upgrade.log"
+          rg -Fq 'current' "$RUNNER_TEMP/graph-status.upgrade.log"
+          "$RUNNER_TEMP/run-graph-session-fixture" \
+            "$graph_project" "$RUNNER_TEMP/graph-session.upgrade"
           orichum doctor
 
       - name: Print bounded diagnostics

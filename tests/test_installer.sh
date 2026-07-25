@@ -96,6 +96,139 @@ fi
 rg -Fq 'outside private Python root' "$fixture/escaped-python.stderr"
 ln -sfn "$python_bin/python3.14" "$python_data/bin/orichum-python"
 
+graph_data="$fixture/graph-data"
+install -d -m 0700 "$graph_data"
+graph_root="$(ensure_private_graph_root "$graph_data")"
+[[ "$graph_root" == "$graph_data/graphs" ]]
+[[ -d "$graph_root" && ! -L "$graph_root" ]]
+[[ "$(path_mode "$graph_root")" == 700 ]]
+printf 'preserve\n' >"$graph_root/prior-state"
+
+graph_probe_bin="$fixture/graph-probe-bin"
+graph_probe_log="$fixture/graph-probe.log"
+install -d -m 0700 "$graph_probe_bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'printf "%s|%s\n" "${GRAPHIFY_OUT:-}" "$*" >>"$GRAPH_PROBE_LOG"' \
+  '[[ "${GRAPHIFY_OUT:-}" == /* ]]' \
+  'command_name="$1"' \
+  'repository="$2"' \
+  '[[ "$repository" == /* && -d "$repository/.git" ]]' \
+  '[[ "$GRAPHIFY_OUT" != "$repository/graphify-out" ]]' \
+  'case "$command_name" in' \
+  '  extract)' \
+  '    [[ "$3" == --code-only ]]' \
+  '    install -d -m 0700 "$GRAPHIFY_OUT"' \
+  '    printf "%s\n" "{\"directed\":false,\"multigraph\":false,\"graph\":{},\"nodes\":[],\"links\":[]}" >"$GRAPHIFY_OUT/graph.json"' \
+  '    ;;' \
+  '  update)' \
+  '    [[ "$#" -eq 2 && -f "$GRAPHIFY_OUT/graph.json" ]]' \
+  '    [[ "${GRAPHIFY_FAIL_UPDATE:-false}" != true ]] || exit 73' \
+  '    ;;' \
+  '  *) exit 64 ;;' \
+  'esac' >"$graph_probe_bin/graphify"
+chmod 0755 "$graph_probe_bin/graphify"
+printf '%s\n' \
+  '#!/usr/bin/env python3' \
+  'import json, os, sys' \
+  'assert sys.argv[1:2] == ["--graph"]' \
+  'graph = os.path.realpath(sys.argv[2])' \
+  'assert os.path.isabs(graph) and os.path.isfile(graph)' \
+  'with open(os.environ["GRAPH_PROBE_LOG"], "a", encoding="utf-8") as log:' \
+  '    log.write(f"mcp|--graph {graph}\n")' \
+  'for line in sys.stdin:' \
+  '    request = json.loads(line)' \
+  '    if "id" not in request:' \
+  '        continue' \
+  '    if request["method"] == "initialize":' \
+  '        result = {"serverInfo": {"name": "fake-graphify", "version": "1"}}' \
+  '    elif request["method"] == "tools/list":' \
+  '        result = {"tools": [{"name": "query_graph"}, {"name": "graph_stats"}]}' \
+  '    else:' \
+  '        result = {}' \
+  '    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)' \
+  >"$graph_probe_bin/graphify-mcp"
+chmod 0755 "$graph_probe_bin/graphify-mcp"
+
+skill_home="$fixture/skill-home"
+install -d -m 0700 \
+  "$skill_home/.agents/skills/graphify" \
+  "$skill_home/.codex/skills/graphify" \
+  "$skill_home/.claude/skills/graphify"
+for skill_root in .agents .codex .claude; do
+  printf 'unchanged\n' \
+    >"$skill_home/$skill_root/skills/graphify/owner-marker"
+done
+cp -pPR "$skill_home" "$fixture/skill-home-before"
+
+GRAPH_PROBE_LOG="$graph_probe_log" HOME="$skill_home" \
+  reconcile_graphify_storage \
+    "$graph_data" "$graph_probe_bin/graphify" \
+    "$graph_probe_bin/graphify-mcp" "$(command -v python3)" \
+    "$ROOT" "$fixture"
+rg -Fq '|extract ' "$graph_probe_log"
+rg -Fq ' --code-only' "$graph_probe_log"
+rg -Fq '|update ' "$graph_probe_log"
+rg -Fq 'mcp|--graph ' "$graph_probe_log"
+if rg -q '(^|[|[:space:]])install([[:space:]]|$)' "$graph_probe_log"; then
+  printf 'Graphify capability probe invoked graphify install\n' >&2
+  exit 1
+fi
+diff -qr -- "$fixture/skill-home-before" "$skill_home" >/dev/null
+
+if GRAPH_PROBE_LOG="$graph_probe_log" GRAPHIFY_FAIL_UPDATE=true \
+    HOME="$skill_home" reconcile_graphify_storage \
+      "$graph_data" "$graph_probe_bin/graphify" \
+      "$graph_probe_bin/graphify-mcp" "$(command -v python3)" \
+      "$ROOT" "$fixture" \
+      >"$fixture/failed-graph-upgrade.stdout" \
+      2>"$fixture/failed-graph-upgrade.stderr"; then
+  printf 'failed Graphify upgrade probe unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[[ "$(<"$graph_root/prior-state")" == preserve ]]
+[[ "$(path_mode "$graph_root")" == 700 ]]
+diff -qr -- "$fixture/skill-home-before" "$skill_home" >/dev/null
+
+doctor_project="$fixture/doctor-project"
+doctor_config="$fixture/doctor-config"
+doctor_bin="$fixture/doctor-bin"
+install -d -m 0700 "$doctor_project" "$doctor_config" "$doctor_bin"
+git -C "$doctor_project" init -q
+install -d -m 0700 "$doctor_project/graphify-out"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "graphifyy 2.0.0\n"' >"$doctor_bin/graphify"
+chmod 0755 "$doctor_bin/graphify"
+printf '1.9.0\n' \
+  >"$skill_home/.agents/skills/graphify/.graphify_version"
+python3 - "$doctor_config/projects.json" "$doctor_project" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "schemaVersion": 1,
+            "contexts": [{"root": sys.argv[2]}],
+        },
+        stream,
+    )
+PY
+doctor_graph_output="$(
+  HOME="$skill_home" graphify_doctor_diagnostics \
+    "$graph_data" "$doctor_config" "$ROOT" "$(command -v python3)" \
+    "$doctor_bin/graphify"
+)"
+rg -Fq 'Graphify package/skill drift: 2.0.0 != 1.9.0' \
+  <<<"$doctor_graph_output"
+rg -Fq 'repository-local legacy Graphify outputs: 1' \
+  <<<"$doctor_graph_output"
+rg -Fq 'repository graph hooks need reconciliation: 1' \
+  <<<"$doctor_graph_output"
+[[ -d "$doctor_project/graphify-out" ]]
+
 fake_uv_bin="$fixture/fake-uv-bin"
 fake_uv_log="$fixture/fake-uv.log"
 install -d -m 0700 "$fake_uv_bin"

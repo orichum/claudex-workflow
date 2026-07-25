@@ -1835,6 +1835,258 @@ private_tool_state_matches() {
       "$snapshot_dir" private-tool-bin
 }
 
+ensure_private_graph_root() (
+  local data_root="$1"
+  local graph_root data_physical graph_physical current_uid
+  [[ "$data_root" == /* && "$data_root" != / ]] || {
+    workflow_die "central graph data root must be an absolute private path"
+    return 1
+  }
+  [[ -d "$data_root" && ! -L "$data_root" ]] || {
+    workflow_die "central graph data root is unsafe"
+    return 1
+  }
+  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
+  graph_root="$data_physical/graphs"
+  current_uid="$(id -u)"
+  if [[ -e "$graph_root" || -L "$graph_root" ]]; then
+    [[ -d "$graph_root" && ! -L "$graph_root" ]] || {
+      workflow_die "central graph root is unsafe"
+      return 1
+    }
+    graph_physical="$(cd -P -- "$graph_root" && pwd)" || return 1
+    [[ "$graph_physical" == "$graph_root" && \
+       "$(path_uid "$graph_root")" == "$current_uid" && \
+       "$(path_mode "$graph_root")" == 700 ]] || {
+      workflow_die "central graph root is unsafe"
+      return 1
+    }
+    printf '%s\n' "$graph_root"
+    return 0
+  fi
+
+  if mkdir -m 0700 "$graph_root" 2>/dev/null; then
+    chmod 0700 "$graph_root" || return 1
+  elif [[ ! -e "$graph_root" && ! -L "$graph_root" ]]; then
+    workflow_die "central graph root could not be created"
+    return 1
+  fi
+  ensure_private_graph_root "$data_physical"
+)
+
+run_bounded_graphify_command() {
+  local python_runtime="$1"
+  local timeout_seconds="$2"
+  local working_directory="$3"
+  shift 3
+  "$python_runtime" -I -B - \
+    "$timeout_seconds" "$working_directory" "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+working_directory = sys.argv[2]
+command = sys.argv[3:]
+try:
+    completed = subprocess.run(
+        command,
+        cwd=working_directory,
+        env=os.environ.copy(),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+except (OSError, subprocess.TimeoutExpired) as error:
+    print(f"ERROR: bounded Graphify command failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if completed.returncode != 0:
+    output = completed.stdout[-8192:].decode("utf-8", "replace").strip()
+    if output:
+        print(output, file=sys.stderr)
+    raise SystemExit(completed.returncode)
+PY
+}
+
+probe_graphify_capabilities() (
+  local graphify_binary="$1"
+  local graphify_mcp="$2"
+  local python_runtime="$3"
+  local workflow_root="$4"
+  local temporary_parent="$5"
+  local probe_root repository output
+  [[ "$graphify_binary" == /* && -x "$graphify_binary" ]] || {
+    workflow_die "Graphify executable is unavailable for capability probing"
+    return 1
+  }
+  [[ "$graphify_mcp" == /* && -x "$graphify_mcp" ]] || {
+    workflow_die "Graphify MCP executable is unavailable for capability probing"
+    return 1
+  }
+  [[ "$python_runtime" == /* && -x "$python_runtime" ]] || {
+    workflow_die "Python runtime is unavailable for Graphify capability probing"
+    return 1
+  }
+  [[ "$workflow_root" == /* && -f \
+     "$workflow_root/integrations/common/mcp_probe.py" ]] || {
+    workflow_die "Graphify MCP probe is unavailable"
+    return 1
+  }
+  [[ "$temporary_parent" == /* && -d "$temporary_parent" && \
+     ! -L "$temporary_parent" ]] || {
+    workflow_die "Graphify capability probe parent is unsafe"
+    return 1
+  }
+
+  probe_root="$(mktemp -d "$temporary_parent/graphify-capability.XXXXXX")" || \
+    return 1
+  trap 'rm -rf -- "$probe_root"' EXIT
+  chmod 0700 "$probe_root"
+  repository="$probe_root/repo"
+  output="$probe_root/output"
+  git init --quiet "$repository" || return 1
+  printf 'def graphify_probe():\n    return "ready"\n' \
+    >"$repository/probe.py"
+  git -C "$repository" add probe.py || return 1
+  git -C "$repository" \
+    -c user.name=orichum-probe \
+    -c user.email=orichum-probe@example.invalid \
+    commit --quiet -m probe || return 1
+
+  GRAPHIFY_OUT="$output" run_bounded_graphify_command \
+    "$python_runtime" 20 "$repository" \
+    "$graphify_binary" extract "$repository" --code-only || return 1
+  [[ -f "$output/graph.json" && ! -L "$output/graph.json" ]] || {
+    workflow_die "Graphify absolute output probe did not create graph.json"
+    return 1
+  }
+  [[ ! -e "$repository/graphify-out" && \
+     ! -L "$repository/graphify-out" ]] || {
+    workflow_die "Graphify absolute output probe wrote inside its repository"
+    return 1
+  }
+  GRAPHIFY_OUT="$output" run_bounded_graphify_command \
+    "$python_runtime" 20 "$repository" \
+    "$graphify_binary" update "$repository" || return 1
+  [[ -f "$output/graph.json" && ! -L "$output/graph.json" ]] || {
+    workflow_die "Graphify update probe removed graph.json"
+    return 1
+  }
+  PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B \
+    "$workflow_root/integrations/common/mcp_probe.py" \
+    --timeout 10 \
+    --require-tool query_graph \
+    --require-tool graph_stats \
+    -- "$graphify_mcp" --graph "$output/graph.json"
+)
+
+reconcile_graphify_storage() {
+  local data_root="$1"
+  local graphify_binary="$2"
+  local graphify_mcp="$3"
+  local python_runtime="$4"
+  local workflow_root="$5"
+  local temporary_parent="$6"
+  probe_graphify_capabilities \
+    "$graphify_binary" "$graphify_mcp" "$python_runtime" \
+    "$workflow_root" "$temporary_parent" || return 1
+  ensure_private_graph_root "$data_root" >/dev/null
+}
+
+graphify_doctor_diagnostics() {
+  local data_root="$1"
+  local config_root="$2"
+  local workflow_root="$3"
+  local python_runtime="$4"
+  local graphify_binary="${5:-}"
+  PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+    "$workflow_root" "$config_root" "$graphify_binary" <<'PY'
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from integrations.common.graph_hooks import graph_hook_status
+from integrations.common.graph_manager import _package_version, _skill_version
+
+config_root = Path(sys.argv[2])
+graphify = sys.argv[3] or None
+try:
+    document = json.loads(
+        (config_root / "projects.json").read_text(encoding="utf-8")
+    )
+    configured = document.get("contexts", [])
+except (OSError, UnicodeError, json.JSONDecodeError):
+    configured = []
+
+repositories: set[Path] = set()
+directories_seen = 0
+scan_bounded = False
+for context in configured[:64]:
+    if not isinstance(context, dict):
+        continue
+    raw_root = context.get("root")
+    if not isinstance(raw_root, str):
+        continue
+    root = Path(raw_root).expanduser()
+    try:
+        root = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        continue
+    if not root.is_dir():
+        continue
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        directories_seen += 1
+        if directories_seen > 10000 or len(repositories) >= 512:
+            scan_bounded = True
+            stack.clear()
+            break
+        try:
+            entries = tuple(os.scandir(current))
+        except OSError:
+            continue
+        names = {entry.name: entry for entry in entries}
+        git_entry = names.get(".git")
+        if git_entry is not None:
+            try:
+                mode = git_entry.stat(follow_symlinks=False).st_mode
+            except OSError:
+                mode = 0
+            if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
+                repositories.add(current)
+        for entry in entries:
+            if entry.name in {".git", "graphify-out"}:
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+            except OSError:
+                continue
+
+legacy = sum(
+    1 for repository in repositories
+    if os.path.lexists(repository / "graphify-out")
+)
+hook_states = [graph_hook_status(repository) for repository in repositories]
+hook_drift = sum(state != "installed" for state in hook_states)
+package = _package_version(graphify)
+skill = _skill_version()
+if package != skill:
+    print(f"NOTICE Graphify package/skill drift: {package} != {skill}")
+else:
+    print(f"OK   Graphify package and installed skill match: {package}")
+print(f"NOTICE repository-local legacy Graphify outputs: {legacy}")
+print(f"NOTICE repository graph hooks need reconciliation: {hook_drift}")
+if scan_bounded:
+    print("NOTICE repository graph diagnostic scan reached its safety bound")
+PY
+}
+
 snapshot_path() {
   local source_path="$1"
   local snapshot_dir="$2"

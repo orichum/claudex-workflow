@@ -193,6 +193,11 @@ rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
 rg -Fq 'repository graph manager and hook contract are available' \
   "$ROOT/doctor.sh"
+rg -Fq 'central Graphify storage is private' "$ROOT/doctor.sh"
+rg -Fq 'graphify_doctor_diagnostics' "$ROOT/doctor.sh"
+rg -Fq 'repository-local legacy Graphify outputs' \
+  "$ROOT/lib/workflow.sh"
+rg -Fq 'Graphify package/skill drift' "$ROOT/lib/workflow.sh"
 [[ ! -e "$ROOT/controller/plugin/scripts/ensure-graphify-hook.py" ]]
 "$system_python" -I -B - "$ROOT" <<'PY'
 import sys
@@ -254,6 +259,12 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
+    'Verify central repository graph lifecycle' \
+    'orichum graph "$graph_project"' \
+    'orichum graph status "$graph_project"' \
+    'test ! -e "$graph_project/graphify-out"' \
+    'CLAUDEX_MCP_CONFIG' \
+    'run-graph-session-fixture' \
     'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
     '--privileged' \
@@ -301,6 +312,12 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
+    'Verify central repository graph lifecycle' \
+    'orichum graph "$graph_project"' \
+    'orichum graph status "$graph_project"' \
+    'test ! -e "$graph_project/graphify-out"' \
+    'CLAUDEX_MCP_CONFIG' \
+    'run-graph-session-fixture' \
     'Verify idempotent upgrade' \
     'Clean up launch agents'; do
   rg -Fq "$required_contract" "$macos_workflow"
