@@ -110,6 +110,42 @@ class StackDefinitionTests(unittest.TestCase):
         self.assertEqual(candidate.providers, ("anthropic",))
         self.assertRegex(candidate.id, r"^oc-c-[0-9a-f]{16}$")
 
+    def test_v1_migration_enforces_exact_route_uniqueness_stably(self):
+        allowed = self.v1_document()
+        allowed["models"]["gpt-5.6-terra-proxy"] = {
+            "provider": "antigravity",
+            "family": "gpt",
+            "upstream": "gpt-5.6-terra",
+        }
+        allowed["stacks"]["balanced"]["agents"][
+            "repository-explorer"
+        ].append("gpt-5.6-terra-proxy")
+
+        migrated = normalize_model_stacks(allowed)
+        reloaded = normalize_model_stacks(
+            serialize_model_stacks(migrated)
+        )
+
+        self.assertEqual(
+            serialize_model_stacks(migrated),
+            serialize_model_stacks(reloaded),
+        )
+
+        duplicate = self.v1_document()
+        duplicate["models"]["gpt-5.6-terra-alias"] = {
+            "provider": "openai",
+            "family": "gpt",
+            "upstream": "gpt-5.6-terra",
+        }
+        duplicate["stacks"]["balanced"]["agents"][
+            "repository-explorer"
+        ].append("gpt-5.6-terra-alias")
+
+        with self.assertRaisesRegex(
+            StackDefinitionError, "duplicate provider route"
+        ):
+            normalize_model_stacks(duplicate)
+
     def test_rejects_cross_family_candidates_for_one_role(self):
         document = self.v2_document()
         document["stacks"]["balanced"]["agents"][

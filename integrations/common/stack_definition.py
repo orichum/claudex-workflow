@@ -219,6 +219,21 @@ def _candidate_list(
     candidate_models = tuple(candidate.model for candidate in candidates)
     if len(candidate_models) != len(set(candidate_models)):
         raise StackDefinitionError(f"{label} has duplicate candidates")
+    _validate_candidate_routes(candidates, models=models, label=label)
+    families = {models[model].family for model in candidate_models}
+    if len(families) != 1:
+        raise StackDefinitionError(
+            f"{label} candidates must use the same model family"
+        )
+    return candidates
+
+
+def _validate_candidate_routes(
+    candidates: tuple[StackCandidate, ...],
+    *,
+    models: Mapping[str, ModelDefinition],
+    label: str,
+) -> None:
     routes = [
         (provider, models[candidate.model].routes[provider])
         for candidate in candidates
@@ -228,12 +243,6 @@ def _candidate_list(
         raise StackDefinitionError(
             f"{label} has a duplicate provider route"
         )
-    families = {models[model].family for model in candidate_models}
-    if len(families) != 1:
-        raise StackDefinitionError(
-            f"{label} candidates must use the same model family"
-        )
-    return candidates
 
 
 def _migrated_candidates(
@@ -266,7 +275,7 @@ def _migrated_candidates(
         raise StackDefinitionError(
             f"stack {stack} {scope} candidates must use the same model family"
         )
-    return tuple(
+    candidates = tuple(
         StackCandidate(
             id=candidate_id(stack, scope, ordinal, model),
             model=model,
@@ -274,6 +283,12 @@ def _migrated_candidates(
         )
         for ordinal, model in enumerate(model_ids)
     )
+    _validate_candidate_routes(
+        candidates,
+        models=models,
+        label=f"stack {stack} {scope}",
+    )
+    return candidates
 
 
 def _parse_stacks(
