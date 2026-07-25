@@ -51,7 +51,7 @@ from .orichum_sessions import (
     load_logical_session,
     resolve_session_plan,
 )
-from .model_routing import EffectiveStack, ROLES
+from .model_routing import EffectiveStack, ROLES, RoutingError
 from .project_context import ContextError, resolve_control_plane_context
 from .provider_credentials import (
     CredentialError,
@@ -71,6 +71,8 @@ from .stack_catalog import (
     fetch_live_catalog,
     project_live_catalog,
 )
+from .stack_store import StackStoreError
+from .stack_wizard import run_stack_wizard
 from .session_config import (
     SessionError,
     SessionPaths,
@@ -256,6 +258,63 @@ def _stack_available(
     return _render_table(
         ("PROVIDER", "FAMILY", "MODEL", "ACCOUNTS", "STATUS"),
         sorted(rows, key=lambda row: (row[0], row[1], row[2], row[3])),
+    )
+
+
+def _stack_show(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    name: str,
+) -> str:
+    document = normalize_model_stacks(config.documents["model-stacks"])
+    stack = document.stacks.get(name)
+    if stack is None:
+        available = ", ".join(sorted(document.stacks))
+        raise CliError(
+            f"model stack is not configured: {name}; "
+            f"available stacks: {available}"
+        )
+    binding_path = paths["config"] / "stack-bindings.json"
+    bindings = (
+        load_stack_bindings(binding_path)
+        if binding_path.exists()
+        else StackBindings({})
+    )
+    locked_ids = set(bindings.candidate_accounts.values())
+    accounts = (
+        {
+            account.id: account.name
+            for account in load_accounts(
+                paths["config"] / "accounts.json"
+            )
+            if account.state == "active"
+        }
+        if locked_ids
+        else {}
+    )
+    rows = []
+    for role, candidates in (
+        ("controller", stack.controller),
+        *((role, stack.agents[role]) for role in ROLES),
+    ):
+        for ordinal, candidate in enumerate(candidates, 1):
+            locked = bindings.candidate_accounts.get(candidate.id)
+            rows.append(
+                (
+                    role,
+                    str(ordinal),
+                    candidate.model,
+                    ", ".join(candidate.providers),
+                    (
+                        accounts.get(locked, "Unavailable named account")
+                        if locked is not None
+                        else "Automatic within provider"
+                    ),
+                )
+            )
+    return _render_table(
+        ("ROLE", "CANDIDATE", "MODEL", "PROVIDER", "ACCOUNT POLICY"),
+        rows,
     )
 
 
@@ -1701,6 +1760,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="stack_command", required=True
     )
     stack_action.add_parser("available")
+    stack_action.add_parser("list")
+    show_stack = stack_action.add_parser("show")
+    show_stack.add_argument("name")
+    stack_action.add_parser("configure")
 
     provider = commands.add_parser("provider")
     provider_action = provider.add_subparsers(
@@ -1788,6 +1851,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             context_arguments = [parsed.context_command]
             context_arguments.extend(getattr(parsed, "arguments", ()))
             return _run_external("orichum-context", context_arguments)
+        if (
+            parsed.command == "stack"
+            and parsed.stack_command == "configure"
+            and (not sys.stdin.isatty() or not sys.stdout.isatty())
+        ):
+            raise CliError(
+                "stack configuration requires an interactive terminal"
+            )
         paths, config = _load()
         if parsed.command == "provider" and parsed.provider_command == "login":
             return _run_external("orichum-login", list(parsed.arguments))
@@ -1871,8 +1942,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(_context_list(config), end="")
             return 0
         if parsed.command == "stack":
-            print(_stack_available(paths, config), end="")
-            return 0
+            if parsed.stack_command == "available":
+                print(_stack_available(paths, config), end="")
+                return 0
+            if parsed.stack_command == "list":
+                print(_stack_list(config), end="")
+                return 0
+            if parsed.stack_command == "show":
+                print(
+                    _stack_show(paths, config, parsed.name),
+                    end="",
+                )
+                return 0
+            return run_stack_wizard(
+                paths, config, launch_dir=Path.cwd()
+            )
         if parsed.command == "models":
             if parsed.models_command == "list":
                 print(_model_list(config), end="")
@@ -1910,8 +1994,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         ManagementError,
         OSError,
         RouteError,
+        RoutingError,
         SessionError,
         StackBindingError,
+        StackStoreError,
     ) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

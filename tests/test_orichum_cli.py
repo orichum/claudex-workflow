@@ -216,6 +216,45 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn("claude-work.json", stdout)
         self.assertNotIn("antigravity-work.json", stdout)
 
+    def test_stack_list_and_show_are_scriptable_and_redacted(self) -> None:
+        status, stdout, stderr = self.run_cli("stack", "list")
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("STACK", stdout)
+        self.assertIn("balanced", stdout)
+
+        status, stdout, stderr = self.run_cli(
+            "stack", "show", "balanced"
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("architecture-advisor", stdout)
+        self.assertIn("claude-opus-4-8", stdout)
+        self.assertIn("anthropic", stdout)
+        self.assertIn("Automatic within provider", stdout)
+        self.assertNotIn("oc-a-", stdout)
+        self.assertNotIn("oc-c-", stdout)
+        self.assertNotIn("oc-r-", stdout)
+        self.assertNotIn(".json", stdout)
+
+    def test_stack_configure_rejects_non_tty_before_wizard_dispatch(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            orichum_cli, "run_stack_wizard", return_value=0
+        ) as wizard:
+            status, stdout, stderr = self.run_cli(
+                "stack", "configure"
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "ERROR: stack configuration requires an interactive terminal\n",
+        )
+        wizard.assert_not_called()
+
     def test_external_diagnostics_use_argv_runner_without_shell(self) -> None:
         with mock.patch.object(orichum_cli, "_run_external", return_value=8) as run:
             status, _, _ = self.run_cli("doctor")
