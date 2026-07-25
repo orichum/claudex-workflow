@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import stat
 import tempfile
@@ -182,7 +184,11 @@ def _private_child(path: Path) -> Path:
     return resolved / requested.name
 
 
-def _verify_install_lock(snapshot_root: Path, descriptor: int) -> None:
+def _journal_checkpoint(phase: str) -> None:
+    """Test seam after the journal domain is bound to held descriptors."""
+
+
+def _verify_install_lock(snapshot_root: Path, descriptor: int) -> int:
     if type(descriptor) is not int or descriptor < 0:
         raise InstallControlPlaneError(
             "held installer lock descriptor is invalid"
@@ -201,9 +207,6 @@ def _verify_install_lock(snapshot_root: Path, descriptor: int) -> None:
         raise InstallControlPlaneError(
             "held installer lock is unavailable"
         ) from error
-    finally:
-        if parent_descriptor >= 0:
-            os.close(parent_descriptor)
     if (
         not stat.S_ISDIR(held.st_mode)
         or held.st_uid != os.getuid()
@@ -215,9 +218,207 @@ def _verify_install_lock(snapshot_root: Path, descriptor: int) -> None:
         or (held_parent.st_dev, held_parent.st_ino)
         != (current_parent.st_dev, current_parent.st_ino)
     ):
+        os.close(parent_descriptor)
         raise InstallControlPlaneError(
             "held installer lock does not fence the journal state directory"
         )
+    return parent_descriptor
+
+
+@dataclass
+class _JournalDomain:
+    state_fd: int
+    name: str
+    journal_fd: int = -1
+
+
+@contextmanager
+def _journal_domain(
+    snapshot_root: Path,
+    install_lock_fd: int,
+    *,
+    create: bool,
+):
+    snapshot_root = _private_child(snapshot_root)
+    state_fd = _verify_install_lock(snapshot_root, install_lock_fd)
+    domain = _JournalDomain(
+        state_fd=state_fd,
+        name=snapshot_root.name,
+    )
+    try:
+        _journal_checkpoint("verified")
+        journal_created = False
+        try:
+            details = os.stat(
+                domain.name,
+                dir_fd=domain.state_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            if not create:
+                yield domain
+                return
+            os.mkdir(domain.name, mode=0o700, dir_fd=domain.state_fd)
+            os.fsync(domain.state_fd)
+            journal_created = True
+            details = os.stat(
+                domain.name,
+                dir_fd=domain.state_fd,
+                follow_symlinks=False,
+            )
+        if (
+            stat.S_ISLNK(details.st_mode)
+            or not stat.S_ISDIR(details.st_mode)
+            or details.st_uid != os.getuid()
+            or stat.S_IMODE(details.st_mode) != 0o700
+        ):
+            raise InstallControlPlaneError(
+                "installer journal directory is unsafe"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        domain.journal_fd = os.open(
+            domain.name,
+            flags,
+            dir_fd=domain.state_fd,
+        )
+        opened = os.fstat(domain.journal_fd)
+        if (opened.st_dev, opened.st_ino) != (
+            details.st_dev,
+            details.st_ino,
+        ):
+            raise InstallControlPlaneError(
+                "installer journal changed while opening"
+            )
+        if journal_created:
+            _activation_checkpoint("journal-created")
+        yield domain
+    finally:
+        if domain.journal_fd >= 0:
+            os.close(domain.journal_fd)
+        os.close(domain.state_fd)
+
+
+def _exists_at(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _private_bytes_at(
+    directory_fd: int,
+    name: str,
+    label: str,
+    limit: int,
+) -> bytes:
+    try:
+        before = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise InstallControlPlaneError(f"{label} is unavailable") from error
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+    ):
+        raise InstallControlPlaneError(f"{label} is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise InstallControlPlaneError(
+                f"{label} changed while opening"
+            )
+        content = bytearray()
+        while len(content) <= limit:
+            chunk = os.read(
+                descriptor,
+                min(65536, limit + 1 - len(content)),
+            )
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > limit:
+            raise InstallControlPlaneError(f"{label} is too large")
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ):
+            raise InstallControlPlaneError(
+                f"{label} changed while reading"
+            )
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_private_at(
+    directory_fd: int,
+    name: str,
+    payload: bytes,
+    *,
+    exclusive: bool,
+) -> None:
+    temporary: str | None = None
+    target = name
+    if not exclusive:
+        temporary = f".{name}.{os.getpid()}.{secrets.token_hex(8)}"
+        target = temporary
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(
+        target,
+        flags,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("private write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        if temporary is not None:
+            os.replace(
+                temporary,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            temporary = None
+        os.fsync(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
 
 
 def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
@@ -256,18 +457,38 @@ def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
                 pass
 
 
-def _snapshot(path: Path, root: Path, name: str, limit: int) -> bytes | None:
+def _snapshot(
+    path: Path,
+    journal_fd: int,
+    name: str,
+    limit: int,
+) -> bytes | None:
     for suffix in ("data", "present", "absent"):
         try:
-            (root / f"{name}.{suffix}").unlink()
+            os.unlink(f"{name}.{suffix}", dir_fd=journal_fd)
         except FileNotFoundError:
             pass
     if not _lexists(path):
-        _atomic_private(root / f"{name}.absent", b"", exclusive=True)
+        _atomic_private_at(
+            journal_fd,
+            f"{name}.absent",
+            b"",
+            exclusive=True,
+        )
         return None
     payload = _private_bytes(path, name, limit)
-    _atomic_private(root / f"{name}.data", payload, exclusive=True)
-    _atomic_private(root / f"{name}.present", b"", exclusive=True)
+    _atomic_private_at(
+        journal_fd,
+        f"{name}.data",
+        payload,
+        exclusive=True,
+    )
+    _atomic_private_at(
+        journal_fd,
+        f"{name}.present",
+        b"",
+        exclusive=True,
+    )
     return payload
 
 
@@ -304,16 +525,34 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _remove_journal(snapshot_root: Path) -> None:
-    _require_private_root(snapshot_root)
-    parent = snapshot_root.parent
-    shutil.rmtree(snapshot_root)
-    _fsync_directory(parent)
+def _remove_journal(domain: _JournalDomain) -> None:
+    if domain.journal_fd < 0:
+        return
+    for name in os.listdir(domain.journal_fd):
+        details = os.stat(
+            name,
+            dir_fd=domain.journal_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(details.st_mode):
+            raise InstallControlPlaneError(
+                "installer journal contains an unsafe entry"
+            )
+        os.unlink(name, dir_fd=domain.journal_fd)
+    os.fsync(domain.journal_fd)
+    os.close(domain.journal_fd)
+    domain.journal_fd = -1
+    os.rmdir(domain.name, dir_fd=domain.state_fd)
+    os.fsync(domain.state_fd)
 
 
-def _write_manifest(snapshot_root: Path, manifest: dict[str, object]) -> None:
-    _atomic_private(
-        snapshot_root / _MANIFEST_NAME,
+def _write_manifest(
+    journal_fd: int,
+    manifest: dict[str, object],
+) -> None:
+    _atomic_private_at(
+        journal_fd,
+        _MANIFEST_NAME,
         (
             json.dumps(
                 manifest,
@@ -326,11 +565,12 @@ def _write_manifest(snapshot_root: Path, manifest: dict[str, object]) -> None:
     )
 
 
-def _load_manifest(snapshot_root: Path) -> dict[str, object]:
+def _load_manifest(journal_fd: int) -> dict[str, object]:
     try:
         manifest = json.loads(
-            _private_bytes(
-                snapshot_root / _MANIFEST_NAME,
+            _private_bytes_at(
+                journal_fd,
+                _MANIFEST_NAME,
                 "installer control-plane manifest",
                 MAX_CONFIG_BYTES,
             )
@@ -455,19 +695,25 @@ def activate(
 ) -> None:
     candidate_root = Path(candidate_root).resolve(strict=True)
     installed_root = Path(installed_root).resolve(strict=True)
-    snapshot_root = _private_child(snapshot_root)
-    _verify_install_lock(snapshot_root, install_lock_fd)
+    with _journal_domain(
+        snapshot_root,
+        install_lock_fd,
+        create=True,
+    ) as journal:
+        _activate_bound(candidate_root, installed_root, journal)
+
+
+def _activate_bound(
+    candidate_root: Path,
+    installed_root: Path,
+    journal: _JournalDomain,
+) -> None:
     _require_private_root(installed_root)
-    journal_created = False
-    try:
-        snapshot_root.mkdir(mode=0o700)
-        journal_created = True
-    except FileExistsError:
-        pass
-    _require_private_root(snapshot_root)
-    if journal_created:
-        _fsync_directory(snapshot_root.parent)
-    if _lexists(snapshot_root / _MANIFEST_NAME):
+    if journal.journal_fd < 0:
+        raise InstallControlPlaneError(
+            "installer journal directory is unavailable"
+        )
+    if _exists_at(journal.journal_fd, _MANIFEST_NAME):
         raise InstallControlPlaneError(
             "unfinished installer control-plane journal exists"
         )
@@ -482,13 +728,13 @@ def activate(
             )
         prior_model = _snapshot(
             model_path,
-            snapshot_root,
+            journal.journal_fd,
             "installed-model-stacks",
             MAX_CONFIG_BYTES,
         )
         prior_binding = _snapshot(
             binding_path,
-            snapshot_root,
+            journal.journal_fd,
             "installed-stack-bindings",
             MAX_BINDING_BYTES,
         )
@@ -528,7 +774,7 @@ def activate(
             "activationStates": activation_states,
             "conflicts": [],
         }
-        _write_manifest(snapshot_root, manifest)
+        _write_manifest(journal.journal_fd, manifest)
         _activation_checkpoint("prepared")
 
         for name, payload in bootstrap_payloads.items():
@@ -560,7 +806,7 @@ def activate(
         if planned_state not in activation_states:
             activation_states.append(planned_state)
         manifest["phase"] = "saving"
-        _write_manifest(snapshot_root, manifest)
+        _write_manifest(journal.journal_fd, manifest)
         _activation_checkpoint("saving")
 
         save_stack(current, current.stacks, bindings)
@@ -571,7 +817,7 @@ def activate(
                 "installed stack state differs from the activation plan"
             )
         manifest["phase"] = "committed"
-        _write_manifest(snapshot_root, manifest)
+        _write_manifest(journal.journal_fd, manifest)
         _activation_checkpoint("committed")
         load_control_plane(default_config_paths(installed_root))
 
@@ -582,15 +828,24 @@ def rollback(
     install_lock_fd: int,
 ) -> None:
     installed_root = Path(installed_root).resolve(strict=True)
-    snapshot_root = _private_child(snapshot_root)
-    _verify_install_lock(snapshot_root, install_lock_fd)
-    if not snapshot_root.exists():
+    with _journal_domain(
+        snapshot_root,
+        install_lock_fd,
+        create=False,
+    ) as journal:
+        _rollback_bound(installed_root, journal)
+
+
+def _rollback_bound(
+    installed_root: Path,
+    journal: _JournalDomain,
+) -> None:
+    if journal.journal_fd < 0:
         return
-    _require_private_root(snapshot_root)
-    if not _lexists(snapshot_root / _MANIFEST_NAME):
-        _remove_journal(snapshot_root)
+    if not _exists_at(journal.journal_fd, _MANIFEST_NAME):
+        _remove_journal(journal)
         return
-    manifest = _load_manifest(snapshot_root)
+    manifest = _load_manifest(journal.journal_fd)
     if manifest["installedRoot"] != str(installed_root):
         raise InstallControlPlaneError(
             "installer journal belongs to a different installed "
@@ -598,11 +853,12 @@ def rollback(
         )
     with control_plane_transaction(installed_root):
         if manifest["phase"] in _TERMINAL_PHASES:
-            _remove_journal(snapshot_root)
+            _remove_journal(journal)
             return
         original_model = (
-            _private_bytes(
-                snapshot_root / "installed-model-stacks.data",
+            _private_bytes_at(
+                journal.journal_fd,
+                "installed-model-stacks.data",
                 "installed model-stack snapshot",
                 MAX_CONFIG_BYTES,
             )
@@ -610,8 +866,9 @@ def rollback(
             else None
         )
         original_binding = (
-            _private_bytes(
-                snapshot_root / "installed-stack-bindings.data",
+            _private_bytes_at(
+                journal.journal_fd,
+                "installed-stack-bindings.data",
                 "installed stack-binding snapshot",
                 MAX_BINDING_BYTES,
             )
@@ -703,7 +960,7 @@ def rollback(
         manifest["phase"] = (
             "rollbackConflict" if conflicts else "rolledBack"
         )
-        _write_manifest(snapshot_root, manifest)
+        _write_manifest(journal.journal_fd, manifest)
         if conflicts:
             if len(conflicts) == 1:
                 detail = f"{conflicts[0]} changed after installer activation"
@@ -713,7 +970,7 @@ def rollback(
                     + ", ".join(conflicts)
                 )
             raise InstallControlPlaneError(detail)
-        _remove_journal(snapshot_root)
+        _remove_journal(journal)
 
 
 def recover(
@@ -727,16 +984,18 @@ def recover(
 
 def finalize(snapshot_root: Path, install_lock_fd: int) -> None:
     """Remove a committed journal after the outer install is durable."""
-    snapshot_root = _private_child(snapshot_root)
-    _verify_install_lock(snapshot_root, install_lock_fd)
-    if not snapshot_root.exists():
-        return
-    _require_private_root(snapshot_root)
-    manifest = _load_manifest(snapshot_root)
-    if manifest["phase"] != "committed":
-        raise InstallControlPlaneError(
-            "installer control-plane journal is not committed"
-        )
-    manifest["phase"] = "finalized"
-    _write_manifest(snapshot_root, manifest)
-    _remove_journal(snapshot_root)
+    with _journal_domain(
+        snapshot_root,
+        install_lock_fd,
+        create=False,
+    ) as journal:
+        if journal.journal_fd < 0:
+            return
+        manifest = _load_manifest(journal.journal_fd)
+        if manifest["phase"] != "committed":
+            raise InstallControlPlaneError(
+                "installer control-plane journal is not committed"
+            )
+        manifest["phase"] = "finalized"
+        _write_manifest(journal.journal_fd, manifest)
+        _remove_journal(journal)

@@ -196,11 +196,19 @@ class InstallControlPlaneTests(unittest.TestCase):
         state = self.root / "durable-state"
         state.mkdir(mode=0o700)
         journal = state / "install-control-plane"
-        events: list[tuple[str, Path]] = []
+        events: list[tuple[str, object]] = []
         real_snapshot = control_plane._snapshot
+        state_details = os.stat(state)
+        state_identity = (
+            state_details.st_dev,
+            state_details.st_ino,
+        )
 
-        def record_fsync(path: Path) -> None:
-            events.append(("fsync", Path(path)))
+        def record_fsync(descriptor: int) -> None:
+            details = os.fstat(descriptor)
+            events.append(
+                ("fsync", (details.st_dev, details.st_ino))
+            )
 
         def record_snapshot(*args, **kwargs):
             events.append(("snapshot", Path(args[0])))
@@ -208,8 +216,8 @@ class InstallControlPlaneTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                control_plane,
-                "_fsync_directory",
+                control_plane.os,
+                "fsync",
                 side_effect=record_fsync,
             ),
             mock.patch.object(
@@ -220,13 +228,16 @@ class InstallControlPlaneTests(unittest.TestCase):
         ):
             self._activate(journal)
 
-        self.assertEqual(events[0], ("fsync", state))
+        self.assertEqual(events[0], ("fsync", state_identity))
         first_snapshot = next(
             index
             for index, event in enumerate(events)
             if event[0] == "snapshot"
         )
-        self.assertLess(events.index(("fsync", state)), first_snapshot)
+        self.assertLess(
+            events.index(("fsync", state_identity)),
+            first_snapshot,
+        )
 
     def test_rollback_preserves_concurrently_updated_bootstrap_account(
         self,
@@ -477,6 +488,49 @@ control.activate(
         self.assertFalse(
             (replacement_journal / "installed-control-plane.json").exists()
         )
+
+    def test_activation_never_returns_to_state_path_after_fd_check(
+        self,
+    ) -> None:
+        state = self.root / "race-state"
+        state.mkdir(mode=0o700)
+        held_lock = state / "install.lock"
+        held_lock.mkdir(mode=0o700)
+        descriptor = os.open(
+            held_lock,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        self.addCleanup(os.close, descriptor)
+        displaced = self.root / "race-state-held"
+        replacement_created = False
+
+        def replace_state(phase: str) -> None:
+            nonlocal replacement_created
+            if phase != "verified" or replacement_created:
+                return
+            state.rename(displaced)
+            state.mkdir(mode=0o700)
+            (state / "install.lock").mkdir(mode=0o700)
+            replacement_created = True
+
+        with mock.patch.object(
+            control_plane,
+            "_journal_checkpoint",
+            side_effect=replace_state,
+            create=True,
+        ):
+            activate(
+                self.candidate,
+                self.installed,
+                state / "install-control-plane",
+                descriptor,
+            )
+
+        self.assertTrue(replacement_created)
+        self.assertTrue(
+            (displaced / "install-control-plane").exists()
+        )
+        self.assertFalse((state / "install-control-plane").exists())
 
     def test_finalize_removes_committed_journal_without_rollback(
         self,
