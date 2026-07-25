@@ -13,6 +13,7 @@ import struct
 import termios
 import tempfile
 import threading
+import traceback
 from typing import Callable
 import unittest
 from unittest import mock
@@ -22,7 +23,10 @@ from integrations.common.account_registry import Account, update_accounts
 from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.stack_bindings import StackBindings
 from integrations.common.stack_catalog import LiveCatalog, LiveModelChoice
-from integrations.common.stack_definition import normalize_model_stacks
+from integrations.common.stack_definition import (
+    NormalizedStacks,
+    normalize_model_stacks,
+)
 from integrations.common.stack_store import StackSnapshot
 from integrations.common.stack_wizard import (
     BACK,
@@ -914,9 +918,13 @@ class StackWizardTests(unittest.TestCase):
             )
         return root
 
-    def _created_heavy_result(self) -> WizardResult:
+    def _created_heavy_result(
+        self,
+        snapshot: StackSnapshot | None = None,
+    ) -> WizardResult:
+        snapshot = self.snapshot if snapshot is None else snapshot
         return StackWizard(
-            self.snapshot,
+            snapshot,
             self.catalog,
             self.accounts,
             ScriptedIO(
@@ -932,6 +940,85 @@ class StackWizardTests(unittest.TestCase):
                 text=["heavy"],
             ),
         ).run(Path("/work/project"))
+
+    def _with_offline_stack(
+        self, stacks: NormalizedStacks
+    ) -> NormalizedStacks:
+        document = stack_wizard.serialize_model_stacks(stacks)
+        document["models"]["claude-offline"] = {
+            "family": "claude",
+            "routes": {"anthropic": "claude-offline"},
+        }
+        offline = json.loads(
+            json.dumps(document["stacks"]["balanced"])
+        )
+        offline["controller"] = [
+            {
+                "id": stack_wizard.candidate_id(
+                    "offline", "controller", 0, "claude-offline"
+                ),
+                "model": "claude-offline",
+                "providers": ["anthropic"],
+            }
+        ]
+        for role, candidates in offline["agents"].items():
+            for ordinal, candidate in enumerate(candidates):
+                candidate["id"] = stack_wizard.candidate_id(
+                    "offline",
+                    role,
+                    ordinal,
+                    candidate["model"],
+                )
+        document["stacks"]["offline"] = offline
+        return normalize_model_stacks(document)
+
+    def _run_mocked_commit(
+        self,
+        config_root: Path,
+        initial: ResolvedConfig,
+        snapshot: StackSnapshot,
+        result: WizardResult,
+        catalog: LiveCatalog,
+    ) -> tuple[int, mock.Mock]:
+        terminal = _TTYStringIO()
+        save = mock.Mock()
+        with (
+            mock.patch.object(stack_wizard.sys, "stdin", terminal),
+            mock.patch.object(stack_wizard.sys, "stdout", terminal),
+            mock.patch.object(
+                stack_wizard, "_runtime_catalog_port", return_value=8317
+            ),
+            mock.patch.object(
+                stack_wizard, "load_accounts", return_value=self.accounts
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "fetch_live_catalog",
+                return_value={"object": "list", "data": []},
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "project_live_catalog",
+                return_value=catalog,
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "load_stack_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                stack_wizard.StackWizard,
+                "run",
+                return_value=result,
+            ),
+            mock.patch.object(stack_wizard, "save_stack", save),
+        ):
+            status = run_stack_wizard(
+                {"config": config_root, "data": config_root.parent},
+                initial,
+                Path("/work/project"),
+            )
+        return status, save
 
     def _run_while_control_plane_writer_holds_lock(
         self,
@@ -1256,6 +1343,374 @@ class StackWizardTests(unittest.TestCase):
             "gpt-5.6-sol is not live through openai",
         )
         save.assert_not_called()
+
+    def test_unrelated_offline_stack_does_not_block_target_create_or_edit(
+        self,
+    ) -> None:
+        current_stacks = self._with_offline_stack(self.snapshot.stacks)
+        snapshot = StackSnapshot(
+            current_stacks,
+            self.snapshot.bindings,
+            "2" * 64,
+            None,
+        )
+        created = self._created_heavy_result(snapshot)
+        edited = StackWizard(
+            snapshot,
+            self.catalog,
+            self.accounts,
+            ScriptedIO(
+                choices=[
+                    "Edit existing",
+                    "balanced",
+                    "antigravity",
+                    "claude",
+                    "claude-opus-4-6-thinking",
+                    "Personal Antigravity",
+                ],
+                confirmations=[True, False],
+            ),
+        ).run(Path("/work/project"))
+
+        for operation, result in (
+            ("create", created),
+            ("edit", edited),
+        ):
+            with self.subTest(operation=operation):
+                config_root = self._config_root(current_stacks)
+                initial = stack_wizard.load_control_plane(
+                    stack_wizard.default_config_paths(config_root)
+                )
+
+                status, save = self._run_mocked_commit(
+                    config_root,
+                    initial,
+                    snapshot,
+                    result,
+                    self.catalog,
+                )
+
+                self.assertEqual(status, 0)
+                save.assert_called_once_with(
+                    snapshot, result.stacks, result.bindings
+                )
+
+    def test_delete_ignores_target_and_unrelated_offline_routes(
+        self,
+    ) -> None:
+        offline_stacks = self._with_offline_stack(
+            self.snapshot.stacks
+        )
+        offline_snapshot = StackSnapshot(
+            offline_stacks,
+            self.snapshot.bindings,
+            "3" * 64,
+            None,
+        )
+        created = self._created_heavy_result(offline_snapshot)
+        current = StackSnapshot(
+            created.stacks,
+            created.bindings,
+            "4" * 64,
+            None,
+        )
+
+        for target in ("offline", "heavy"):
+            with self.subTest(target=target):
+                updated, bindings = stack_wizard.delete_stack(
+                    current,
+                    target,
+                    {"schemaVersion": 1, "contexts": []},
+                )
+                result = WizardResult(
+                    updated,
+                    bindings,
+                    target,
+                    True,
+                    False,
+                )
+                config_root = self._config_root(current.stacks)
+                initial = stack_wizard.load_control_plane(
+                    stack_wizard.default_config_paths(config_root)
+                )
+
+                status, save = self._run_mocked_commit(
+                    config_root,
+                    initial,
+                    current,
+                    result,
+                    self.catalog,
+                )
+
+                self.assertEqual(status, 0)
+                save.assert_called_once_with(
+                    current, result.stacks, result.bindings
+                )
+
+    def test_locked_target_disappearance_resumes_picker_then_saves(
+        self,
+    ) -> None:
+        config_root = self._config_root(self.snapshot.stacks)
+        initial = stack_wizard.load_control_plane(
+            stack_wizard.default_config_paths(config_root)
+        )
+        refreshed = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider != "antigravity"
+            ),
+            unclassified=(),
+        )
+        current_catalog = [self.catalog]
+        confirmed = threading.Event()
+        writer_entered = threading.Event()
+        commit_attempted = threading.Event()
+        release_writer = threading.Event()
+        commit_lock_active = threading.Event()
+        failures: list[BaseException] = []
+        failure_details: list[str] = []
+        real_control_transaction = (
+            stack_wizard.control_plane_transaction
+        )
+        save = mock.Mock()
+
+        class RetryIO(ScriptedIO):
+            def choose(
+                inner_self,
+                title: str,
+                options: list[Choice],
+                selected: int = 0,
+                searchable: bool = False,
+            ) -> int:
+                if (
+                    title
+                    == "Step 3/5 · architecture-advisor · Provider"
+                    and inner_self.title_calls.get(title, 0) == 1
+                ):
+                    if commit_lock_active.is_set():
+                        raise AssertionError(
+                            "picker resumed before locks were released"
+                        )
+                return super().choose(
+                    title,
+                    options,
+                    selected=selected,
+                    searchable=searchable,
+                )
+
+        io_adapter = RetryIO(
+            choices=[
+                "Clone existing",
+                "balanced",
+                "Configure controller",
+                "openai",
+                "gpt",
+                "gpt-5.6-terra",
+                "Automatic within provider",
+                "antigravity",
+                "claude",
+                "claude-opus-4-6-thinking",
+                "Personal Antigravity",
+                "anthropic",
+                "claude",
+                "claude-opus-4-8",
+                "Automatic within provider",
+            ],
+            confirmations=[True, True],
+            text=["heavy"],
+        )
+        original_run = stack_wizard.StackWizard.run
+
+        def run_then_block(
+            wizard: StackWizard, launch_dir: Path
+        ) -> WizardResult:
+            result = original_run(wizard, launch_dir)
+            confirmed.set()
+            if not writer_entered.wait(2):
+                raise AssertionError(
+                    "catalog writer did not acquire control lock"
+                )
+            return result
+
+        def change_live_catalog() -> None:
+            try:
+                if not confirmed.wait(2):
+                    raise AssertionError(
+                        "wizard did not finish confirmation"
+                    )
+                with real_control_transaction(config_root):
+                    current_catalog[0] = refreshed
+                    writer_entered.set()
+                    if not release_writer.wait(2):
+                        raise AssertionError(
+                            "test did not release catalog writer"
+                        )
+            except BaseException as error:
+                failures.append(error)
+                failure_details.append(traceback.format_exc())
+
+        @contextlib.contextmanager
+        def observed_control_transaction(path: Path):
+            commit_attempted.set()
+            with real_control_transaction(path):
+                commit_lock_active.set()
+                try:
+                    yield
+                finally:
+                    commit_lock_active.clear()
+
+        def configure() -> None:
+            try:
+                run_stack_wizard(
+                    {
+                        "config": config_root,
+                        "data": config_root.parent,
+                    },
+                    initial,
+                    config_root.parent,
+                )
+            except BaseException as error:
+                failures.append(error)
+                failure_details.append(traceback.format_exc())
+
+        terminal = _TTYStringIO()
+        writer_thread = threading.Thread(target=change_live_catalog)
+        writer_thread.start()
+        try:
+            with (
+                mock.patch.object(stack_wizard.sys, "stdin", terminal),
+                mock.patch.object(stack_wizard.sys, "stdout", terminal),
+                mock.patch.object(
+                    stack_wizard,
+                    "_runtime_catalog_port",
+                    return_value=8317,
+                ),
+                mock.patch.object(
+                    stack_wizard,
+                    "load_accounts",
+                    return_value=self.accounts,
+                ),
+                mock.patch.object(
+                    stack_wizard,
+                    "fetch_live_catalog",
+                    side_effect=lambda *_args: current_catalog[0],
+                ),
+                mock.patch.object(
+                    stack_wizard,
+                    "project_live_catalog",
+                    side_effect=lambda raw, *_args: raw,
+                ),
+                mock.patch.object(
+                    stack_wizard,
+                    "load_stack_snapshot",
+                    return_value=self.snapshot,
+                ),
+                mock.patch.object(
+                    stack_wizard,
+                    "TerminalWizardIO",
+                    return_value=io_adapter,
+                ),
+                mock.patch.object(
+                    stack_wizard.StackWizard,
+                    "run",
+                    autospec=True,
+                    side_effect=run_then_block,
+                ),
+                mock.patch.object(
+                    stack_wizard,
+                    "control_plane_transaction",
+                    side_effect=observed_control_transaction,
+                ),
+                mock.patch.object(stack_wizard, "save_stack", save),
+            ):
+                runner_thread = threading.Thread(target=configure)
+                runner_thread.start()
+                self.assertTrue(commit_attempted.wait(2))
+                release_writer.set()
+                runner_thread.join(2)
+                self.assertFalse(runner_thread.is_alive())
+        except BaseException as error:
+            failures.append(error)
+            failure_details.append(traceback.format_exc())
+        finally:
+            release_writer.set()
+            writer_thread.join(2)
+
+        self.assertEqual(failures, [], "\n".join(failure_details))
+        save.assert_called_once()
+        saved_stacks = save.call_args.args[1]
+        candidate = saved_stacks.stacks["heavy"].agents[
+            "architecture-advisor"
+        ][0]
+        controller = saved_stacks.stacks["heavy"].controller[0]
+        self.assertEqual(controller.model, "gpt-5.6-terra")
+        self.assertEqual(controller.providers, ("openai",))
+        self.assertEqual(candidate.model, "claude-opus-4-8")
+        self.assertEqual(candidate.providers, ("anthropic",))
+        self.assertIn(
+            "availability changed for architecture-advisor candidate",
+            "\n".join(io_adapter.shown).lower(),
+        )
+
+    def test_resumed_picker_defers_refresh_to_locked_commit(self) -> None:
+        refreshed = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider != "antigravity"
+            ),
+            unclassified=(),
+        )
+        io_adapter = ScriptedIO(
+            choices=[
+                "Clone existing",
+                "balanced",
+                "antigravity",
+                "claude",
+                "claude-opus-4-6-thinking",
+                "Personal Antigravity",
+                "anthropic",
+                "claude",
+                "claude-opus-4-8",
+                "Automatic within provider",
+            ],
+            confirmations=[True, False, True],
+            text=["heavy"],
+        )
+        wizard = StackWizard(
+            self.snapshot,
+            self.catalog,
+            self.accounts,
+            io_adapter,
+            refresh_catalog=lambda: self.catalog,
+        )
+        initial = wizard.run(Path("/work/project"))
+        stale_refresh_calls = 0
+
+        def stale_refresh() -> LiveCatalog:
+            nonlocal stale_refresh_calls
+            stale_refresh_calls += 1
+            raise AssertionError("startup refresh context was reused")
+
+        wizard._refresh_catalog = stale_refresh
+        missing = wizard.missing_live_choice(initial, refreshed)
+        self.assertIsNotNone(missing)
+
+        result = wizard.resume_missing(
+            missing,
+            refreshed,
+            self._config_root(self.snapshot.stacks).parent,
+            {"schemaVersion": 1, "contexts": []},
+        )
+
+        self.assertTrue(result.save)
+        self.assertEqual(stale_refresh_calls, 0)
+        candidate = result.stacks.stacks["heavy"].agents[
+            "architecture-advisor"
+        ][0]
+        self.assertEqual(candidate.model, "claude-opus-4-8")
+        self.assertEqual(candidate.providers, ("anthropic",))
 
 
 class _TTYStringIO(io.StringIO):

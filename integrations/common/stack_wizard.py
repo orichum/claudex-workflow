@@ -144,6 +144,7 @@ class StackWizard:
         self._io = io
         self._refresh_catalog = refresh_catalog or (lambda: self._catalog)
         self._projects = projects
+        self._pending_draft: _Draft | None = None
 
     def run(self, launch_dir: Path) -> WizardResult:
         try:
@@ -156,7 +157,14 @@ class StackWizard:
         ):
             return self._cancelled()
 
-    def _run(self, launch_dir: Path) -> WizardResult:
+    def _run(
+        self,
+        launch_dir: Path,
+        *,
+        draft: _Draft | None = None,
+        stage: int = 1,
+        refresh_before_return: bool = True,
+    ) -> WizardResult:
         actions = (
             Choice("Create new"),
             Choice("Clone existing"),
@@ -164,9 +172,17 @@ class StackWizard:
             Choice("Delete existing"),
         )
         names = tuple(sorted(self._snapshot.stacks.stacks))
-        action_index = 0
-        draft: _Draft | None = None
-        stage = 1
+        action_index = (
+            next(
+                (
+                    index
+                    for index, action in enumerate(actions)
+                    if draft is not None
+                    and action.label == draft.action
+                ),
+                0,
+            )
+        )
         while True:
             if stage == 1:
                 chosen_action = self._checked_choose(
@@ -300,6 +316,8 @@ class StackWizard:
             ):
                 return self._cancelled(draft.stack_name)
 
+            if not refresh_before_return:
+                break
             current_catalog = self._refresh_catalog()
             missing = self._first_missing(
                 proposed_stacks,
@@ -320,6 +338,7 @@ class StackWizard:
             stage = 4
 
         assign = self._assignment_choice(launch_dir, draft.stack_name)
+        self._pending_draft = draft
         return WizardResult(
             proposed_stacks,
             proposed_bindings,
@@ -327,6 +346,57 @@ class StackWizard:
             True,
             assign,
         )
+
+    def missing_live_choice(
+        self,
+        result: WizardResult,
+        catalog: LiveCatalog,
+    ) -> _MissingChoice | None:
+        if result.stack_name not in result.stacks.stacks:
+            return None
+        return self._first_missing(
+            result.stacks,
+            result.bindings,
+            result.stack_name,
+            catalog,
+        )
+
+    def resume_missing(
+        self,
+        missing: _MissingChoice,
+        catalog: LiveCatalog,
+        launch_dir: Path,
+        projects: Mapping[str, object],
+    ) -> WizardResult:
+        try:
+            draft = self._pending_draft
+            if draft is None:
+                raise RoutingError(
+                    f"stack {self._snapshot.stacks.default_stack} "
+                    f"{missing.scope} model {missing.model} is not live "
+                    f"through {missing.provider}"
+                )
+            self._catalog = catalog
+            self._projects = projects
+            self._io.show(
+                "Availability changed for "
+                f"{missing.scope} candidate {missing.model} via "
+                f"{missing.provider}. Choose a current live model."
+            )
+            draft = self._repick_missing(draft, missing)
+            return self._run(
+                Path(launch_dir),
+                draft=draft,
+                stage=4,
+                refresh_before_return=False,
+            )
+        except (
+            BrokenPipeError,
+            EOFError,
+            KeyboardInterrupt,
+            WizardCancelled,
+        ):
+            return self._cancelled()
 
     def _cancelled(self, stack_name: str = "") -> WizardResult:
         return WizardResult(
@@ -1380,45 +1450,6 @@ def _matched_context(
     raise RoutingError("matched project context disappeared")
 
 
-def _validate_proposed_live_routes(
-    stacks: NormalizedStacks,
-    bindings: StackBindings,
-    catalog: LiveCatalog,
-) -> None:
-    for stack_name, stack in stacks.stacks.items():
-        for scope, candidates in (
-            ("controller", stack.controller),
-            *((role, stack.agents[role]) for role in ROLES),
-        ):
-            for candidate in candidates:
-                definition = stacks.models[candidate.model]
-                locked_account = bindings.candidate_accounts.get(
-                    candidate.id
-                )
-                for provider in candidate.providers:
-                    live = next(
-                        (
-                            choice
-                            for choice in catalog.choices
-                            if choice.family == definition.family
-                            and choice.provider == provider
-                            and choice.upstream
-                            == definition.routes[provider]
-                            and (
-                                locked_account is None
-                                or locked_account in choice.account_ids
-                            )
-                        ),
-                        None,
-                    )
-                    if live is None:
-                        raise RoutingError(
-                            f"stack {stack_name} {scope} model "
-                            f"{candidate.model} is not live through "
-                            f"{provider}"
-                        )
-
-
 def run_stack_wizard(
     paths: Mapping[str, Path],
     config: ResolvedConfig,
@@ -1452,72 +1483,103 @@ def run_stack_wizard(
         return latest
 
     initial = refresh()
-    result = StackWizard(
+    wizard = StackWizard(
         snapshot,
         initial,
         accounts,
         TerminalWizardIO(),
         refresh_catalog=refresh,
         projects=config.documents["projects"],
-    ).run(Path(launch_dir))
+    )
+    result = wizard.run(Path(launch_dir))
     if not result.save:
         print("No changes saved.")
         return 0
 
     matched: Path | None = None
-    with control_plane_transaction(config_root):
-        with stack_binding_transaction(binding_path):
-            current = load_control_plane(
-                default_config_paths(config_root)
-            )
-            current_accounts = load_accounts(
-                config_root / "accounts.json"
-            )
-            validate_account_bindings(
-                current_accounts, current.documents["providers"]
-            )
-            current_catalog = project_live_catalog(
-                fetch_live_catalog(port),
-                current_accounts,
-                result.stacks.models,
-                current.documents["providers"],
-            )
-            proposed = ResolvedConfig(
-                documents={
-                    **current.documents,
-                    "model-stacks": serialize_model_stacks(
-                        result.stacks
-                    ),
-                },
-                sources=current.sources,
-            )
-            validate_control_plane(proposed)
-            _validate_proposed_live_routes(
-                result.stacks,
-                result.bindings,
-                current_catalog,
-            )
-            if result.assign_current_project:
-                context = _matched_context(
-                    current.documents["projects"], Path(launch_dir)
+    while True:
+        missing: _MissingChoice | None = None
+        current_catalog: LiveCatalog | None = None
+        retry_catalog: LiveCatalog | None = None
+        retry_projects: Mapping[str, object] | None = None
+        with control_plane_transaction(config_root):
+            with stack_binding_transaction(binding_path):
+                current = load_control_plane(
+                    default_config_paths(config_root)
                 )
-                validate_stack_assignment(
-                    result.stack_name,
-                    context,
-                    result.stacks,
-                    result.bindings,
-                    current_accounts,
-                    current.documents["providers"],
-                    current_catalog,
+                current_accounts = load_accounts(
+                    config_root / "accounts.json"
                 )
-            save_stack(snapshot, result.stacks, result.bindings)
-            if result.assign_current_project:
-                matched = assign_stack_to_context(
-                    config_root / "projects.json",
-                    Path(launch_dir),
-                    result.stack_name,
-                    result.stacks.stacks,
+                validate_account_bindings(
+                    current_accounts, current.documents["providers"]
                 )
+                proposed = ResolvedConfig(
+                    documents={
+                        **current.documents,
+                        "model-stacks": serialize_model_stacks(
+                            result.stacks
+                        ),
+                    },
+                    sources=current.sources,
+                )
+                validate_control_plane(proposed)
+                if result.stack_name in result.stacks.stacks:
+                    current_catalog = project_live_catalog(
+                        fetch_live_catalog(port),
+                        current_accounts,
+                        result.stacks.models,
+                        current.documents["providers"],
+                    )
+                    missing = wizard.missing_live_choice(
+                        result, current_catalog
+                    )
+                    if missing is not None:
+                        retry_catalog = current_catalog
+                        retry_projects = current.documents["projects"]
+                if missing is None:
+                    if result.assign_current_project:
+                        if current_catalog is None:
+                            raise RoutingError(
+                                "assignment live catalogue is unavailable"
+                            )
+                        context = _matched_context(
+                            current.documents["projects"],
+                            Path(launch_dir),
+                        )
+                        validate_stack_assignment(
+                            result.stack_name,
+                            context,
+                            result.stacks,
+                            result.bindings,
+                            current_accounts,
+                            current.documents["providers"],
+                            current_catalog,
+                        )
+                    save_stack(
+                        snapshot, result.stacks, result.bindings
+                    )
+                    if result.assign_current_project:
+                        matched = assign_stack_to_context(
+                            config_root / "projects.json",
+                            Path(launch_dir),
+                            result.stack_name,
+                            result.stacks.stacks,
+                        )
+        if missing is None:
+            break
+        if retry_catalog is None or retry_projects is None:
+            raise RoutingError(
+                "live availability retry state is unavailable"
+            )
+        result = wizard.resume_missing(
+            missing,
+            retry_catalog,
+            Path(launch_dir),
+            retry_projects,
+        )
+        if not result.save:
+            print("No changes saved.")
+            return 0
 
     if matched is not None:
         print(f"Saved stack {result.stack_name}.")
