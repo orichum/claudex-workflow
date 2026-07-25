@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import stat
 import subprocess
@@ -302,6 +303,117 @@ class GraphHookTests(unittest.TestCase):
             "graphify merge-driver %O %A %B",
         )
 
+    def test_forged_orichum_markers_do_not_authorize_merge_cleanup(self) -> None:
+        self.git(
+            self.repository,
+            "config",
+            "merge.graphify.name",
+            "graphify graph.json union merge",
+        )
+        self.git(
+            self.repository,
+            "config",
+            "merge.graphify.driver",
+            "graphify merge-driver %O %A %B",
+        )
+        attributes = self.repository / ".gitattributes"
+        original = b"graphify-out/graph.json merge=graphify\n"
+        attributes.write_bytes(original)
+        for name in ("post-commit", "post-checkout"):
+            self.write_hook(
+                name,
+                "#!/bin/sh\n"
+                "# orichum-graph-hook-start\n"
+                "echo foreign-command\n"
+                "# orichum-graph-hook-end\n",
+            )
+
+        self.assertNotEqual(graph_hook_status(self.repository), "installed")
+        with self.assertRaisesRegex(GraphHookError, "not managed"):
+            remove_upstream_graphify_hooks(self.repository)
+
+        self.assertEqual(attributes.read_bytes(), original)
+        self.assertEqual(
+            self.git(
+                self.repository,
+                "config",
+                "--get",
+                "merge.graphify.driver",
+            ),
+            "graphify merge-driver %O %A %B",
+        )
+
+    def test_status_requires_executable_hooks_and_live_launcher(self) -> None:
+        install_graph_hooks(self.repository, self.launcher)
+        hook = self.hook("post-commit")
+
+        hook.chmod(0o644)
+        self.assertNotEqual(graph_hook_status(self.repository), "installed")
+        hook.chmod(0o755)
+        self.launcher.rename(self.root / "stale-orichum")
+        self.assertNotEqual(graph_hook_status(self.repository), "installed")
+
+    def test_status_rejects_empty_and_foreign_managed_blocks(self) -> None:
+        for command in ("", "echo forged"):
+            with self.subTest(command=command):
+                for name in ("post-commit", "post-checkout"):
+                    self.write_hook(
+                        name,
+                        "#!/bin/sh\n"
+                        "# orichum-graph-hook-start\n"
+                        f"{command}\n"
+                        "# orichum-graph-hook-end\n",
+                    )
+                self.assertNotEqual(
+                    graph_hook_status(self.repository),
+                    "installed",
+                )
+
+    def test_status_rejects_hooks_with_different_launchers(self) -> None:
+        install_graph_hooks(self.repository, self.launcher)
+        alternate = self.root / "alternate-orichum"
+        alternate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        alternate.chmod(0o755)
+        checkout = self.hook("post-checkout")
+        checkout.write_text(
+            checkout.read_text(encoding="utf-8").replace(
+                str(self.launcher),
+                str(alternate),
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertNotEqual(graph_hook_status(self.repository), "installed")
+
+    def test_attribute_cleanup_preserves_unrelated_bytes_and_line_endings(
+        self,
+    ) -> None:
+        self.git(
+            self.repository,
+            "config",
+            "merge.graphify.name",
+            "graphify graph.json union merge",
+        )
+        self.git(
+            self.repository,
+            "config",
+            "merge.graphify.driver",
+            "graphify merge-driver %O %A %B",
+        )
+        attributes = self.repository / ".gitattributes"
+        attributes.write_bytes(
+            b"*.txt  text eol=crlf\r\n"
+            b"graphify-out/graph.json merge=graphify\r\n"
+            b"*.lock   merge=ours"
+        )
+
+        install_graph_hooks(self.repository, self.launcher)
+
+        self.assertEqual(
+            attributes.read_bytes(),
+            b"*.txt  text eol=crlf\r\n*.lock   merge=ours",
+        )
+
     def test_linked_worktrees_share_one_default_hook_installation(self) -> None:
         linked = self.root / "linked"
         self.git(
@@ -417,8 +529,54 @@ class GraphHookTests(unittest.TestCase):
         self.assertEqual(previous.stat().st_size, 1024 * 1024 + 1)
         self.assertEqual(
             sorted(path.name for path in log.parent.iterdir()),
-            sorted((log.name, previous.name)),
+            sorted((log.name, previous.name, f"{log.name}.lock")),
         )
+
+    def test_concurrent_updates_serialize_rotation_and_log_placement(self) -> None:
+        data_root = self.root / "serialized-data"
+        data_root.mkdir(mode=0o700)
+        log = _graph_log_path(self.repository, data_root)
+        graphs = data_root / "graphs"
+        graphs.mkdir(mode=0o700)
+        log.parent.mkdir(mode=0o700)
+        log.write_bytes(b"x" * (1024 * 1024 + 1))
+        log.chmod(0o600)
+        lock = log.with_name(f"{log.name}.lock")
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+        _launch_detached_update(
+            self.repository,
+            data_root,
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(0.2); print('first-update')",
+            ],
+        )
+        _launch_detached_update(
+            self.repository,
+            data_root,
+            [sys.executable, "-c", "print('second-update')"],
+        )
+        time.sleep(0.3)
+        self.assertEqual(log.stat().st_size, 1024 * 1024 + 1)
+        self.assertFalse(log.with_name(f"{log.name}.previous").exists())
+
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            active = log.read_bytes() if log.exists() else b""
+            if b"first-update" in active and b"second-update" in active:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("serialized updates were skipped or logged elsewhere")
+        previous = log.with_name(f"{log.name}.previous")
+        self.assertEqual(previous.stat().st_size, 1024 * 1024 + 1)
+        self.assertNotIn(b"update", previous.read_bytes())
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
 
     def test_successful_graph_activation_installs_orichum_hooks(self) -> None:
         self.git(
