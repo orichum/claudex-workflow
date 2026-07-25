@@ -262,13 +262,22 @@ validate_candidate = source.index(
 activate_config = source.index(
     "activate_installed_control_plane", validate_candidate
 )
+config_active = source.rindex(
+    "config_transaction_active=true", validate_candidate, activate_config
+)
 transaction_end = source.index(
     "WORKFLOW_TRANSACTION_ACTIVE=false", activate_config
 )
-if not stage_config < validate_candidate < activate_config < transaction_end:
+if not (
+    stage_config
+    < validate_candidate
+    < config_active
+    < activate_config
+    < transaction_end
+):
     raise SystemExit(
-        "installed control plane is not staged, validated, and committed "
-        "inside the installer transaction"
+        "installed control plane activation is not rollback-active before "
+        "its first mutation"
     )
 
 if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:

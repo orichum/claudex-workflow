@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,7 +12,11 @@ import shutil
 import stat
 import tempfile
 
-from .account_registry import load_accounts
+from .account_registry import (
+    AccountError,
+    account_registry_lock,
+    load_accounts,
+)
 from .orichum_config import (
     MAX_CONFIG_BYTES,
     default_config_paths,
@@ -20,7 +26,9 @@ from .project_context import control_plane_transaction
 from .stack_bindings import MAX_BINDING_BYTES, load_stack_bindings
 from .stack_definition import serialize_model_stacks
 from .stack_store import (
+    StackStoreError,
     load_stack_snapshot,
+    planned_stack_digests,
     restore_stack_files,
     save_stack,
     validate_stack_bindings,
@@ -38,6 +46,10 @@ _BOOTSTRAP_FILES = (
     "runtime.json",
     "controller-policy.md",
     "accounts.json",
+)
+_MANIFEST_NAME = "installed-control-plane.json"
+_ACTIVE_PHASES = frozenset(
+    {"prepared", "saving", "committed", "rollbackConflict"}
 )
 
 
@@ -155,6 +167,14 @@ def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
         if temporary is not None:
             os.replace(temporary, path)
             temporary = None
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -189,6 +209,92 @@ def _candidate_payload(
     if name == "accounts.json":
         return b'{"schemaVersion":2,"accounts":[]}\n'
     return (repository_root / "config" / name).read_bytes()
+
+
+def _digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _activation_checkpoint(phase: str) -> None:
+    """Test seam for deterministic interruption at durable phase boundaries."""
+
+
+def _write_manifest(snapshot_root: Path, manifest: dict[str, object]) -> None:
+    _atomic_private(
+        snapshot_root / _MANIFEST_NAME,
+        (
+            json.dumps(
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode(),
+        exclusive=False,
+    )
+
+
+def _load_manifest(snapshot_root: Path) -> dict[str, object]:
+    try:
+        manifest = json.loads(
+            _private_bytes(
+                snapshot_root / _MANIFEST_NAME,
+                "installer control-plane manifest",
+                MAX_CONFIG_BYTES,
+            )
+        )
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as error:
+        raise InstallControlPlaneError(
+            "installer control-plane manifest is invalid"
+        ) from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schemaVersion") != 2
+        or manifest.get("phase")
+        not in _ACTIVE_PHASES | {"rolledBack"}
+        or not isinstance(manifest.get("priorModelPresent"), bool)
+        or not isinstance(manifest.get("priorBindingPresent"), bool)
+        or not isinstance(manifest.get("bootstrapDigests"), dict)
+        or not isinstance(manifest.get("activationStates"), list)
+        or not isinstance(manifest.get("conflicts"), list)
+    ):
+        raise InstallControlPlaneError(
+            "installer control-plane manifest is invalid"
+        )
+    return manifest
+
+
+def _optional_digest(path: Path, label: str, limit: int) -> str | None:
+    if not _lexists(path):
+        return None
+    return _digest(_private_bytes(path, label, limit))
+
+
+def _stack_state(
+    model_path: Path, binding_path: Path
+) -> tuple[str | None, str | None]:
+    if _lexists(model_path):
+        snapshot = load_stack_snapshot(model_path, binding_path)
+        return snapshot.stack_digest, snapshot.binding_digest
+    return (
+        None,
+        _optional_digest(
+            binding_path, "stack bindings", MAX_BINDING_BYTES
+        ),
+    )
+
+
+def _state_document(
+    model_digest: str | None, binding_digest: str | None
+) -> dict[str, str | None]:
+    return {
+        "modelDigest": model_digest,
+        "bindingDigest": binding_digest,
+    }
 
 
 def stage(
@@ -259,7 +365,6 @@ def activate(
     _require_private_root(installed_root)
     snapshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     snapshot_root.chmod(0o700)
-    created: list[str] = []
     with control_plane_transaction(installed_root):
         model_path = installed_root / "model-stacks.json"
         binding_path = installed_root / "stack-bindings.json"
@@ -281,92 +386,98 @@ def activate(
             "installed-stack-bindings",
             MAX_BINDING_BYTES,
         )
-        committed: tuple[str, str | None] | None = None
-        try:
-            for name in _BOOTSTRAP_FILES:
-                destination = installed_root / name
-                if _lexists(destination):
-                    continue
-                _atomic_private(
-                    destination,
-                    (candidate_root / name).read_bytes(),
-                    exclusive=True,
+        bootstrap_payloads = {
+            name: (candidate_root / name).read_bytes()
+            for name in _BOOTSTRAP_FILES
+            if not _lexists(installed_root / name)
+        }
+        initial_model = (
+            (candidate_root / "model-stacks.json").read_bytes()
+            if prior_model is None
+            else None
+        )
+        prior_state = _state_document(
+            None if prior_model is None else _digest(prior_model),
+            None if prior_binding is None else _digest(prior_binding),
+        )
+        activation_states: list[dict[str, str | None]] = []
+        if initial_model is not None:
+            activation_states.append(
+                _state_document(
+                    _digest(initial_model),
+                    prior_state["bindingDigest"],
                 )
-                created.append(name)
-            if prior_model is None:
-                _atomic_private(
-                    model_path,
-                    (candidate_root / "model-stacks.json").read_bytes(),
-                    exclusive=True,
-                )
-            current = load_stack_snapshot(model_path, binding_path)
-            bindings = load_stack_bindings(binding_path)
-            validate_stack_bindings(
-                current.stacks,
-                bindings,
-                load_accounts(installed_root / "accounts.json"),
             )
-            save_stack(current, current.stacks, bindings)
-            saved = load_stack_snapshot(model_path, binding_path)
-            committed = (
-                saved.stack_digest,
-                saved.binding_digest,
-            )
-            manifest = {
-                "schemaVersion": 1,
-                "priorModelPresent": prior_model is not None,
-                "priorBindingPresent": prior_binding is not None,
-                "committedModelDigest": committed[0],
-                "committedBindingDigest": committed[1],
-                "bootstrapCreated": created,
-            }
+        manifest: dict[str, object] = {
+            "schemaVersion": 2,
+            "phase": "prepared",
+            "priorModelPresent": prior_model is not None,
+            "priorBindingPresent": prior_binding is not None,
+            "priorState": prior_state,
+            "bootstrapDigests": {
+                name: _digest(payload)
+                for name, payload in bootstrap_payloads.items()
+            },
+            "activationStates": activation_states,
+            "conflicts": [],
+        }
+        _write_manifest(snapshot_root, manifest)
+        _activation_checkpoint("prepared")
+
+        for name, payload in bootstrap_payloads.items():
             _atomic_private(
-                snapshot_root / "installed-control-plane.json",
-                (
-                    json.dumps(
-                        manifest,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    + "\n"
-                ).encode(),
-                exclusive=False,
+                installed_root / name,
+                payload,
+                exclusive=True,
             )
-            load_control_plane(default_config_paths(installed_root))
-        except BaseException:
-            if committed is not None:
-                restore_stack_files(
-                    model_path,
-                    binding_path,
-                    expected_stack_digest=committed[0],
-                    expected_binding_digest=committed[1],
-                    original_model=prior_model,
-                    original_binding=prior_binding,
-                )
-            for name in reversed(created):
-                try:
-                    (installed_root / name).unlink()
-                except FileNotFoundError:
-                    pass
-            if prior_model is None and committed is None:
-                try:
-                    model_path.unlink()
-                except FileNotFoundError:
-                    pass
-            raise
+            _activation_checkpoint(f"bootstrap:{name}")
+        if initial_model is not None:
+            _atomic_private(
+                model_path,
+                initial_model,
+                exclusive=True,
+            )
+            _activation_checkpoint("bootstrap:model-stacks.json")
+
+        current = load_stack_snapshot(model_path, binding_path)
+        bindings = load_stack_bindings(binding_path)
+        validate_stack_bindings(
+            current.stacks,
+            bindings,
+            load_accounts(installed_root / "accounts.json"),
+        )
+        planned = planned_stack_digests(
+            current, current.stacks, bindings
+        )
+        planned_state = _state_document(*planned)
+        if planned_state not in activation_states:
+            activation_states.append(planned_state)
+        manifest["phase"] = "saving"
+        _write_manifest(snapshot_root, manifest)
+        _activation_checkpoint("saving")
+
+        save_stack(current, current.stacks, bindings)
+        _activation_checkpoint("stack-saved")
+        saved = load_stack_snapshot(model_path, binding_path)
+        if (saved.stack_digest, saved.binding_digest) != planned:
+            raise InstallControlPlaneError(
+                "installed stack state differs from the activation plan"
+            )
+        manifest["phase"] = "committed"
+        _write_manifest(snapshot_root, manifest)
+        _activation_checkpoint("committed")
+        load_control_plane(default_config_paths(installed_root))
 
 
 def rollback(installed_root: Path, snapshot_root: Path) -> None:
     installed_root = Path(installed_root).resolve(strict=True)
     snapshot_root = Path(snapshot_root).resolve(strict=True)
-    manifest = json.loads(
-        _private_bytes(
-            snapshot_root / "installed-control-plane.json",
-            "installer control-plane manifest",
-            MAX_CONFIG_BYTES,
-        )
-    )
+    if not _lexists(snapshot_root / _MANIFEST_NAME):
+        return
+    manifest = _load_manifest(snapshot_root)
     with control_plane_transaction(installed_root):
+        if manifest["phase"] == "rolledBack":
+            return
         original_model = (
             _private_bytes(
                 snapshot_root / "installed-model-stacks.data",
@@ -385,16 +496,88 @@ def rollback(installed_root: Path, snapshot_root: Path) -> None:
             if manifest["priorBindingPresent"]
             else None
         )
-        restore_stack_files(
-            installed_root / "model-stacks.json",
-            installed_root / "stack-bindings.json",
-            expected_stack_digest=manifest["committedModelDigest"],
-            expected_binding_digest=manifest["committedBindingDigest"],
-            original_model=original_model,
-            original_binding=original_binding,
-        )
-        for name in reversed(manifest["bootstrapCreated"]):
+        prior_state = manifest.get("priorState")
+        if not isinstance(prior_state, dict):
+            raise InstallControlPlaneError(
+                "installer control-plane manifest is invalid"
+            )
+        conflicts: list[str] = []
+        model_path = installed_root / "model-stacks.json"
+        binding_path = installed_root / "stack-bindings.json"
+        try:
+            current_state = _state_document(
+                *_stack_state(model_path, binding_path)
+            )
+            if current_state != prior_state:
+                if current_state not in manifest["activationStates"]:
+                    conflicts.append(
+                        "model-stacks.json/stack-bindings.json"
+                    )
+                elif current_state["modelDigest"] is None:
+                    conflicts.append(
+                        "model-stacks.json/stack-bindings.json"
+                    )
+                else:
+                    restore_stack_files(
+                        model_path,
+                        binding_path,
+                        expected_stack_digest=current_state[
+                            "modelDigest"
+                        ],
+                        expected_binding_digest=current_state[
+                            "bindingDigest"
+                        ],
+                        original_model=original_model,
+                        original_binding=original_binding,
+                    )
+        except StackStoreError:
+            conflicts.append("model-stacks.json/stack-bindings.json")
+
+        bootstrap_digests = manifest["bootstrapDigests"]
+        if not isinstance(bootstrap_digests, dict):
+            raise InstallControlPlaneError(
+                "installer control-plane manifest is invalid"
+            )
+        for name in reversed(_BOOTSTRAP_FILES):
+            if name not in bootstrap_digests:
+                continue
+            expected = bootstrap_digests[name]
+            if not isinstance(expected, str):
+                raise InstallControlPlaneError(
+                    "installer control-plane manifest is invalid"
+                )
+            path = installed_root / name
             try:
-                (installed_root / name).unlink()
-            except FileNotFoundError:
-                pass
+                guard = (
+                    account_registry_lock(path)
+                    if name == "accounts.json"
+                    else nullcontext()
+                )
+                with guard:
+                    observed = _optional_digest(
+                        path, name, MAX_CONFIG_BYTES
+                    )
+                    if observed is None:
+                        continue
+                    if observed != expected:
+                        conflicts.append(name)
+                        continue
+                    path.unlink()
+            except (AccountError, InstallControlPlaneError):
+                conflicts.append(name)
+                continue
+
+        manifest["conflicts"] = conflicts
+        manifest["phase"] = (
+            "rollbackConflict" if conflicts else "rolledBack"
+        )
+        _write_manifest(snapshot_root, manifest)
+        if conflicts:
+            if len(conflicts) == 1:
+                detail = f"{conflicts[0]} changed after installer activation"
+            else:
+                detail = (
+                    "control-plane files changed after installer activation: "
+                    + ", ".join(conflicts)
+                )
+            raise InstallControlPlaneError(detail)

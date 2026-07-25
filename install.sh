@@ -1756,11 +1756,11 @@ if [[ "$endpoint_lock_owned" == true ]]; then
     workflow_die "endpoint model publication lock could not be released"
   endpoint_lock_owned=false
 fi
+config_transaction_active=true
 activate_installed_control_plane \
   "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
   "$candidate_config_root" "$INSTALLED_CONFIG_ROOT" "$snapshot_dir" || \
   workflow_die "installed Orichum control plane could not be committed"
-config_transaction_active=true
 ORICHUM_CONFIG_ROOT="$INSTALLED_CONFIG_ROOT"
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
 export ORICHUM_CONFIG_HOME

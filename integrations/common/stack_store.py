@@ -664,6 +664,31 @@ def save_stack(
     )
 
 
+def planned_stack_digests(
+    snapshot: StackSnapshot,
+    updated: NormalizedStacks,
+    updated_bindings: StackBindings,
+) -> tuple[str, str | None]:
+    """Return the exact digests that ``save_stack`` will publish."""
+    if not isinstance(snapshot, StackSnapshot):
+        raise StackStoreError("stack snapshot is invalid")
+    model_payload = _serialize_stacks(updated)
+    binding_payload = (
+        None
+        if snapshot.binding_digest is None
+        and not updated_bindings.candidate_accounts
+        else _serialize_bindings(updated_bindings)
+    )
+    return (
+        hashlib.sha256(model_payload).hexdigest(),
+        (
+            None
+            if binding_payload is None
+            else hashlib.sha256(binding_payload).hexdigest()
+        ),
+    )
+
+
 def restore_stack_files(
     model_path: Path,
     binding_path: Path,
