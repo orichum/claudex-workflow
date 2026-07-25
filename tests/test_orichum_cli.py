@@ -1387,6 +1387,7 @@ class OrichumGraphCliTests(unittest.TestCase):
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 if sys.argv[1:] == ["--version"]:
@@ -1401,8 +1402,18 @@ if (repository / "fail-graphify").exists():
     raise SystemExit(7)
 output = Path(os.environ["GRAPHIFY_OUT"])
 output.mkdir(parents=True, exist_ok=True)
+commit = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 (output / "graph.json").write_text(
-    json.dumps({"nodes": [{"id": repository.name, "source_file": "source.py"}]}),
+    json.dumps({
+        "built_at_commit": commit,
+        "nodes": [{"id": repository.name, "source_file": "source.py"}],
+        "links": [],
+    }),
     encoding="utf-8",
 )
 """,

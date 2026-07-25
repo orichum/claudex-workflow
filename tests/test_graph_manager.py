@@ -673,11 +673,19 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
 output = Path(os.environ["GRAPHIFY_OUT"])
-call = [*sys.argv[1:], os.environ["GRAPHIFY_OUT"]]
+repository = Path(sys.argv[2])
+commit = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+call = [*sys.argv[1:], os.environ["GRAPHIFY_OUT"], os.getcwd()]
 with Path(os.environ["GRAPH_TEST_CALLS"]).open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(call) + "\\n")
 failure = Path(os.environ["GRAPH_TEST_FAIL"])
@@ -703,9 +711,37 @@ with counter.open("r+", encoding="ascii") as state:
 time.sleep(float(os.environ.get("GRAPH_TEST_DELAY", "0")))
 output.mkdir(parents=True, exist_ok=True)
 (output / "graph.json").write_text(
-    json.dumps({"nodes": [{"id": "node", "source_file": "source.py"}]}),
+    json.dumps({
+        "built_at_commit": commit,
+        "nodes": [{"id": "node", "source_file": "source.py"}],
+        "links": [],
+    }),
     encoding="utf-8",
 )
+mutation = os.environ.get("GRAPH_TEST_MUTATION")
+if mutation == "dirty":
+    (repository / "source.py").write_text(
+        "print('changed during graphify')\\n", encoding="utf-8"
+    )
+elif mutation == "commit":
+    (repository / "source.py").write_text(
+        "print('committed during graphify')\\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "source.py"], check=True
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(repository),
+            "commit", "-qm", "Concurrent commit",
+        ],
+        check=True,
+    )
+elif mutation == "checkout":
+    subprocess.run(
+        ["git", "-C", str(repository), "checkout", "-q", "HEAD^"],
+        check=True,
+    )
 with counter.open("r+", encoding="ascii") as state:
     fcntl.flock(state, fcntl.LOCK_EX)
     value = int(state.read() or "0") - 1
@@ -760,6 +796,7 @@ with counter.open("r+", encoding="ascii") as state:
         )
         self.assertTrue(Path(self.calls()[0][3]).is_absolute())
         self.assertNotEqual(Path(self.calls()[0][3]), result.output_dir)
+        self.assertEqual(Path(self.calls()[0][4]), self.repository)
         self.assertTrue(result.output_dir.is_absolute())
         self.assertFalse((self.repository / "graphify-out").exists())
 
@@ -774,6 +811,57 @@ with counter.open("r+", encoding="ascii") as state:
         self.assertEqual(first.action, "created")
         self.assertEqual(second.action, "updated")
         self.assertEqual(self.calls()[-1][0], "update")
+
+    def test_commit_during_graphify_does_not_activate_old_target(self):
+        original = self.target()
+
+        with mock.patch.dict(
+            os.environ, {"GRAPH_TEST_MUTATION": "commit"}, clear=False
+        ), self.assertRaisesRegex(GraphError, "retry"):
+            sync_graph(
+                self.repository, self.data_root, graphify=self.graphify
+            )
+
+        current = self.target()
+        self.assertNotEqual(current.revision, original.revision)
+        self.assertFalse(original.output_dir.exists())
+        self.assertFalse(current.output_dir.exists())
+
+    def test_checkout_during_graphify_does_not_activate_old_target(self):
+        (self.repository / "source.py").write_text(
+            "print('second commit')\n", encoding="utf-8"
+        )
+        self._git("add", "source.py")
+        self._git("commit", "-qm", "Second commit")
+        original = self.target()
+
+        with mock.patch.dict(
+            os.environ, {"GRAPH_TEST_MUTATION": "checkout"}, clear=False
+        ), self.assertRaisesRegex(GraphError, "retry"):
+            sync_graph(
+                self.repository, self.data_root, graphify=self.graphify
+            )
+
+        current = self.target()
+        self.assertNotEqual(current.revision, original.revision)
+        self.assertFalse(original.output_dir.exists())
+        self.assertFalse(current.output_dir.exists())
+
+    def test_dirty_edit_during_graphify_does_not_activate_revision_target(self):
+        original = self.target()
+
+        with mock.patch.dict(
+            os.environ, {"GRAPH_TEST_MUTATION": "dirty"}, clear=False
+        ), self.assertRaisesRegex(GraphError, "retry"):
+            sync_graph(
+                self.repository, self.data_root, graphify=self.graphify
+            )
+
+        current = self.target()
+        self.assertEqual(original.kind, "revision")
+        self.assertEqual(current.kind, "working")
+        self.assertFalse(original.output_dir.exists())
+        self.assertFalse(current.output_dir.exists())
 
     def test_clean_revision_graph_is_shared_across_clones(self):
         first = sync_graph(
@@ -1011,9 +1099,15 @@ with counter.open("r+", encoding="ascii") as state:
             with self.subTest(source_file=source_file):
                 target = self.target()
                 target.output_dir.mkdir(parents=True, exist_ok=True)
+                target.output_dir.chmod(0o700)
                 target.graph_file.write_text(
                     json.dumps({
-                        "nodes": [{"id": "node", "source_file": source_file}]
+                        "built_at_commit": target.revision,
+                        "nodes": [{
+                            "id": "node",
+                            "source_file": source_file,
+                        }],
+                        "links": [],
                     }),
                     encoding="utf-8",
                 )
@@ -1031,6 +1125,99 @@ with counter.open("r+", encoding="ascii") as state:
                 )
                 self.assertEqual(inspect_graph(target).status, "invalid")
                 shutil.rmtree(target.output_dir)
+
+    def test_graph_validation_rejects_escaping_link_source_paths(self):
+        for source_file in ("/tmp/link.py", "../link.py"):
+            with self.subTest(source_file=source_file):
+                target = self.target()
+                target.output_dir.mkdir(parents=True, exist_ok=True)
+                target.output_dir.chmod(0o700)
+                target.graph_file.write_text(
+                    json.dumps({
+                        "built_at_commit": target.revision,
+                        "nodes": [{
+                            "id": "node",
+                            "source_file": "source.py",
+                        }],
+                        "links": [{
+                            "source": "node",
+                            "target": "node",
+                            "source_file": source_file,
+                        }],
+                    }),
+                    encoding="utf-8",
+                )
+                target.metadata_file.write_text(
+                    json.dumps({
+                        "schema_version": 1,
+                        "repository_identity": target.identity.key,
+                        "revision": target.revision,
+                        "state_id": target.state_id,
+                        "kind": target.kind,
+                        "built_at_commit": target.revision,
+                    }),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(inspect_graph(target).status, "invalid")
+                shutil.rmtree(target.output_dir)
+
+    def test_graph_validation_allows_absent_and_null_link_source_paths(self):
+        for link in (
+            {"source": "node", "target": "node"},
+            {"source": "node", "target": "node", "source_file": None},
+        ):
+            with self.subTest(link=link):
+                target = self.target()
+                target.output_dir.mkdir(parents=True, exist_ok=True)
+                target.output_dir.chmod(0o700)
+                target.graph_file.write_text(
+                    json.dumps({
+                        "built_at_commit": target.revision,
+                        "nodes": [{
+                            "id": "node",
+                            "source_file": "source.py",
+                        }],
+                        "links": [link],
+                    }),
+                    encoding="utf-8",
+                )
+                target.metadata_file.write_text(
+                    json.dumps({
+                        "schema_version": 1,
+                        "repository_identity": target.identity.key,
+                        "revision": target.revision,
+                        "state_id": target.state_id,
+                        "kind": target.kind,
+                        "built_at_commit": target.revision,
+                    }),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(inspect_graph(target).status, "current")
+                shutil.rmtree(target.output_dir)
+
+    def test_graph_provenance_requires_matching_40_hex_commit(self):
+        result = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        original = json.loads(result.graph_file.read_text(encoding="utf-8"))
+        cases = (None, "abc", "f" * 40)
+
+        for built_at_commit in cases:
+            with self.subTest(built_at_commit=built_at_commit):
+                graph = dict(original)
+                if built_at_commit is None:
+                    graph.pop("built_at_commit", None)
+                else:
+                    graph["built_at_commit"] = built_at_commit
+                result.graph_file.write_text(
+                    json.dumps(graph), encoding="utf-8"
+                )
+
+                self.assertEqual(
+                    inspect_graph(self.target()).status, "invalid"
+                )
 
     def test_built_at_commit_mismatch_is_stale(self):
         result = sync_graph(
@@ -1194,25 +1381,49 @@ with counter.open("r+", encoding="ascii") as state:
     def test_safe_legacy_migration_copies_then_removes_source(self):
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
+        target = self.target()
         (legacy / "graph.json").write_text(
             json.dumps({
-                "nodes": [{"id": "node", "source_file": "source.py"}]
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
             }),
             encoding="utf-8",
         )
-        target = self.target()
 
         self.assertTrue(migrate_legacy_graph(target))
         self.assertTrue(target.graph_file.is_file())
         self.assertFalse(legacy.exists())
         self.assertEqual(inspect_graph(target).status, "current")
 
+    def test_migration_rejects_wrong_graph_provenance_and_restores_source(self):
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        target = self.target()
+        original = json.dumps({
+            "built_at_commit": "f" * 40,
+            "nodes": [{"id": "node", "source_file": "source.py"}],
+            "links": [],
+        })
+        (legacy / "graph.json").write_text(original, encoding="utf-8")
+
+        with self.assertRaises(GraphError):
+            migrate_legacy_graph(target)
+
+        self.assertEqual(
+            (legacy / "graph.json").read_text(encoding="utf-8"), original
+        )
+        self.assertFalse(target.output_dir.exists())
+
     def test_migration_accepts_all_documented_graphify_outputs(self):
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
+        target = self.target()
         (legacy / "graph.json").write_text(
             json.dumps({
-                "nodes": [{"id": "node", "source_file": "source.py"}]
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
             }),
             encoding="utf-8",
         )
@@ -1235,7 +1446,7 @@ with counter.open("r+", encoding="ascii") as state:
         obsidian.mkdir()
         (obsidian / "index.md").write_text("# Graph\n", encoding="utf-8")
 
-        self.assertTrue(migrate_legacy_graph(self.target()))
+        self.assertTrue(migrate_legacy_graph(target))
 
     def test_unignored_legacy_output_migrates_once_to_revision_target(self):
         self._git("config", "core.excludesFile", os.devnull)
@@ -1244,14 +1455,17 @@ with counter.open("r+", encoding="ascii") as state:
         )
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
+        target = self.target()
         (legacy / "graph.json").write_text(
             json.dumps({
-                "nodes": [{"id": "node", "source_file": "source.py"}]
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
             }),
             encoding="utf-8",
         )
 
-        before = resolve_graph_target(self.repository, self.data_root)
+        before = target
         first = sync_graph(
             self.repository, self.data_root, graphify=self.graphify
         )
@@ -1358,13 +1572,15 @@ with counter.open("r+", encoding="ascii") as state:
     def test_failed_migration_activation_rolls_back_and_preserves_source(self):
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
+        target = self.target()
         (legacy / "graph.json").write_text(
             json.dumps({
-                "nodes": [{"id": "node", "source_file": "source.py"}]
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
             }),
             encoding="utf-8",
         )
-        target = self.target()
         original_replace = os.replace
 
         def fail_activation(source, destination):
@@ -1386,9 +1602,12 @@ with counter.open("r+", encoding="ascii") as state:
 
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
+        target = self.target()
         (legacy / "graph.json").write_text(
             json.dumps({
-                "nodes": [{"id": "node", "source_file": "source.py"}]
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
             }),
             encoding="utf-8",
         )
@@ -1407,25 +1626,60 @@ with counter.open("r+", encoding="ascii") as state:
             "integrations.common.graph_manager._copy_legacy_tree",
             side_effect=replace_source_after_open,
         ):
-            self.assertTrue(migrate_legacy_graph(self.target()))
+            self.assertTrue(migrate_legacy_graph(target))
 
         self.assertEqual(
             (legacy / "replacement.txt").read_text(encoding="utf-8"),
             "replacement\n",
         )
 
+    def test_migration_restores_source_when_binding_changes_after_copy(self):
+        import integrations.common.graph_manager as graph_manager
+
+        target = self.target()
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        (legacy / "graph.json").write_text(
+            json.dumps({
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
+        real_copy = graph_manager._copy_legacy_tree
+
+        def copy_then_dirty(source, destination):
+            hashes = real_copy(source, destination)
+            (self.repository / "source.py").write_text(
+                "print('dirty during migration')\n", encoding="utf-8"
+            )
+            return hashes
+
+        with mock.patch(
+            "integrations.common.graph_manager._copy_legacy_tree",
+            side_effect=copy_then_dirty,
+        ), self.assertRaisesRegex(GraphError, "retry"):
+            migrate_legacy_graph(target)
+
+        self.assertTrue(legacy.exists())
+        self.assertFalse(target.output_dir.exists())
+        self.assertEqual(self.target().kind, "working")
+
     def test_quarantine_cleanup_failure_rolls_back_and_retry_migrates(self):
         import integrations.common.graph_manager as graph_manager
 
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
+        target = self.target()
         (legacy / "graph.json").write_text(
             json.dumps({
-                "nodes": [{"id": "node", "source_file": "source.py"}]
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
             }),
             encoding="utf-8",
         )
-        target = self.target()
         real_rmtree = shutil.rmtree
         failed = False
 

@@ -277,6 +277,8 @@ def _status(repository: Path) -> bytes:
                 ".",
                 ":(exclude,top)graphify-out",
                 ":(exclude,top)graphify-out/**",
+                ":(exclude,top,glob).orichum-legacy-graphify-*",
+                ":(exclude,top,glob).orichum-legacy-graphify-*/**",
             ],
             check=False,
             capture_output=True,
@@ -781,15 +783,25 @@ def _read_json_file(path: Path, label: str) -> object:
             os.close(descriptor)
 
 
-def _validate_graph_file(graph_file: Path) -> int:
+def _validate_graph_file(graph_file: Path, revision: str) -> int:
     parsed = _read_json_file(graph_file, "Graphify graph")
     nodes = parsed.get("nodes") if isinstance(parsed, dict) else None
     if not isinstance(nodes, list) or not nodes:
         raise GraphError("Graphify graph is invalid")
-    for node in nodes:
-        if not isinstance(node, dict):
+    built_at_commit = parsed.get("built_at_commit")
+    if (
+        not isinstance(built_at_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", built_at_commit) is None
+        or built_at_commit != revision
+    ):
+        raise GraphError("Graphify graph provenance is invalid")
+    links = parsed.get("links", [])
+    if not isinstance(links, list):
+        raise GraphError("Graphify graph is invalid")
+    for entry in (*nodes, *links):
+        if not isinstance(entry, dict):
             raise GraphError("Graphify graph is invalid")
-        source_file = node.get("source_file")
+        source_file = entry.get("source_file")
         if source_file is None:
             continue
         if not isinstance(source_file, str) or not source_file:
@@ -861,7 +873,9 @@ def _write_metadata(target: GraphTarget, output_dir: Path) -> None:
 
 def _validate_output(target: GraphTarget, output_dir: Path) -> int:
     output_dir = _private_directory(output_dir, "Graph output")
-    node_count = _validate_graph_file(output_dir / "graph.json")
+    node_count = _validate_graph_file(
+        output_dir / "graph.json", target.revision
+    )
     metadata = _read_json_file(output_dir / "metadata.json", "Graph metadata")
     if not isinstance(metadata, dict):
         raise GraphError("Graph metadata is invalid")
@@ -1050,6 +1064,31 @@ def _target_data_root(target: GraphTarget) -> Path:
     return candidate
 
 
+def _require_current_binding(target: GraphTarget, data_root: Path) -> None:
+    current = resolve_graph_target(target.repository, data_root)
+    expected = (
+        target.repository,
+        target.identity.key,
+        target.revision,
+        target.kind,
+        target.state_id,
+        target.output_dir,
+    )
+    observed = (
+        current.repository,
+        current.identity.key,
+        current.revision,
+        current.kind,
+        current.state_id,
+        current.output_dir,
+    )
+    if observed != expected:
+        raise GraphError(
+            "Repository state changed during graph synchronization; retry "
+            "the command"
+        )
+
+
 def _activate_staged_output(staged: Path, active: Path) -> None:
     if not os.path.lexists(active):
         try:
@@ -1146,8 +1185,12 @@ def migrate_legacy_graph(target: GraphTarget) -> bool:
         source_hashes = _copy_legacy_tree(quarantined, staged)
         if source_hashes != _tree_hashes(staged):
             raise GraphError("Legacy Graphify output copy verification failed")
+        data_root = _target_data_root(target)
+        _require_current_binding(target, data_root)
+        _validate_graph_file(staged / "graph.json", target.revision)
         _write_metadata(target, staged)
         _validate_output(target, staged)
+        _require_current_binding(target, data_root)
         _activate_staged_output(staged, target.output_dir)
         activated = True
         try:
@@ -1205,6 +1248,7 @@ def _run_graphify(
     graphify: str,
     arguments: list[str],
     output_dir: Path,
+    repository: Path,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["GRAPHIFY_OUT"] = str(output_dir.absolute())
@@ -1214,6 +1258,7 @@ def _run_graphify(
             check=False,
             capture_output=True,
             text=True,
+            cwd=repository,
             env=environment,
         )
     except OSError as error:
@@ -1315,7 +1360,9 @@ def sync_graph(
         if progress is not None:
             progress(action)
         try:
-            completed = _run_graphify(graphify, arguments, output_dir)
+            completed = _run_graphify(
+                graphify, arguments, output_dir, target.repository
+            )
             if _not_applicable(completed) and action == "created":
                 shutil.rmtree(output_dir, ignore_errors=True)
                 prune_orphaned_working_graphs(target.identity, data_root)
@@ -1324,8 +1371,11 @@ def sync_graph(
                 return _result(target, "not-applicable", 0)
             if completed.returncode != 0:
                 raise _graphify_failure(completed)
+            _require_current_binding(target, data_root)
+            _validate_graph_file(output_dir / "graph.json", target.revision)
             _write_metadata(target, output_dir)
             node_count = _validate_output(target, output_dir)
+            _require_current_binding(target, data_root)
             _activate_staged_output(output_dir, target.output_dir)
             prune_orphaned_working_graphs(target.identity, data_root)
             _install_graph_hooks(target.repository, progress)

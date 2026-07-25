@@ -387,6 +387,7 @@ class ContextPopulationExecutionTests(unittest.TestCase):
             """#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -426,14 +427,30 @@ if operation in {"extract", "update"}:
         print("found 0 code")
         print("graph is empty", file=sys.stderr)
         raise SystemExit(1)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     graph = Path(os.environ["GRAPHIFY_OUT"]) / "graph.json"
     graph.parent.mkdir(exist_ok=True)
     if repository.name == "invalid":
         graph.write_text("not json", encoding="utf-8")
     elif repository.name == "empty-nodes":
-        graph.write_text(json.dumps({"nodes": []}), encoding="utf-8")
+        graph.write_text(
+            json.dumps({"built_at_commit": commit, "nodes": [], "links": []}),
+            encoding="utf-8",
+        )
     else:
-        graph.write_text(json.dumps({"nodes": [{"id": "node"}]}), encoding="utf-8")
+        graph.write_text(
+            json.dumps({
+                "built_at_commit": commit,
+                "nodes": [{"id": "node"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
     raise SystemExit(0)
 
 if operation == "hook":
@@ -537,8 +554,16 @@ if operation == "hook":
         self.assertEqual(
             [call for call in calls if call["tool"] == "graphify"],
             [
-                {"tool": "graphify", "args": ["extract", str(api), "--code-only"], "cwd": str(Path.cwd())},
-                {"tool": "graphify", "args": ["extract", str(web), "--code-only"], "cwd": str(Path.cwd())},
+                {
+                    "tool": "graphify",
+                    "args": ["extract", str(api), "--code-only"],
+                    "cwd": str(api),
+                },
+                {
+                    "tool": "graphify",
+                    "args": ["extract", str(web), "--code-only"],
+                    "cwd": str(web),
+                },
             ],
         )
         self.assertLess(
@@ -629,10 +654,21 @@ if operation == "hook":
     def test_mempalace_mine_excludes_graphify_output_without_editing_repository(self):
         repository = self.root / "service"
         self.init_git(repository)
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         generated = repository / "graphify-out"
         generated.mkdir()
         (generated / "graph.json").write_text(
-            json.dumps({"nodes": [{"id": "generated"}]}), encoding="utf-8"
+            json.dumps({
+                "built_at_commit": revision,
+                "nodes": [{"id": "generated"}],
+                "links": [],
+            }),
+            encoding="utf-8",
         )
         source = repository / "service.py"
         source.write_text("print('source')\n", encoding="utf-8")
@@ -716,9 +752,22 @@ if operation == "hook":
     def test_existing_repository_local_graph_is_migrated(self):
         repository = self.root / "api"
         self.init_git(repository)
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         graph = repository / "graphify-out" / "graph.json"
         graph.parent.mkdir()
-        graph.write_text(json.dumps({"nodes": [{"id": "old"}]}), encoding="utf-8")
+        graph.write_text(
+            json.dumps({
+                "built_at_commit": revision,
+                "nodes": [{"id": "old"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
 
         result = self.populate()
 

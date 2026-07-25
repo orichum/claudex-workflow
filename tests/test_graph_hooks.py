@@ -655,12 +655,17 @@ class GraphHookTests(unittest.TestCase):
         graphify = self.root / "fake-graphify"
         graphify.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, os\n"
+            "import json, os, subprocess\n"
             "from pathlib import Path\n"
+            "commit = subprocess.run("
+            "['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, "
+            "text=True).stdout.strip()\n"
             "output = Path(os.environ['GRAPHIFY_OUT'])\n"
             "output.mkdir(parents=True, exist_ok=True)\n"
             "(output / 'graph.json').write_text("
-            "json.dumps({'nodes': [{'id': 'node', 'source_file': 'tracked.txt'}]}),"
+            "json.dumps({'built_at_commit': commit, "
+            "'nodes': [{'id': 'node', 'source_file': 'tracked.txt'}], "
+            "'links': []}),"
             " encoding='utf-8')\n",
             encoding="utf-8",
         )
