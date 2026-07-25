@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
+import stat
 import subprocess
 from typing import Literal
 from urllib.parse import quote, unquote, urlsplit
@@ -35,6 +37,24 @@ class GraphTarget:
     output_dir: Path
     graph_file: Path
     metadata_file: Path
+
+
+def _directory_without_symlink(
+    path: Path, label: str, *, require_private: bool = False
+) -> Path:
+    path = Path(path).absolute()
+    try:
+        observed = os.lstat(path)
+    except OSError as error:
+        raise GraphManagerError(f"{label} directory is unavailable") from error
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or (require_private and stat.S_IMODE(observed.st_mode) != 0o700)
+    ):
+        raise GraphManagerError(f"{label} directory is unsafe")
+    return path
 
 
 def _git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -131,7 +151,10 @@ def _configured_identity(repository: Path) -> str | None:
 def _remote_urls(repository: Path) -> list[str]:
     remotes = _git_text(repository, "remote").splitlines()
     if "origin" in remotes:
-        return [_git_text(repository, "remote", "get-url", "origin")]
+        result = _git(repository, "remote", "get-url", "--all", "origin")
+        if result.returncode != 0:
+            raise GraphManagerError("Repository remote cannot be read")
+        return [line for line in result.stdout.splitlines() if line.strip()]
     urls: list[str] = []
     for remote in remotes:
         result = _git(repository, "remote", "get-url", "--all", remote)
@@ -143,7 +166,7 @@ def _remote_urls(repository: Path) -> list[str]:
 
 def resolve_repository_identity(repository: Path) -> RepositoryIdentity:
     """Resolve an explicit, remote-derived, or persistent local identity."""
-    repository = Path(repository).resolve()
+    repository = _directory_without_symlink(repository, "Repository")
     configured = _configured_identity(repository)
     if configured is not None:
         return _identity_from_key(configured, None)
@@ -224,7 +247,7 @@ def _content_digest(repository: Path, relative: bytes) -> bytes | None:
 
 def working_tree_fingerprint(repository: Path) -> str:
     """Hash dirty status and changed or untracked regular-file contents."""
-    repository = Path(repository).resolve()
+    repository = _directory_without_symlink(repository, "Repository")
     status = _status(repository)
     digest = hashlib.sha256(status)
     for path in sorted(set(_status_paths(status))):
@@ -236,16 +259,39 @@ def working_tree_fingerprint(repository: Path) -> str:
     return digest.hexdigest()
 
 
+def _checkout_id(repository: Path) -> str:
+    result = _git(repository, "config", "--local", "--get", "orichum.checkoutIdentity")
+    if result.returncode == 0:
+        try:
+            return uuid.UUID(result.stdout.strip()).hex
+        except ValueError as error:
+            raise GraphManagerError("Persisted checkout identity is invalid") from error
+    checkout_id = uuid.uuid4().hex
+    result = _git(
+        repository,
+        "config",
+        "--local",
+        "orichum.checkoutIdentity",
+        checkout_id,
+    )
+    if result.returncode != 0:
+        raise GraphManagerError("Checkout identity cannot be persisted")
+    return checkout_id
+
+
 def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
     """Return the central Graphify location for this repository state."""
-    repository = Path(repository).resolve()
+    repository = _directory_without_symlink(repository, "Repository")
+    data_root = _directory_without_symlink(
+        data_root, "Graph data", require_private=True
+    )
     identity = resolve_repository_identity(repository)
     revision = _git_text(repository, "rev-parse", "HEAD")
     status = _status(repository)
-    root = Path(data_root) / "graphs" / identity.key
+    root = data_root / "graphs" / identity.key
     if status:
         fingerprint = working_tree_fingerprint(repository)
-        checkout_id = hashlib.sha256(str(repository).encode("utf-8")).hexdigest()[:16]
+        checkout_id = _checkout_id(repository)
         state_id = f"{checkout_id}-{fingerprint}"
         kind: Literal["revision", "working"] = "working"
         output_dir = root / "working" / state_id / "graphify-out"

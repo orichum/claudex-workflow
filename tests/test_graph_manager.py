@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from integrations.common.graph_manager import (
     GraphManagerError,
@@ -99,6 +101,17 @@ class GraphManagerTests(unittest.TestCase):
         self.assertEqual(target.kind, "working")
         self.assertIn("/working/", target.output_dir.as_posix())
 
+    def test_moving_an_unchanged_dirty_checkout_preserves_its_target(self) -> None:
+        (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        original = resolve_graph_target(self.first_clone, self.data_root)
+        moved = self.root / "moved-dirty-clone"
+        shutil.move(str(self.first_clone), moved)
+
+        after_movement = resolve_graph_target(moved, self.data_root)
+
+        self.assertEqual(original.state_id, after_movement.state_id)
+        self.assertEqual(original.output_dir, after_movement.output_dir)
+
     def test_changed_content_changes_dirty_fingerprint(self) -> None:
         tracked = self.first_clone / "tracked.txt"
         tracked.write_text("first change\n", encoding="utf-8")
@@ -127,6 +140,19 @@ class GraphManagerTests(unittest.TestCase):
         with self.assertRaises(GraphManagerError):
             resolve_repository_identity(repository)
 
+    def test_ambiguous_origin_fetch_urls_are_rejected(self) -> None:
+        self._git(
+            self.first_clone,
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            "https://example.com/other/project.git",
+        )
+
+        with self.assertRaises(GraphManagerError):
+            resolve_repository_identity(self.first_clone)
+
     def test_explicit_repository_identity_overrides_remote(self) -> None:
         self._git(
             self.first_clone,
@@ -138,6 +164,46 @@ class GraphManagerTests(unittest.TestCase):
         identity = resolve_repository_identity(self.first_clone)
 
         self.assertEqual(identity.key, "git.example.test/platform/service")
+
+    def test_repository_and_data_root_symlinks_are_rejected(self) -> None:
+        repository_link = self.root / "repository-link"
+        repository_link.symlink_to(self.first_clone, target_is_directory=True)
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(repository_link, self.data_root)
+
+        data_link = self.root / "data-link"
+        data_link.symlink_to(self.data_root, target_is_directory=True)
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, data_link)
+
+    def test_repository_symlink_is_rejected_by_identity_and_fingerprint(self) -> None:
+        repository_link = self.root / "repository-link"
+        repository_link.symlink_to(self.first_clone, target_is_directory=True)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_repository_identity(repository_link)
+        with self.assertRaises(GraphManagerError):
+            working_tree_fingerprint(repository_link)
+
+    def test_repository_and_data_root_require_current_user_ownership(self) -> None:
+        current_uid = os.getuid()
+        with mock.patch(
+            "integrations.common.graph_manager.os.getuid",
+            return_value=current_uid + 1,
+        ), self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, self.data_root)
+
+        with mock.patch(
+            "integrations.common.graph_manager.os.getuid",
+            side_effect=[current_uid, current_uid + 1],
+        ), self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, self.data_root)
+
+    def test_data_root_requires_private_permissions(self) -> None:
+        self.data_root.chmod(0o750)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, self.data_root)
 
     def test_repository_without_remote_persists_identity_after_movement(self) -> None:
         repository = self.root / "without-remote"
