@@ -24,6 +24,13 @@ from .model_routing import (
     validate_stack_name,
 )
 from .route_selection import Route, RouteError, route_chain
+from .stack_bindings import StackBindings
+from .stack_definition import (
+    NormalizedStacks,
+    StackCandidate,
+    StackDefinitionError,
+    normalize_model_stacks,
+)
 
 
 MAX_BINDING_BYTES = 1024 * 1024
@@ -372,31 +379,46 @@ def resolve_session_plan(
     requested_stack: str | None,
     health: Mapping[str, str],
     selection_ordinal: int,
+    bindings: StackBindings | None = None,
     available_models: Collection[str] | None = None,
 ) -> ResolvedSessionPlan:
     """Resolve and pin every controller/agent route for a new session."""
     try:
-        model_document = config["model-stacks"]
+        raw_stacks = config["model-stacks"]
+        stacks = (
+            raw_stacks
+            if isinstance(raw_stacks, NormalizedStacks)
+            else normalize_model_stacks(raw_stacks)
+        )
         provider_document = config["providers"]
-        stack_name = requested_stack or model_document["defaultStack"]
-        stack = model_document["stacks"][stack_name]
-        models = model_document["models"]
-    except (KeyError, TypeError) as failure:
+        stack_name = requested_stack or stacks.default_stack
+        stack = stacks.stacks[stack_name]
+    except (KeyError, TypeError, StackDefinitionError) as failure:
         raise LogicalSessionError("session model stack is incomplete") from failure
     try:
         stack_name = validate_stack_name(stack_name, "logical session stack")
     except RoutingError as failure:
         raise LogicalSessionError("session model stack is invalid") from failure
-    route_config = {"models": models, "providers": provider_document}
+    route_config = {
+        "models": stacks.models,
+        "providers": provider_document,
+    }
+    bindings = StackBindings({}) if bindings is None else bindings
 
-    def bind(model: str, ordinal: int) -> RouteBinding:
+    def bind_candidate(
+        candidate: StackCandidate, ordinal: int
+    ) -> RouteBinding:
         try:
-            metadata = models[model]
+            model = stacks.models[candidate.model]
+            locked = bindings.candidate_accounts.get(candidate.id)
             chain = route_chain(
                 accounts,
                 pools=pools,
-                family=metadata["family"],
-                logical_model=model,
+                family=model.family,
+                logical_model=candidate.model,
+                allowed_providers=candidate.providers,
+                locked_account_id=locked,
+                upstream_by_provider=model.routes,
                 config=route_config,
                 health=health,
                 selection_ordinal=ordinal,
@@ -404,7 +426,7 @@ def resolve_session_plan(
             )
         except (KeyError, TypeError, RouteError) as failure:
             raise LogicalSessionError(
-                f"no safe account route is available for {model}"
+                f"no safe account route is available for {candidate.model}"
             ) from failure
         return _parse_binding(
             {
@@ -413,14 +435,27 @@ def resolve_session_plan(
             }
         )
 
-    controller = bind(stack["controller"], selection_ordinal)
+    controller = None
+    controller_failures = []
+    for candidate in stack.controller:
+        try:
+            controller = bind_candidate(candidate, selection_ordinal)
+            break
+        except LogicalSessionError as failure:
+            controller_failures.append(failure)
+    if controller is None:
+        raise LogicalSessionError(
+            "no safe account route is available for controller"
+        ) from controller_failures[-1]
     agent_bindings: dict[str, RouteBinding] = {}
     for index, role in enumerate(ROLES, start=1):
         selected = None
         failures = []
-        for candidate in stack["agents"][role]:
+        for candidate in stack.agents[role]:
             try:
-                selected = bind(candidate, selection_ordinal + index)
+                selected = bind_candidate(
+                    candidate, selection_ordinal + index
+                )
                 break
             except LogicalSessionError as failure:
                 failures.append(failure)

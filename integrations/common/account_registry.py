@@ -328,7 +328,20 @@ def update_accounts(
     transform: Callable[[tuple[Account, ...]], Sequence[Account]],
 ) -> tuple[Account, ...]:
     path = Path(path)
-    parent = _private_parent(path)
+    with account_registry_lock(path):
+        before = _file_state(path)
+        current = load_accounts(path)
+        updated = _validate_accounts(tuple(transform(current)))
+        if _file_state(path) != before:
+            raise AccountError("account registry changed during update")
+        _write_registry(path, updated)
+        return updated
+
+
+@contextmanager
+def account_registry_lock(path: Path):
+    """Serialize an exact account-registry state check and mutation."""
+    parent = _private_parent(Path(path))
     lock_path = parent / ".accounts.lock"
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -345,13 +358,7 @@ def update_accounts(
         ):
             raise AccountError("account registry lock is unsafe")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-        before = _file_state(path)
-        current = load_accounts(path)
-        updated = _validate_accounts(tuple(transform(current)))
-        if _file_state(path) != before:
-            raise AccountError("account registry changed during update")
-        _write_registry(path, updated)
-        return updated
+        yield
     finally:
         os.close(lock_descriptor)
 

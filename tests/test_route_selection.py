@@ -67,6 +67,16 @@ class RouteSelectionTests(unittest.TestCase):
             original_priority=None,
         )
 
+    def constraints(self) -> dict[str, object]:
+        return {
+            "allowed_providers": ("anthropic", "antigravity"),
+            "locked_account_id": None,
+            "upstream_by_provider": {
+                "anthropic": "claude-opus",
+                "antigravity": "claude-opus",
+            },
+        }
+
     def test_eligible_routes_restrict_pool_provider_family_and_enabled_state(self) -> None:
         accounts = (
             self.account("primary"),
@@ -81,11 +91,23 @@ class RouteSelectionTests(unittest.TestCase):
             family="claude",
             logical_model="claude-opus",
             config=self.config,
+            **self.constraints(),
         )
 
         self.assertEqual([route.account_id for route in routes], ["primary"])
         self.assertEqual(routes[0].upstream_model, "oc-primary/claude-opus")
         self.assertNotIn("primary", routes[0].claudex_profile)
+
+        self.config["providers"]["fallbackRoutes"]["gpt"] = ["anthropic"]
+        with self.assertRaisesRegex(RouteError, "requested family"):
+            eligible_routes(
+                accounts,
+                pool="work",
+                family="gpt",
+                logical_model="claude-opus",
+                config=self.config,
+                **self.constraints(),
+            )
 
     def test_highest_healthy_priority_wins_before_lower_tiers(self) -> None:
         accounts = (
@@ -102,6 +124,7 @@ class RouteSelectionTests(unittest.TestCase):
             config=self.config,
             health={},
             selection_ordinal=0,
+            **self.constraints(),
         )
 
         self.assertEqual(selected.account_id, "primary")
@@ -124,6 +147,7 @@ class RouteSelectionTests(unittest.TestCase):
                 "shared-primary": "healthy",
             },
             selection_ordinal=0,
+            **self.constraints(),
         )
         self.assertEqual(selected.account_id, "work-secondary")
 
@@ -139,6 +163,7 @@ class RouteSelectionTests(unittest.TestCase):
                 "shared-primary": "healthy",
             },
             selection_ordinal=0,
+            **self.constraints(),
         )
         self.assertEqual(selected.account_id, "shared-primary")
 
@@ -156,6 +181,7 @@ class RouteSelectionTests(unittest.TestCase):
                 config=self.config,
                 health={},
                 selection_ordinal=ordinal,
+                **self.constraints(),
             ).account_id
             for ordinal in range(4)
         ]
@@ -172,6 +198,7 @@ class RouteSelectionTests(unittest.TestCase):
             family="claude",
             logical_model="claude-opus",
             config=self.config,
+            **self.constraints(),
         )
         self.assertEqual(
             [route.provider for route in first],
@@ -185,6 +212,7 @@ class RouteSelectionTests(unittest.TestCase):
             family="claude",
             logical_model="claude-opus",
             config=self.config,
+            **self.constraints(),
         )
         self.assertEqual(
             [route.provider for route in reversed_routes],
@@ -201,6 +229,7 @@ class RouteSelectionTests(unittest.TestCase):
                 config=self.config,
                 health={"primary": "quota"},
                 selection_ordinal=0,
+                **self.constraints(),
             )
 
     def test_route_chain_is_same_model_bounded_and_pool_ordered(self) -> None:
@@ -217,6 +246,7 @@ class RouteSelectionTests(unittest.TestCase):
             config=self.config,
             health={},
             selection_ordinal=0,
+            **self.constraints(),
         )
         self.assertEqual(
             [route.account_id for route in chain],
@@ -234,6 +264,7 @@ class RouteSelectionTests(unittest.TestCase):
                 health={},
                 selection_ordinal=0,
                 max_alternates=2,
+                **self.constraints(),
             )
 
     def test_route_chain_skips_provider_without_the_exact_live_model(
@@ -253,6 +284,7 @@ class RouteSelectionTests(unittest.TestCase):
             config=self.config,
             health={},
             selection_ordinal=0,
+            **self.constraints(),
             available_models={"oc-anthropic/claude-opus"},
         )
 
@@ -260,6 +292,72 @@ class RouteSelectionTests(unittest.TestCase):
             [route.account_id for route in chain],
             ["anthropic"],
         )
+
+    def test_provider_constraint_excludes_higher_priority_other_provider(self):
+        accounts = (
+            self.account(
+                "anthropic",
+                provider="anthropic",
+                pool="shared",
+                priority=100,
+            ),
+            self.account(
+                "antigravity",
+                provider="antigravity",
+                pool="shared",
+                priority=50,
+            ),
+        )
+        routes = eligible_routes(
+            accounts,
+            pool="shared",
+            family="claude",
+            logical_model="claude-opus",
+            config=self.config,
+            allowed_providers=("antigravity",),
+            locked_account_id=None,
+            upstream_by_provider={
+                "antigravity": "claude-opus-4-6-thinking"
+            },
+            available_models={
+                "oc-antigravity/claude-opus-4-6-thinking"
+            },
+        )
+        self.assertEqual([route.provider for route in routes], ["antigravity"])
+
+    def test_locked_account_disables_account_rollover(self):
+        accounts = (
+            self.account(
+                "primary",
+                provider="anthropic",
+                pool="shared",
+                priority=100,
+            ),
+            self.account(
+                "secondary",
+                provider="anthropic",
+                pool="shared",
+                priority=50,
+            ),
+        )
+        chain = route_chain(
+            accounts,
+            pools=("shared",),
+            family="claude",
+            logical_model="claude-sonnet",
+            config=self.config,
+            health={},
+            selection_ordinal=0,
+            allowed_providers=("anthropic",),
+            locked_account_id="secondary",
+            upstream_by_provider={"anthropic": "claude-sonnet-5"},
+            max_alternates=1,
+            available_models={
+                "oc-primary/claude-sonnet-5",
+                "oc-secondary/claude-sonnet-5",
+            },
+        )
+        self.assertEqual([route.account_id for route in chain], ["secondary"])
 
     def test_activation_revalidates_live_provider_disabled_state_and_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -286,6 +384,7 @@ class RouteSelectionTests(unittest.TestCase):
                 family="claude",
                 logical_model="claude-opus",
                 config=self.config,
+                **self.constraints(),
             )[0]
             write()
             validate_route_credential(

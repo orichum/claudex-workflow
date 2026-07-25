@@ -6,10 +6,139 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 
+# BEGIN installed control-plane transaction
+stage_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local installed_root="$3"
+  local candidate_root="$4"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$installed_root" "$candidate_root" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import stage
+
+stage(root, Path(sys.argv[2]), Path(sys.argv[3]))
+PY
+  )
+}
+
+activate_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local candidate_root="$3"
+  local installed_root="$4"
+  local snapshot_root="$5"
+  local install_lock_fd="$6"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$candidate_root" "$installed_root" \
+      "$snapshot_root" "$install_lock_fd" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import activate
+
+activate(
+    Path(sys.argv[2]),
+    Path(sys.argv[3]),
+    Path(sys.argv[4]),
+    int(sys.argv[5]),
+)
+PY
+  )
+}
+
+rollback_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local installed_root="$3"
+  local snapshot_root="$4"
+  local install_lock_fd="$5"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$installed_root" "$snapshot_root" \
+      "$install_lock_fd" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import rollback
+
+rollback(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))
+PY
+  )
+}
+
+recover_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local installed_root="$3"
+  local journal_root="$4"
+  local install_lock_fd="$5"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$installed_root" "$journal_root" \
+      "$install_lock_fd" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import recover
+
+recover(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))
+PY
+  )
+}
+
+finalize_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local journal_root="$3"
+  local install_lock_fd="$4"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$journal_root" "$install_lock_fd" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import finalize
+
+finalize(Path(sys.argv[2]), int(sys.argv[3]))
+PY
+  )
+}
+
+verify_committed_control_plane() {
+  local installed_root="$1"
+  local data_root="$2"
+  ORICHUM_CONFIG_HOME="$installed_root" \
+  ORICHUM_DATA_HOME="$data_root" \
+    "$WORKFLOW_ROOT/bin/orichum" config validate >/dev/null
+}
+# END installed control-plane transaction
+
+
 USER_BIN_DIR="${USER_BIN_DIR:-$HOME/.local/bin}"
 WORKFLOW_DATA_ROOT="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || \
   workflow_die "refusing unsafe ORICHUM_DATA_HOME"
 ORICHUM_CONFIG_ROOT="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
+INSTALLED_CONFIG_ROOT="$ORICHUM_CONFIG_ROOT"
 case "$ORICHUM_CONFIG_ROOT" in
   /*) ;;
   *) workflow_die "ORICHUM_CONFIG_HOME must be an absolute path" ;;
@@ -48,6 +177,12 @@ done
 install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state" "$ORICHUM_CONFIG_ROOT"
 acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
+control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"
+recover_installed_control_plane \
+  python3 "$WORKFLOW_ROOT" \
+  "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
+  "$WORKFLOW_LOCK_FD" || \
+  workflow_die "unfinished Orichum control-plane activation could not be recovered"
 
 case "$(uname -s)" in
   Darwin)
@@ -187,19 +322,14 @@ ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
 export ORICHUM_PYTHON_VALIDATED
 export ORICHUM_INSTALL_BOOTSTRAP=false
 
-for control_file in \
-    model-stacks.json projects.json providers.json plugins.json runtime.json \
-    controller-policy.md; do
-  if [[ ! -e "$ORICHUM_CONFIG_ROOT/$control_file" ]]; then
-    install -m 0600 "$WORKFLOW_ROOT/config/$control_file" \
-      "$ORICHUM_CONFIG_ROOT/$control_file"
-  fi
-done
-if [[ ! -e "$ORICHUM_CONFIG_ROOT/accounts.json" ]]; then
-  printf '{"schemaVersion":2,"accounts":[]}\n' \
-    >"$ORICHUM_CONFIG_ROOT/accounts.json"
-  chmod 0600 "$ORICHUM_CONFIG_ROOT/accounts.json"
-fi
+candidate_config_root="$installer_temp/control-plane"
+stage_installed_control_plane \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+  "$INSTALLED_CONFIG_ROOT" "$candidate_config_root" || \
+  workflow_die "installed Orichum control plane could not be staged"
+ORICHUM_CONFIG_ROOT="$candidate_config_root"
+ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
+export ORICHUM_CONFIG_HOME
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
 ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
   "$WORKFLOW_ROOT/bin/orichum" config validate >/dev/null || \
@@ -1069,6 +1199,14 @@ rollback_install_transaction() {
     fi
   fi
 
+  if [[ "${config_transaction_active:-false}" == true ]]; then
+    rollback_installed_control_plane \
+      "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+      "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
+      "$WORKFLOW_LOCK_FD" || \
+      rollback_ready=false
+  fi
+
   if [[ "${python_transaction_active:-false}" == true ]]; then
     rollback_python_activation || rollback_ready=false
   fi
@@ -1154,6 +1292,7 @@ rollback_install_transaction() {
 
 WORKFLOW_ROLLBACK_HANDLER=rollback_install_transaction
 WORKFLOW_TRANSACTION_ACTIVE=true
+config_transaction_active=false
 
 endpoint_lock_token="$$:$RANDOM:$RANDOM"
 acquire_endpoint_config_lock \
@@ -1677,14 +1816,18 @@ if [[ "$endpoint_lock_owned" == true ]]; then
     workflow_die "endpoint model publication lock could not be released"
   endpoint_lock_owned=false
 fi
-cliproxy_transaction_active=false
-headroom_transaction_active=false
-claudex_proxy_transaction_active=false
-claudex_proxy_runtime_mutated=false
-endpoint_transaction_active=false
-private_tools_transaction_active=false
-python_transaction_active=false
-WORKFLOW_TRANSACTION_ACTIVE=false
+config_transaction_active=true
+activate_installed_control_plane \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+  "$candidate_config_root" "$INSTALLED_CONFIG_ROOT" \
+  "$control_plane_journal" "$WORKFLOW_LOCK_FD" || \
+  workflow_die "installed Orichum control plane could not be committed"
+ORICHUM_CONFIG_ROOT="$INSTALLED_CONFIG_ROOT"
+ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
+export ORICHUM_CONFIG_HOME
+verify_committed_control_plane \
+  "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" || \
+  workflow_die "committed Orichum control plane is invalid"
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
@@ -1737,3 +1880,16 @@ else
   ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
     "$USER_BIN_DIR/orichum" doctor
 fi
+finalize_installed_control_plane \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$control_plane_journal" \
+  "$WORKFLOW_LOCK_FD" || \
+  workflow_die "installed Orichum control-plane journal could not be finalized"
+cliproxy_transaction_active=false
+headroom_transaction_active=false
+claudex_proxy_transaction_active=false
+claudex_proxy_runtime_mutated=false
+endpoint_transaction_active=false
+private_tools_transaction_active=false
+python_transaction_active=false
+config_transaction_active=false
+WORKFLOW_TRANSACTION_ACTIVE=false

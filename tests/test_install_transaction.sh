@@ -209,23 +209,55 @@ rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'remove_orichum_python_generation' "$ROOT/install.sh"
+rg -Fq 'from integrations.common.install_control_plane import activate' \
+  "$ROOT/install.sh"
+rg -Fq 'from integrations.common.install_control_plane import rollback' \
+  "$ROOT/install.sh"
+rg -Fq 'rollback_installed_control_plane' "$ROOT/install.sh"
 rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
 rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
 settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
   "$ROOT/install.sh" | cut -d: -f1)"
 transaction_end_line="$(rg -n -F 'WORKFLOW_TRANSACTION_ACTIVE=false' \
   "$ROOT/install.sh" | tail -1 | cut -d: -f1)"
-[[ "$settings_line" -gt "$transaction_end_line" ]]
+[[ "$settings_line" -lt "$transaction_end_line" ]]
 
 python3 - "$ROOT/install.sh" <<'PY'
 import sys
 
 source = open(sys.argv[1], encoding="utf-8").read()
+workflow = open(
+    str(__import__("pathlib").Path(sys.argv[1]).parent / "lib/workflow.sh"),
+    encoding="utf-8",
+).read()
+acquire_start = workflow.index("acquire_workflow_lock()")
+acquire_end = workflow.index("release_workflow_lock()", acquire_start)
+acquire = workflow[acquire_start:acquire_end]
+if (
+    'hold_workflow_lock_descriptor "$lock_dir"' not in acquire
+    or 'exec 9<"$lock_dir"' not in workflow
+):
+    raise SystemExit("workflow lock acquisition does not retain lock FD 9")
+for helper in (
+    "recover_installed_control_plane()",
+    "activate_installed_control_plane()",
+    "rollback_installed_control_plane()",
+    "finalize_installed_control_plane()",
+):
+    start = source.index(helper)
+    end = source.index("\n}", start)
+    if "install_lock_fd" not in source[start:end]:
+        raise SystemExit(f"{helper} does not pass the held installer lock FD")
+if source.count('"$WORKFLOW_LOCK_FD"') < 4:
+    raise SystemExit("journal helper call sites omit the held installer lock FD")
 start = source.index("rollback_install_transaction()")
 end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
 rollback = source[start:end]
 
 stop_route = rollback.index("claudex_proxy_runtime_mutated")
+restore_installed_config = rollback.index(
+    "rollback_installed_control_plane"
+)
 restore_python = rollback.index("rollback_python_activation")
 restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
@@ -236,6 +268,7 @@ restore_route = rollback.index("restore_claudex_proxy_service")
 restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
+    < restore_installed_config
     < restore_python
     < restore_private_tools
     < restore_cliproxy
@@ -244,6 +277,60 @@ if not (
     < restore_headroom
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
+
+stage_config = source.index(
+    "stage_installed_control_plane",
+    source.index("candidate_config_root="),
+)
+acquire_install_lock = source.index(
+    'acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"'
+)
+stable_journal = source.index(
+    'control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"'
+)
+recover_config = source.index(
+    "recover_installed_control_plane", stable_journal
+)
+validate_candidate = source.index(
+    '"$WORKFLOW_ROOT/bin/orichum" config validate',
+    stage_config,
+)
+activate_config = source.index(
+    "activate_installed_control_plane", validate_candidate
+)
+config_active = source.rindex(
+    "config_transaction_active=true", validate_candidate, activate_config
+)
+transaction_end = source.index(
+    "WORKFLOW_TRANSACTION_ACTIVE=false", activate_config
+)
+if not (
+    acquire_install_lock
+    < stable_journal
+    < recover_config
+    < stage_config
+    < validate_candidate
+    < config_active
+    < activate_config
+    < transaction_end
+):
+    raise SystemExit(
+        "installed control plane activation is not rollback-active before "
+        "its first mutation"
+    )
+if '"$candidate_config_root" "$INSTALLED_CONFIG_ROOT" \\\n  "$control_plane_journal"' not in source:
+    raise SystemExit("activation does not use the stable control-plane journal")
+finalize_config = source.index(
+    "finalize_installed_control_plane", activate_config
+)
+config_inactive = source.index(
+    "config_transaction_active=false", finalize_config
+)
+if not activate_config < finalize_config < config_inactive < transaction_end:
+    raise SystemExit(
+        "stable control-plane journal is not finalized before disarming "
+        "rollback"
+    )
 
 if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:
     raise SystemExit("final Headroom readiness is not tied to usable route state")

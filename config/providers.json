@@ -5,25 +5,38 @@
       "type": "anthropic",
       "transport": "cliproxy",
       "authType": "claude",
-      "families": ["claude"]
+      "families": ["claude"],
+      "familyPrefixes": {
+        "claude": ["claude-"]
+      }
     },
     "antigravity": {
       "type": "openai-compatible",
       "transport": "cliproxy",
       "authType": "antigravity",
-      "families": ["claude", "google"]
+      "families": ["claude", "google"],
+      "familyPrefixes": {
+        "claude": ["claude-"],
+        "google": ["gemini-"]
+      }
     },
     "kimi": {
       "type": "openai-compatible",
       "transport": "cliproxy",
       "authType": "kimi",
-      "families": ["kimi"]
+      "families": ["kimi"],
+      "familyPrefixes": {
+        "kimi": ["kimi-"]
+      }
     },
     "openai": {
       "type": "openai-compatible",
       "transport": "cliproxy",
       "authType": "codex",
-      "families": ["gpt"]
+      "families": ["gpt"],
+      "familyPrefixes": {
+        "gpt": ["gpt-"]
+      }
     }
   },
   "accountPools": {

@@ -11,10 +11,11 @@ failures=0
 ok() { printf 'OK   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
 
+orichum_python="$(orichum_python_entrypoint "$data_root")"
 python_identity=
 if python_identity="$(
     validate_orichum_python \
-      "$data_root" "$(orichum_python_entrypoint "$data_root")" 2>/dev/null
+      "$data_root" "$orichum_python" 2>/dev/null
   )"; then
   IFS=$'\t' read -r python_version python_realpath <<<"$python_identity"
   ok "Private CPython 3.14 is active ($python_version; $python_realpath)"
@@ -94,6 +95,43 @@ if [[ -f "$config_root/accounts.json" && \
   ok 'named-account registry is private'
 else
   fail 'named-account registry is missing or unsafe'
+fi
+
+stack_bindings="$config_root/stack-bindings.json"
+if [[ ! -e "$stack_bindings" && ! -L "$stack_bindings" ]]; then
+  ok 'model-stack candidates use automatic provider account selection'
+elif [[ -n "$python_identity" ]] && \
+     [[ -f "$stack_bindings" && ! -L "$stack_bindings" ]] && \
+     [[ "$(path_mode "$stack_bindings")" == 600 ]] && \
+     PYTHONDONTWRITEBYTECODE=1 "$orichum_python" -I -B - \
+       "$WORKFLOW_ROOT" "$config_root" >/dev/null 2>&1 <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+config_root = Path(sys.argv[2]).resolve(strict=True)
+sys.path.insert(0, str(root))
+
+from integrations.common.account_registry import load_accounts
+from integrations.common.orichum_config import (
+    default_config_paths,
+    load_control_plane,
+)
+from integrations.common.stack_bindings import load_stack_bindings
+from integrations.common.stack_definition import normalize_model_stacks
+from integrations.common.stack_store import validate_stack_bindings
+
+control = load_control_plane(default_config_paths(config_root))
+validate_stack_bindings(
+    normalize_model_stacks(control.documents["model-stacks"]),
+    load_stack_bindings(config_root / "stack-bindings.json"),
+    load_accounts(config_root / "accounts.json"),
+)
+PY
+then
+  ok 'model-stack account locks are valid and private'
+else
+  fail 'model-stack account locks are invalid or unsafe'
 fi
 
 if [[ -f "$data_root/cliproxy-management.key" && \

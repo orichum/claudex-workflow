@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import contextvars
 import fcntl
 import json
 import os
@@ -11,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Optional
 
 from .context_population import (
     PopulationError,
@@ -38,6 +39,9 @@ _CONTEXT_OPTIONAL_KEYS = {
     "accountPools",
     "githubAccount",
 }
+_CONTROL_PLANE_ROOT: contextvars.ContextVar[Path | None] = (
+    contextvars.ContextVar("control_plane_root", default=None)
+)
 
 
 def _context_object(value: object, label: str) -> dict:
@@ -512,23 +516,53 @@ def _read_context_document(
     return document
 
 
-def _write_context_document(config_path: Path, document: dict) -> None:
-    config_path = Path(config_path)
-    mode = stat.S_IMODE(config_path.stat().st_mode)
+def _fsync_context_directory(parent: Path) -> None:
+    descriptor = os.open(
+        parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+_MAX_CONTEXT_RECOVERY_BYTES = 2 * 1024 * 1024
+
+
+def _context_recovery_paths(
+    config_path: Path,
+) -> tuple[Path, Path]:
+    parent = config_path.parent
+    return (
+        parent / f".{config_path.name}.transaction.json",
+        parent / f".{config_path.name}.transaction.original",
+    )
+
+
+def _stage_context_bytes(
+    path: Path, payload: bytes, mode: int
+) -> Path:
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{config_path.name}.", dir=config_path.parent
+        prefix=f".{path.name}.", dir=path.parent
     )
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, config_path)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError(
+                    "configuration write made no progress"
+                )
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        return temporary
     except BaseException:
-        os.close(descriptor) if _descriptor_is_open(descriptor) else None
+        if descriptor >= 0:
+            os.close(descriptor)
         try:
             temporary.unlink()
         except FileNotFoundError:
@@ -536,21 +570,370 @@ def _write_context_document(config_path: Path, document: dict) -> None:
         raise
 
 
+def _private_context_artifact(
+    path: Path, label: str
+) -> bytes | None:
+    try:
+        details = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ContextError(f"{label} is unavailable") from error
+    if (
+        stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISREG(details.st_mode)
+        or details.st_uid != os.getuid()
+        or stat.S_IMODE(details.st_mode) != 0o600
+    ):
+        raise ContextError(f"{label} is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ContextError(f"{label} is unavailable") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (opened.st_dev, opened.st_ino)
+            != (details.st_dev, details.st_ino)
+        ):
+            raise ContextError(f"{label} changed while opening")
+        chunks = []
+        size = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(
+                    65536,
+                    _MAX_CONTEXT_RECOVERY_BYTES + 1 - size,
+                ),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > _MAX_CONTEXT_RECOVERY_BYTES:
+                raise ContextError(f"{label} is too large")
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ):
+            raise ContextError(f"{label} changed while reading")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _replace_private_context_artifact(
+    path: Path, payload: bytes
+) -> None:
+    temporary = _stage_context_bytes(path, payload, 0o600)
+    try:
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _context_marker_payload(
+    state: str, original_mode: int
+) -> bytes:
+    return (
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "state": state,
+                "originalMode": original_mode,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_context_marker(
+    config_path: Path, state: str, original_mode: int
+) -> None:
+    if state not in {"pending", "committed"}:
+        raise ContextError("configuration transaction state is invalid")
+    marker, _ = _context_recovery_paths(config_path)
+    _replace_private_context_artifact(
+        marker, _context_marker_payload(state, original_mode)
+    )
+
+
+def _load_context_marker(
+    config_path: Path,
+) -> tuple[str, int] | None:
+    marker, _ = _context_recovery_paths(config_path)
+    content = _private_context_artifact(
+        marker, "configuration transaction marker"
+    )
+    if content is None:
+        return None
+    try:
+        raw = json.loads(content.decode("utf-8"))
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as error:
+        raise ContextError(
+            "configuration transaction marker is invalid"
+        ) from error
+    if (
+        not isinstance(raw, dict)
+        or set(raw)
+        != {"schemaVersion", "state", "originalMode"}
+        or type(raw["schemaVersion"]) is not int
+        or raw["schemaVersion"] != 1
+        or raw["state"] not in {"pending", "committed"}
+        or type(raw["originalMode"]) is not int
+        or raw["originalMode"] < 0
+        or raw["originalMode"] > 0o777
+    ):
+        raise ContextError(
+            "configuration transaction marker is invalid"
+        )
+    return raw["state"], raw["originalMode"]
+
+
+def _remove_context_recovery_artifacts(
+    config_path: Path,
+) -> None:
+    marker, original = _context_recovery_paths(config_path)
+    if _private_context_artifact(
+        original, "configuration recovery file"
+    ) is not None:
+        original.unlink()
+    if _private_context_artifact(
+        marker, "configuration transaction marker"
+    ) is not None:
+        marker.unlink()
+    _fsync_context_directory(config_path.parent)
+
+
+def _cleanup_context_recovery(config_path: Path) -> None:
+    try:
+        _remove_context_recovery_artifacts(config_path)
+    except BaseException:
+        pass
+
+
+def _restore_context_original(
+    config_path: Path, original_mode: int
+) -> None:
+    _, original = _context_recovery_paths(config_path)
+    content = _private_context_artifact(
+        original, "configuration recovery file"
+    )
+    if content is None:
+        raise ContextError(
+            "configuration recovery file is unavailable"
+        )
+    temporary = _stage_context_bytes(
+        config_path, content, original_mode
+    )
+    try:
+        os.replace(temporary, config_path)
+        temporary = None
+        _fsync_context_directory(config_path.parent)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _finish_context_recovery(
+    config_path: Path, original_mode: int
+) -> None:
+    _write_context_marker(
+        config_path, "committed", original_mode
+    )
+    _fsync_context_directory(config_path.parent)
+    _cleanup_context_recovery(config_path)
+
+
+def _recover_context_transaction(config_path: Path) -> None:
+    marker = _load_context_marker(config_path)
+    _, original = _context_recovery_paths(config_path)
+    if marker is None:
+        if _private_context_artifact(
+            original, "configuration recovery file"
+        ) is not None:
+            _cleanup_context_recovery(config_path)
+        return
+    state, original_mode = marker
+    if state == "pending":
+        _restore_context_original(config_path, original_mode)
+        _finish_context_recovery(config_path, original_mode)
+        return
+    _cleanup_context_recovery(config_path)
+
+
+def _rollback_context_transaction(
+    config_path: Path, original_mode: int
+) -> None:
+    try:
+        _write_context_marker(
+            config_path, "pending", original_mode
+        )
+        _restore_context_original(config_path, original_mode)
+        _finish_context_recovery(config_path, original_mode)
+    except BaseException as error:
+        raise ContextError(
+            "configuration transaction rollback failed"
+        ) from error
+
+
+def _write_context_document(config_path: Path, document: dict) -> None:
+    config_path = Path(config_path)
+    mode = stat.S_IMODE(config_path.stat().st_mode)
+    original = config_path.read_bytes()
+    payload = (json.dumps(document, indent=2) + "\n").encode("utf-8")
+    temporary: Path | None = None
+    recovery_ready = False
+    durable_commit = False
+    try:
+        temporary = _stage_context_bytes(
+            config_path, payload, mode
+        )
+        _, original_path = _context_recovery_paths(config_path)
+        _replace_private_context_artifact(
+            original_path, original
+        )
+        _fsync_context_directory(config_path.parent)
+        _write_context_marker(config_path, "pending", mode)
+        recovery_ready = True
+        _fsync_context_directory(config_path.parent)
+        os.replace(temporary, config_path)
+        temporary = None
+        _fsync_context_directory(config_path.parent)
+        _write_context_marker(config_path, "committed", mode)
+        _fsync_context_directory(config_path.parent)
+        durable_commit = True
+    except BaseException as error:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except BaseException:
+                pass
+        if recovery_ready:
+            try:
+                _rollback_context_transaction(config_path, mode)
+            except BaseException as rollback_error:
+                raise ContextError(
+                    "configuration transaction rollback failed"
+                ) from rollback_error
+        else:
+            _cleanup_context_recovery(config_path)
+        if isinstance(error, ContextError):
+            raise
+        raise ContextError(
+            "configuration durability could not be confirmed"
+        ) from error
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except BaseException:
+                pass
+    if durable_commit:
+        _cleanup_context_recovery(config_path)
+
+
 @contextlib.contextmanager
-def _context_lock(config_path: Path):
+def control_plane_transaction(config_root: Path):
+    """Serialize mutations that depend on documents in one config root."""
+    root = Path(config_root).resolve(strict=False)
+    active_root = _CONTROL_PLANE_ROOT.get()
+    if active_root is not None:
+        if active_root != root:
+            raise ContextError(
+                "nested control-plane transactions require one config root"
+            )
+        yield
+        return
+
     descriptor = None
     try:
-        descriptor = os.open(Path(config_path).parent, os.O_RDONLY)
+        descriptor = os.open(root, os.O_RDONLY)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
     except OSError as error:
         if descriptor is not None:
             os.close(descriptor)
         raise ContextError("configuration lock is unavailable") from error
+    token = _CONTROL_PLANE_ROOT.set(root)
     try:
         yield
     finally:
+        _CONTROL_PLANE_ROOT.reset(token)
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _context_lock(config_path: Path):
+    config_path = Path(config_path)
+    with control_plane_transaction(config_path.parent):
+        _recover_context_transaction(config_path)
+        yield
+
+
+def assign_stack_to_context(
+    config_path: Path,
+    launch_dir: Path,
+    stack: str,
+    known_stacks: Collection[str],
+) -> Path:
+    if stack not in known_stacks:
+        raise ContextError("model stack is unknown")
+    config_path = Path(config_path)
+    home = Path.home()
+    with _context_lock(config_path):
+        document = _read_context_document(config_path, home)
+        resolved = resolve_control_plane_context(
+            document, launch_dir, home=home
+        )
+        route = resolved.get("route")
+        if not isinstance(route, dict):
+            raise ContextError(
+                "current directory has no project context"
+            )
+        matched = Path(route["contextRootReal"])
+        for context in document["contexts"]:
+            root = _context_root(
+                context["root"], home, must_exist=True
+            )
+            if root.resolve() == matched:
+                context["modelStack"] = stack
+                break
+        else:
+            raise ContextError(
+                "matched project context disappeared"
+            )
+        validate_config_document(document, home)
+        _write_context_document(config_path, document)
+        return matched
 
 
 def _context_root(value: str, home: Path, *, must_exist: bool) -> Path:
@@ -779,12 +1162,9 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     home = Path.home()
 
     try:
-        routing = _load_context_routing(parsed.routing_config)
-        routing_stacks = routing["stacks"]
-        account_pools = _load_account_pool_names(parsed.providers_config)
         requested_stack = getattr(parsed, "model_stack", None)
         if requested_stack is not None:
-            requested_stack = _model_stack(requested_stack, routing_stacks)
+            requested_stack = _model_stack(requested_stack)
             parsed.model_stack = requested_stack
         if (
             parsed.command == "update"
@@ -797,6 +1177,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
 
         if parsed.command == "add":
             with _context_lock(parsed.config):
+                routing = _load_context_routing(parsed.routing_config)
+                routing_stacks = routing["stacks"]
+                account_pools = _load_account_pool_names(
+                    parsed.providers_config
+                )
                 document = _read_context_document(parsed.config, home)
                 candidate, context, root, palace = _build_add_candidate(
                     document, parsed, home, account_pools
@@ -814,6 +1199,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             )
 
             with _context_lock(parsed.config):
+                routing = _load_context_routing(parsed.routing_config)
+                routing_stacks = routing["stacks"]
+                account_pools = _load_account_pool_names(
+                    parsed.providers_config
+                )
                 current = _read_context_document(parsed.config, home)
                 final_candidate = {
                     **(
@@ -833,6 +1223,11 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
 
         if parsed.command == "populate":
             with _context_lock(parsed.config):
+                routing = _load_context_routing(parsed.routing_config)
+                routing_stacks = routing["stacks"]
+                account_pools = _load_account_pool_names(
+                    parsed.providers_config
+                )
                 document = _read_context_document(
                     parsed.config, home, routing_stacks
                     , account_pools
@@ -857,12 +1252,13 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             print(render_population_result(result), end="")
             return 0
 
-        lock = (
-            _context_lock(parsed.config)
-            if parsed.command not in ("list", "validate")
-            else contextlib.nullcontext()
-        )
+        lock = _context_lock(parsed.config)
         with lock:
+            routing = _load_context_routing(parsed.routing_config)
+            routing_stacks = routing["stacks"]
+            account_pools = _load_account_pool_names(
+                parsed.providers_config
+            )
             document = _read_context_document(
                 parsed.config,
                 home,

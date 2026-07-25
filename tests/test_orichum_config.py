@@ -43,28 +43,38 @@ class OrichumConfigTests(unittest.TestCase):
     def valid_documents(self) -> dict[str, object]:
         models = {
             "controller/main": {
-                "provider": "openai",
                 "family": "gpt",
-                "upstream": "controller/main",
+                "routes": {"openai": "controller/main"},
             }
         }
         agents = {}
-        for role in ROLES:
+        for ordinal, role in enumerate(ROLES, start=2):
             model = f"agent/{role}"
             models[model] = {
-                "provider": "openai",
                 "family": "gpt",
-                "upstream": model,
+                "routes": {"openai": model},
             }
-            agents[role] = [model]
+            agents[role] = [
+                {
+                    "id": f"oc-c-{ordinal:016x}",
+                    "model": model,
+                    "providers": ["openai"],
+                }
+            ]
         return {
             "model-stacks": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "defaultStack": "balanced",
                 "models": models,
                 "stacks": {
                     "balanced": {
-                        "controller": "controller/main",
+                        "controller": [
+                            {
+                                "id": "oc-c-0000000000000001",
+                                "model": "controller/main",
+                                "providers": ["openai"],
+                            }
+                        ],
                         "agents": agents,
                     }
                 },
@@ -90,12 +100,14 @@ class OrichumConfigTests(unittest.TestCase):
                         "transport": "cliproxy",
                         "authType": "codex",
                         "families": ["gpt"],
+                        "familyPrefixes": {"gpt": ["gpt-"]},
                     },
                     "anthropic": {
                         "type": "anthropic",
                         "transport": "cliproxy",
                         "authType": "claude",
                         "families": ["claude"],
+                        "familyPrefixes": {"claude": ["claude-"]},
                     },
                 },
                 "accountPools": {
@@ -228,9 +240,14 @@ class OrichumConfigTests(unittest.TestCase):
         self.documents = self.valid_documents()
         self.write_documents()
         self.assert_invalid(
-            lambda documents: documents["model-stacks"]["models"][
-                "controller/main"
-            ].update({"provider": "missing"})
+            lambda documents: (
+                documents["model-stacks"]["models"]["controller/main"].update(
+                    {"routes": {"missing": "controller/main"}}
+                ),
+                documents["model-stacks"]["stacks"]["balanced"]["controller"][
+                    0
+                ].update({"providers": ["missing"]}),
+            )
         )
         self.documents = self.valid_documents()
         self.write_documents()
@@ -267,6 +284,38 @@ class OrichumConfigTests(unittest.TestCase):
                 "families"
             ].append("future")
         )
+
+    def test_rejects_invalid_provider_family_prefixes(self) -> None:
+        mutations = (
+            lambda provider: provider["familyPrefixes"].update(
+                {"future": ["future-"]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": []}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": [""]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": ["gpt/", "gpt-"]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": ["gpt-", "gpt-"]}
+            ),
+            lambda provider: provider["familyPrefixes"].update(
+                {"gpt": ["gpt-", "gpt-5"]}
+            ),
+            lambda provider: provider.update({"familyPrefixes": {}}),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.documents = self.valid_documents()
+                mutation(
+                    self.documents["providers"]["providers"]["openai"]
+                )
+                self.write_documents()
+                with self.assertRaises(ConfigError):
+                    self.load()
 
     def test_rejects_project_pools_that_cannot_route_the_selected_stack(self) -> None:
         self.assert_invalid(

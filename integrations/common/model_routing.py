@@ -58,6 +58,15 @@ def _exact_object(value: object, keys: set[str], label: str) -> dict:
     return value
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RoutingError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def validate_stack_name(value: object, label: str = "stack name") -> str:
     if not isinstance(value, str) or not _STACK_PATTERN.fullmatch(value):
         raise RoutingError(f"{label} is invalid")
@@ -130,10 +139,13 @@ def load_routing(path: Path) -> dict[str, object]:
     return validate_routing_document(raw)
 
 
-def load_routing_view(path: Path) -> dict[str, object]:
+def load_routing_view(path: Path) -> object:
     """Load the routing portion of either routing.json or model-stacks.json."""
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_object,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RoutingError("model routing could not be parsed") from error
     if isinstance(raw, dict) and set(raw) == {
@@ -142,11 +154,17 @@ def load_routing_view(path: Path) -> dict[str, object]:
         "models",
         "stacks",
     }:
-        raw = {
-            "schemaVersion": raw["schemaVersion"],
-            "defaultStack": raw["defaultStack"],
-            "stacks": raw["stacks"],
-        }
+        if raw["schemaVersion"] == 1 and raw["models"] == {}:
+            return validate_routing_document(
+                {
+                    "schemaVersion": raw["schemaVersion"],
+                    "defaultStack": raw["defaultStack"],
+                    "stacks": raw["stacks"],
+                }
+            )
+        from .stack_definition import normalize_model_stacks
+
+        return normalize_model_stacks(raw)
     return validate_routing_document(raw)
 
 
@@ -170,10 +188,55 @@ def load_catalog(path: Path) -> tuple[str, ...]:
 
 
 def resolve_effective(
-    routing: Mapping[str, object],
+    routing: object,
     catalogue: Sequence[str],
     requested_stack: Optional[str] = None,
 ) -> EffectiveStack:
+    from .stack_definition import NormalizedStacks
+
+    available = set(catalogue)
+    if isinstance(routing, NormalizedStacks):
+        name = requested_stack or routing.default_stack
+        if name not in routing.stacks:
+            raise RoutingError(f"model stack {name!r} is missing")
+        stack = routing.stacks[name]
+        controller_models = tuple(
+            candidate.model for candidate in stack.controller
+        )
+        controller = next(
+            (model for model in controller_models if model in available),
+            None,
+        )
+        if controller is None:
+            raise ModelAvailabilityError(
+                f"stack {name} controller has no available candidate: "
+                + ", ".join(controller_models)
+            )
+        candidates = {
+            role: tuple(
+                candidate.model for candidate in stack.agents[role]
+            )
+            for role in ROLES
+        }
+        selected = {}
+        for role in ROLES:
+            selected_model = next(
+                (
+                    model
+                    for model in candidates[role]
+                    if model in available
+                ),
+                None,
+            )
+            if selected_model is None:
+                raise ModelAvailabilityError(
+                    f"stack {name} role {role} has no available candidate: "
+                    + ", ".join(candidates[role])
+                )
+            selected[role] = selected_model
+        return EffectiveStack(name, controller, candidates, selected)
+    if not isinstance(routing, Mapping):
+        raise RoutingError("model routing is invalid")
     name = requested_stack or str(routing["defaultStack"])
     stacks = routing["stacks"]
     if not isinstance(stacks, Mapping) or name not in stacks:
@@ -181,7 +244,6 @@ def resolve_effective(
     stack = stacks[name]
     if not isinstance(stack, Mapping):
         raise RoutingError(f"model stack {name!r} is invalid")
-    available = set(catalogue)
     controller = str(stack["controller"])
     if controller not in available:
         raise ModelAvailabilityError(
@@ -269,7 +331,21 @@ def _selected_routes(effective: Optional[EffectiveStack]) -> dict[str, list[str]
 def _configured_models(
     routing: Mapping[str, object], requested_stack: Optional[str]
 ) -> set[str]:
+    from .stack_definition import NormalizedStacks, StackDefinition
+
     name = requested_stack or str(routing["defaultStack"])
+    if isinstance(routing, NormalizedStacks):
+        stack = routing.stacks.get(name)
+        if not isinstance(stack, StackDefinition):
+            return set()
+        return {
+            candidate.model
+            for candidates in (
+                stack.controller,
+                *stack.agents.values(),
+            )
+            for candidate in candidates
+        }
     stacks = routing["stacks"]
     if not isinstance(stacks, Mapping) or name not in stacks:
         return set()

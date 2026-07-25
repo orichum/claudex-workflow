@@ -51,7 +51,7 @@ from .orichum_sessions import (
     load_logical_session,
     resolve_session_plan,
 )
-from .model_routing import EffectiveStack, ROLES
+from .model_routing import EffectiveStack, ROLES, RoutingError
 from .project_context import ContextError, resolve_control_plane_context
 from .provider_credentials import (
     CredentialError,
@@ -59,6 +59,20 @@ from .provider_credentials import (
     resolve_credential_ref,
 )
 from .route_selection import RouteError, validate_route_credential
+from .stack_bindings import (
+    StackBindingError,
+    StackBindings,
+    load_stack_bindings,
+    stack_binding_transaction,
+)
+from .stack_definition import normalize_model_stacks
+from .stack_catalog import (
+    CatalogError,
+    fetch_live_catalog,
+    project_live_catalog,
+)
+from .stack_store import StackStoreError
+from .stack_wizard import run_stack_wizard
 from .session_config import (
     SessionError,
     SessionPaths,
@@ -178,13 +192,15 @@ def _context_list(config: ResolvedConfig) -> str:
 
 
 def _model_list(config: ResolvedConfig) -> str:
-    models = config.documents["model-stacks"]["models"]
+    models = normalize_model_stacks(
+        config.documents["model-stacks"]
+    ).models
     rows = [
         (
             model,
-            metadata["provider"],
-            metadata["family"],
-            metadata["upstream"],
+            ", ".join(metadata.routes),
+            metadata.family,
+            ", ".join(metadata.routes.values()),
         )
         for model, metadata in sorted(models.items())
     ]
@@ -192,32 +208,136 @@ def _model_list(config: ResolvedConfig) -> str:
 
 
 def _stack_list(config: ResolvedConfig) -> str:
-    document = config.documents["model-stacks"]
-    default = document["defaultStack"]
+    document = normalize_model_stacks(config.documents["model-stacks"])
+    default = document.default_stack
     rows = [
-        (name, "yes" if name == default else "—", stack["controller"])
-        for name, stack in sorted(document["stacks"].items())
+        (
+            name,
+            "yes" if name == default else "—",
+            ", ".join(candidate.model for candidate in stack.controller),
+        )
+        for name, stack in sorted(document.stacks.items())
     ]
     return _render_table(("STACK", "DEFAULT", "CONTROLLER"), rows)
 
 
+def _stack_available(
+    paths: Mapping[str, Path], config: ResolvedConfig
+) -> str:
+    _verify_runtime(paths)
+    ports = _runtime_service_ports(paths)
+    accounts = load_accounts(paths["config"] / "accounts.json")
+    validate_account_bindings(accounts, config.documents["providers"])
+    routing = normalize_model_stacks(config.documents["model-stacks"])
+    catalog = project_live_catalog(
+        fetch_live_catalog(ports["cliproxyPort"]),
+        accounts,
+        routing.models,
+        config.documents["providers"],
+    )
+    rows = [
+        (
+            choice.provider,
+            choice.family,
+            choice.upstream,
+            ", ".join(choice.account_names),
+            "selectable",
+        )
+        for choice in catalog.choices
+    ]
+    rows.extend(
+        (
+            model.provider,
+            "unclassified",
+            model.upstream,
+            ", ".join(model.account_names),
+            "not selectable",
+        )
+        for model in catalog.unclassified
+    )
+    return _render_table(
+        ("PROVIDER", "FAMILY", "MODEL", "ACCOUNTS", "STATUS"),
+        sorted(rows, key=lambda row: (row[0], row[1], row[2], row[3])),
+    )
+
+
+def _stack_show(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    name: str,
+) -> str:
+    document = normalize_model_stacks(config.documents["model-stacks"])
+    stack = document.stacks.get(name)
+    if stack is None:
+        available = ", ".join(sorted(document.stacks))
+        raise CliError(
+            f"model stack is not configured: {name}; "
+            f"available stacks: {available}"
+        )
+    binding_path = paths["config"] / "stack-bindings.json"
+    bindings = (
+        load_stack_bindings(binding_path)
+        if binding_path.exists()
+        else StackBindings({})
+    )
+    locked_ids = set(bindings.candidate_accounts.values())
+    accounts = (
+        {
+            account.id: account.name
+            for account in load_accounts(
+                paths["config"] / "accounts.json"
+            )
+            if account.state == "active"
+        }
+        if locked_ids
+        else {}
+    )
+    rows = []
+    for role, candidates in (
+        ("controller", stack.controller),
+        *((role, stack.agents[role]) for role in ROLES),
+    ):
+        for ordinal, candidate in enumerate(candidates, 1):
+            locked = bindings.candidate_accounts.get(candidate.id)
+            rows.append(
+                (
+                    role,
+                    str(ordinal),
+                    candidate.model,
+                    ", ".join(candidate.providers),
+                    (
+                        accounts.get(locked, "Unavailable named account")
+                        if locked is not None
+                        else "Automatic within provider"
+                    ),
+                )
+            )
+    return _render_table(
+        ("ROLE", "CANDIDATE", "MODEL", "PROVIDER", "ACCOUNT POLICY"),
+        rows,
+    )
+
+
 def _resolve_stack(config: ResolvedConfig, requested: str | None) -> dict[str, object]:
-    document = config.documents["model-stacks"]
-    stack_name = requested or document["defaultStack"]
+    document = normalize_model_stacks(config.documents["model-stacks"])
+    stack_name = requested or document.default_stack
     try:
-        stack = document["stacks"][stack_name]
+        stack = document.stacks[stack_name]
     except KeyError as error:
-        available = ", ".join(sorted(document["stacks"]))
+        available = ", ".join(sorted(document.stacks))
         raise CliError(
             f"model stack is not configured: {stack_name}; "
             f"available stacks: {available}"
         ) from error
     return {
         "stack": stack_name,
-        "controller": stack["controller"],
-        "configuredCandidates": stack["agents"],
+        "controller": stack.controller[0].model,
+        "configuredCandidates": {
+            role: [candidate.model for candidate in stack.agents[role]]
+            for role in ROLES
+        },
         "agents": {
-            role: candidates[0] for role, candidates in stack["agents"].items()
+            role: stack.agents[role][0].model for role in ROLES
         },
     }
 
@@ -497,16 +617,23 @@ def _validate_live_models(
 ) -> None:
     if available is None:
         available = _live_models(paths)
-    bindings = (controller, *(agents[role] for role in ROLES))
-    required = {
-        route.upstream_model
-        for binding in bindings
+    bindings = (
+        ("controller", controller),
+        *((role, agents[role]) for role in ROLES),
+    )
+    missing = {
+        (role, route.logical_model)
+        for role, binding in bindings
         for route in (binding.primary, *binding.fallbacks)
+        if route.upstream_model not in available
     }
-    missing = sorted(required - available)
     if missing:
         raise CliError(
-            "bound model routes are not live: " + ", ".join(missing)
+            "bound model routes are not live for: "
+            + ", ".join(
+                f"{role} ({model})"
+                for role, model in sorted(missing)
+            )
         )
 
 
@@ -534,6 +661,9 @@ def _prepare_new_session(
         requested_stack=route["modelStack"],
         health={},
         selection_ordinal=ordinal,
+        bindings=load_stack_bindings(
+            paths["config"] / "stack-bindings.json"
+        ),
         available_models=available,
     )
     _validate_plan_routes(
@@ -689,6 +819,9 @@ def _prepare_fork(
             requested_stack=requested_stack,
             health={},
             selection_ordinal=int.from_bytes(os.urandom(8), "big"),
+            bindings=load_stack_bindings(
+                paths["config"] / "stack-bindings.json"
+            ),
             available_models=available,
         )
         controller = plan.controller
@@ -753,6 +886,7 @@ def _mutate_account(
     config: ResolvedConfig,
 ) -> None:
     registry = paths["config"] / "accounts.json"
+    bindings_path = paths["config"] / "stack-bindings.json"
     provider_document = config.documents["providers"]
     auth_dir = paths["data"] / "auth"
     management_endpoint = None
@@ -853,7 +987,11 @@ def _mutate_account(
             )
 
     action = parsed.account_command
-    with account_transaction(registry), credential_metadata_transaction(auth_dir):
+    with (
+        stack_binding_transaction(bindings_path) as binding_transaction,
+        account_transaction(registry),
+        credential_metadata_transaction(auth_dir),
+    ):
         if action == "add":
             providers = provider_document["providers"]
             pools = provider_document["accountPools"]
@@ -906,6 +1044,42 @@ def _mutate_account(
             synchronize(account)
         elif action == "remove":
             current = find_account(load_accounts(registry), parsed.selector)
+            stacks = normalize_model_stacks(
+                config.documents["model-stacks"]
+            )
+            usage = {
+                candidate.id: (stack_name, role)
+                for stack_name, stack in stacks.stacks.items()
+                for role, candidates in (
+                    ("controller", stack.controller),
+                    *((name, stack.agents[name]) for name in ROLES),
+                )
+                for candidate in candidates
+            }
+            stack_bindings = binding_transaction.load()
+            current_bindings = StackBindings(
+                {
+                    candidate: account
+                    for candidate, account in (
+                        stack_bindings.candidate_accounts.items()
+                    )
+                    if candidate in usage
+                }
+            )
+            if current_bindings != stack_bindings:
+                current_bindings = binding_transaction.save(
+                    current_bindings,
+                    expected_digest=binding_transaction.digest(),
+                )
+            for candidate, account in (
+                current_bindings.candidate_accounts.items()
+            ):
+                if account == current.id:
+                    stack_name, role = usage[candidate]
+                    raise CliError(
+                        "account cannot be removed: bound by "
+                        f"stack {stack_name} role {role}"
+                    )
             if current.state == "pending-remove":
                 synchronize(current)
                 return
@@ -1581,6 +1755,16 @@ def build_parser() -> argparse.ArgumentParser:
     resolve = model_action.add_parser("resolve")
     resolve.add_argument("stack", nargs="?")
 
+    stack = commands.add_parser("stack")
+    stack_action = stack.add_subparsers(
+        dest="stack_command", required=True
+    )
+    stack_action.add_parser("available")
+    stack_action.add_parser("list")
+    show_stack = stack_action.add_parser("show")
+    show_stack.add_argument("name")
+    stack_action.add_parser("configure")
+
     provider = commands.add_parser("provider")
     provider_action = provider.add_subparsers(
         dest="provider_command", required=True
@@ -1667,6 +1851,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             context_arguments = [parsed.context_command]
             context_arguments.extend(getattr(parsed, "arguments", ()))
             return _run_external("orichum-context", context_arguments)
+        if (
+            parsed.command == "stack"
+            and parsed.stack_command == "configure"
+            and (not sys.stdin.isatty() or not sys.stdout.isatty())
+        ):
+            raise CliError(
+                "stack configuration requires an interactive terminal"
+            )
         paths, config = _load()
         if parsed.command == "provider" and parsed.provider_command == "login":
             return _run_external("orichum-login", list(parsed.arguments))
@@ -1749,6 +1941,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command == "context":
             print(_context_list(config), end="")
             return 0
+        if parsed.command == "stack":
+            if parsed.stack_command == "available":
+                print(_stack_available(paths, config), end="")
+                return 0
+            if parsed.stack_command == "list":
+                print(_stack_list(config), end="")
+                return 0
+            if parsed.stack_command == "show":
+                print(
+                    _stack_show(paths, config, parsed.name),
+                    end="",
+                )
+                return 0
+            return run_stack_wizard(
+                paths, config, launch_dir=Path.cwd()
+            )
         if parsed.command == "models":
             if parsed.models_command == "list":
                 print(_model_list(config), end="")
@@ -1777,6 +1985,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (
         AccountError,
+        CatalogError,
         CliError,
         ConfigError,
         ContextError,
@@ -1785,7 +1994,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         ManagementError,
         OSError,
         RouteError,
+        RoutingError,
         SessionError,
+        StackBindingError,
+        StackStoreError,
     ) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

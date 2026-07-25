@@ -131,6 +131,31 @@ stacks="$(
 rg -Fq 'STACK' <<<"$stacks"
 rg -Fq 'balanced' <<<"$stacks"
 
+stack_list="$(
+  ORICHUM_CONFIG_HOME="$ROOT/config" \
+  ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" stack list
+)"
+rg -Fq 'STACK' <<<"$stack_list"
+rg -Fq 'balanced' <<<"$stack_list"
+stack_show="$(
+  ORICHUM_CONFIG_HOME="$ROOT/config" \
+  ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" stack show balanced
+)"
+rg -Fq 'ACCOUNT POLICY' <<<"$stack_show"
+rg -Fq 'Automatic within provider' <<<"$stack_show"
+if ORICHUM_CONFIG_HOME="$ROOT/config" \
+    ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" stack configure \
+    >"$fixture/noninteractive-stack.stdout" \
+    2>"$fixture/noninteractive-stack.stderr"; then
+  printf 'non-interactive stack mutation unexpectedly succeeded\n' >&2
+  exit 1
+fi
+rg -Fq 'stack configuration requires an interactive terminal' \
+  "$fixture/noninteractive-stack.stderr"
+
 contexts="$(
   ORICHUM_CONFIG_HOME="$ROOT/config" \
   ORICHUM_DATA_HOME="$fixture/data" \
@@ -140,6 +165,10 @@ rg -Fq 'ACCOUNT POOLS' <<<"$contexts"
 rg -Fq 'MCP_DOCKER' "$ROOT/README.md"
 rg -Fq 'orichum fork' "$ROOT/README.md"
 rg -Fq 'orichum models stacks' "$ROOT/README.md"
+rg -Fq 'orichum stack available' "$ROOT/README.md"
+rg -Fq 'orichum stack configure' "$ROOT/README.md"
+rg -Fq 'orichum stack list' "$ROOT/README.md"
+rg -Fq 'orichum stack show heavy' "$ROOT/README.md"
 rg -Fq 'TARGET_STACK' "$ROOT/README.md"
 if rg -Fq 'claude-heavy' "$ROOT/README.md" || \
    rg -Fq 'google-heavy' "$ROOT/README.md"; then
@@ -154,6 +183,11 @@ rg -Fq \
 rg -Fq 'Claudex template is pending provider login' "$ROOT/doctor.sh"
 rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
+rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
+rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
+rg -Fq \
+  'Account display names are shown only by explicit account-management and stack' \
+  "$ROOT/README.md"
 rg -Fq 'validate_orichum_python' \
   "$ROOT/bin/orichum-runtime-ready"
 for parallel_health_contract in \
@@ -196,8 +230,13 @@ for required_contract in \
     'systemctl --user show orichum-headroom.service --property=ExecStart --value' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
+    'tests/test_live_stack_routes.sh' \
+    'systemd-container:' \
+    'ubuntu:24.04' \
+    '--privileged' \
+    'loginctl enable-linger orichum' \
     'Verify idempotent upgrade'; do
-  rg -Fq "$required_contract" "$amd64_workflow"
+  rg -Fq -- "$required_contract" "$amd64_workflow"
 done
 if sed -n '/>>"[$]GITHUB_PATH"/,+3p' "$amd64_workflow" | \
     rg -Fq '$ORICHUM_DATA_HOME/headroom/bin'; then
@@ -238,6 +277,7 @@ for required_contract in \
     'launchctl print "gui/$(id -u)/io.orichum.route-proxy"' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
+    'tests/test_live_stack_routes.sh' \
     'Verify idempotent upgrade' \
     'Clean up launch agents'; do
   rg -Fq "$required_contract" "$macos_workflow"
