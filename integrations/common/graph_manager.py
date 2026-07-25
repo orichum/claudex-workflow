@@ -214,8 +214,9 @@ def _remote_urls(repository: Path) -> list[str]:
     return urls
 
 
-def resolve_repository_identity(repository: Path) -> RepositoryIdentity:
-    """Resolve an explicit, remote-derived, or persistent local identity."""
+def _resolve_repository_identity(
+    repository: Path, *, persist: bool
+) -> RepositoryIdentity:
     repository = _directory_without_symlink(repository, "Repository")
     configured = _configured_identity(repository)
     if configured is not None:
@@ -229,11 +230,18 @@ def resolve_repository_identity(repository: Path) -> RepositoryIdentity:
     if len(normalized) > 1:
         raise GraphManagerError("Repository fetch remotes are ambiguous")
 
+    if not persist:
+        raise GraphManagerError("Repository identity is not configured")
     key = f"local/{uuid.uuid4()}"
     result = _git(repository, "config", "--local", "orichum.repositoryIdentity", key)
     if result.returncode != 0:
         raise GraphManagerError("Local repository identity cannot be persisted")
     return _identity_from_key(key, None)
+
+
+def resolve_repository_identity(repository: Path) -> RepositoryIdentity:
+    """Resolve an explicit, remote-derived, or persistent local identity."""
+    return _resolve_repository_identity(repository, persist=True)
 
 
 def _status(repository: Path) -> bytes:
@@ -443,19 +451,56 @@ def _checkout_id(repository: Path) -> str:
         return checkout_id
 
 
-def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
-    """Return the central Graphify location for this repository state."""
+def _existing_checkout_id(repository: Path) -> str:
+    git_dir = Path(_git_text(repository, "rev-parse", "--absolute-git-dir"))
+    state_file = git_dir / "orichum.checkoutIdentity"
+    try:
+        persisted = state_file.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        persisted = ""
+    except OSError as error:
+        raise GraphManagerError("Checkout identity cannot be read") from error
+    if persisted:
+        try:
+            return uuid.UUID(persisted).hex
+        except ValueError as error:
+            raise GraphManagerError("Persisted checkout identity is invalid") from error
+    for scope in ("--worktree", "--local"):
+        result = _git(
+            repository,
+            "config",
+            scope,
+            "--get",
+            "orichum.checkoutIdentity",
+        )
+        if result.returncode == 0:
+            try:
+                return uuid.UUID(result.stdout.strip()).hex
+            except ValueError as error:
+                raise GraphManagerError(
+                    "Persisted checkout identity is invalid"
+                ) from error
+    raise GraphManagerError("Checkout identity is not configured")
+
+
+def _resolve_graph_target(
+    repository: Path, data_root: Path, *, persist: bool
+) -> GraphTarget:
     repository = _directory_without_symlink(repository, "Repository")
     data_root = _directory_without_symlink(
         data_root, "Graph data", require_private=True
     )
-    identity = resolve_repository_identity(repository)
+    identity = _resolve_repository_identity(repository, persist=persist)
     revision = _git_text(repository, "rev-parse", "HEAD")
     status = _status(repository)
     root = data_root / "graphs" / identity.key
     if status:
         fingerprint = working_tree_fingerprint(repository)
-        checkout_id = _checkout_id(repository)
+        checkout_id = (
+            _checkout_id(repository)
+            if persist
+            else _existing_checkout_id(repository)
+        )
         state_id = f"{checkout_id}-{fingerprint}"
         kind: Literal["revision", "working"] = "working"
         output_dir = root / "working" / state_id / "graphify-out"
@@ -474,6 +519,11 @@ def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
         graph_file=output_dir / "graph.json",
         metadata_file=output_dir / "metadata.json",
     )
+
+
+def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
+    """Return the central Graphify location for this repository state."""
+    return _resolve_graph_target(repository, data_root, persist=True)
 
 
 _LEGACY_GRAPHIFY_ENTRIES = frozenset(
@@ -1207,3 +1257,275 @@ def sync_graphs(
             )
         )
     return tuple(results)
+
+
+def _graph_data_root() -> Path:
+    raw = os.environ.get("ORICHUM_DATA_HOME")
+    if raw is None:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        raw = (
+            str(Path(xdg) / "orichum")
+            if xdg
+            else str(Path.home() / ".local/share/orichum")
+        )
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise GraphManagerError("ORICHUM_DATA_HOME must be an absolute path")
+    return path.resolve(strict=False)
+
+
+def _command_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = Path(os.path.abspath(path))
+    if not path.is_dir():
+        raise GraphManagerError(f"path is not a directory: {value}")
+    return _directory_without_symlink(path, "Graph scope")
+
+
+def _resolve_graphify() -> str:
+    executable = shutil.which("graphify")
+    if executable is None:
+        raise GraphManagerError("Graphify executable is unavailable")
+    return executable
+
+
+def _bounded_command(
+    arguments: list[str], *, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            arguments,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _hook_status(graphify: str | None, repository: Path) -> str:
+    if graphify is None:
+        return "unavailable"
+    completed = _bounded_command(
+        [graphify, "hook", "status"], cwd=repository
+    )
+    if completed is None:
+        return "unknown"
+    output = f"{completed.stdout}\n{completed.stderr}".lower()
+    if completed.returncode == 0 and "not installed" not in output:
+        return "installed"
+    if "not installed" in output:
+        return "missing"
+    return "unknown"
+
+
+def _package_version(graphify: str | None) -> str:
+    if graphify is None:
+        return "unavailable"
+    completed = _bounded_command([graphify, "--version"])
+    if completed is None or completed.returncode != 0:
+        return "unknown"
+    match = re.search(
+        r"\bgraphify(?:y)?\s+([^\s]+)", completed.stdout[:512], re.IGNORECASE
+    )
+    return match.group(1) if match else "unknown"
+
+
+def _skill_version() -> str:
+    home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
+    candidates = (
+        home / ".agents" / "skills" / "graphify" / ".graphify_version",
+        home / ".codex" / "skills" / "graphify" / ".graphify_version",
+        home / ".claude" / "skills" / "graphify" / ".graphify_version",
+    )
+    for candidate in candidates:
+        try:
+            with candidate.open("r", encoding="ascii") as stream:
+                value = stream.read(128).strip()
+        except (OSError, UnicodeError):
+            continue
+        if value:
+            return value[:64]
+    return "unavailable"
+
+
+def _render_status_table(rows: list[tuple[str, ...]]) -> str:
+    headers = (
+        "REPOSITORY",
+        "REVISION",
+        "STATE",
+        "GRAPH",
+        "NODES",
+        "HOOK",
+        "OUTPUT",
+    )
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    ]
+
+    def render(values: tuple[str, ...]) -> str:
+        return "  ".join(
+            f"{value:<{width}}"
+            for value, width in zip(values, widths, strict=True)
+        ).rstrip()
+
+    separator = render(tuple("-" * width for width in widths))
+    return "\n".join(
+        (render(headers), separator, *(render(row) for row in rows))
+    )
+
+
+def _status_rows(
+    path: Path, data_root: Path, graphify: str | None
+) -> tuple[list[tuple[str, ...]], list[str]]:
+    rows: list[tuple[str, ...]] = []
+    details: list[str] = []
+    for repository in discover_graph_targets(path):
+        try:
+            identity = _resolve_repository_identity(
+                repository, persist=False
+            )
+            identity_key = identity.key
+            revision = _git_text(repository, "rev-parse", "HEAD")
+            dirty = bool(_status(repository))
+            try:
+                target = _resolve_graph_target(
+                    repository, data_root, persist=False
+                )
+                inspected = inspect_graph(target)
+                graph_state = inspected.status
+                nodes = (
+                    str(inspected.node_count)
+                    if inspected.node_count is not None
+                    else "—"
+                )
+                output = str(target.output_dir)
+            except GraphManagerError as error:
+                graph_state = "unknown"
+                nodes = "—"
+                output = "—"
+                details.append(f"  {repository}: {error}")
+            rows.append(
+                (
+                    identity_key,
+                    revision[:12],
+                    "dirty" if dirty else "clean",
+                    graph_state,
+                    nodes,
+                    _hook_status(graphify, repository),
+                    output,
+                )
+            )
+            if dirty:
+                details.append(f"  checkout: {repository}")
+        except GraphManagerError as error:
+            rows.append(
+                (
+                    "(invalid)",
+                    "—",
+                    "invalid",
+                    "unknown",
+                    "—",
+                    "unknown",
+                    "—",
+                )
+            )
+            details.append(f"  {repository}: {error}")
+    return rows, details
+
+
+def _graph_status(path: Path) -> int:
+    data_root = _graph_data_root()
+    graphify = shutil.which("graphify")
+    rows, details = _status_rows(path, data_root, graphify)
+    print(_render_status_table(rows))
+    for detail in details:
+        print(detail)
+    package = _package_version(graphify)
+    skill = _skill_version()
+    drift = " (drift)" if package != skill else ""
+    print(f"Graphify package: {package}")
+    print(f"Graphify skill: {skill}{drift}")
+    return 0
+
+
+def _graph_identity(arguments: list[str]) -> int:
+    if not arguments:
+        raise GraphManagerError(
+            "graph identity requires PATH and exactly one of --set ID or --clear"
+        )
+    repository = _command_path(arguments[0])
+    remainder = arguments[1:]
+    setting: str | None = None
+    clear = False
+    if len(remainder) == 2 and remainder[0] == "--set":
+        setting = normalize_remote_url(remainder[1])
+    elif remainder == ["--clear"]:
+        clear = True
+    else:
+        raise GraphManagerError(
+            "graph identity requires exactly one of --set ID or --clear"
+        )
+    result = (
+        _git(
+            repository,
+            "config",
+            "--local",
+            "orichum.repositoryIdentity",
+            setting,
+        )
+        if setting is not None
+        else _git(
+            repository,
+            "config",
+            "--local",
+            "--unset-all",
+            "orichum.repositoryIdentity",
+        )
+    )
+    if result.returncode != 0 and not clear:
+        raise GraphManagerError("Repository identity cannot be set")
+    if result.returncode not in (0, 5) and clear:
+        raise GraphManagerError("Repository identity cannot be cleared")
+    action = f"set to {setting}" if setting is not None else "cleared"
+    print(f"Repository identity {action}: {repository}")
+    return 0
+
+
+def graph_main(arguments: list[str] | None = None) -> int:
+    """Run the repository-aware Orichum graph command."""
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    try:
+        if arguments and arguments[0] == "status":
+            if len(arguments) > 2:
+                raise GraphManagerError("graph status accepts at most one PATH")
+            path = _command_path(arguments[1] if len(arguments) == 2 else ".")
+            return _graph_status(path)
+        if arguments and arguments[0] == "identity":
+            return _graph_identity(arguments[1:])
+        if len(arguments) > 1:
+            raise GraphManagerError("graph accepts at most one PATH")
+        path = _command_path(arguments[0] if arguments else ".")
+        repositories = discover_graph_targets(path)
+        print(f"[discover] found {len(repositories)} repositories")
+        if not repositories:
+            return 0
+        sync_graphs(
+            path,
+            _graph_data_root(),
+            graphify=_resolve_graphify(),
+            progress=print,
+        )
+        return 0
+    except (GraphManagerError, OSError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(graph_main())

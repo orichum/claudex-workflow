@@ -107,6 +107,7 @@ printf 'raise SystemExit(97)\n' >"$fixture/shadowed/runpy.py"
 help="$("$ROOT/bin/orichum" --help)"
 rg -Fq 'usage: orichum ' <<<"$help"
 rg -Fq 'context' <<<"$help"
+rg -Fq 'graph' <<<"$help"
 rg -Fq 'sessions' <<<"$help"
 
 ORICHUM_CONFIG_HOME="$ROOT/config" \

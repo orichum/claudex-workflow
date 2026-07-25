@@ -1179,10 +1179,11 @@ def _run_external(name: str, arguments: list[str]) -> int:
     executable = str(candidate) if candidate.is_file() else shutil.which(name)
     if executable is None:
         raise CliError(f"required command is not installed: {name}")
+    working_directory = Path.cwd() if name == "orichum-graph" else WORKFLOW_ROOT
     completed = subprocess.run(
         [executable, *arguments],
         check=False,
-        cwd=WORKFLOW_ROOT,
+        cwd=working_directory,
         env=os.environ.copy(),
     )
     return completed.returncode
@@ -1806,6 +1807,8 @@ def build_parser() -> argparse.ArgumentParser:
     headroom.add_subparsers(dest="headroom_command", required=True).add_parser(
         "status"
     )
+    graph = commands.add_parser("graph")
+    graph.add_argument("arguments", nargs=argparse.REMAINDER)
     commands.add_parser("doctor")
     sessions = commands.add_parser("sessions")
     sessions_action = sessions.add_subparsers(dest="sessions_command")
@@ -1838,6 +1841,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if parsed.command == "doctor":
             return _run_external("orichum-doctor", [])
+        if parsed.command == "graph":
+            return _run_external("orichum-graph", list(parsed.arguments))
         if parsed.command == "config" and parsed.config_command == "paths":
             paths = _paths()
             print(
