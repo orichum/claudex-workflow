@@ -53,6 +53,32 @@ class PluginRegistryTests(unittest.TestCase):
             )
         self.assertEqual(self.manifest.read_bytes(), original)
 
+    def test_update_plugins_rejects_manifest_symlink_without_changing_target(
+        self,
+    ) -> None:
+        target = self.root / "target.json"
+        target.write_bytes(self.manifest.read_bytes())
+        target.chmod(0o600)
+        original = target.read_bytes()
+        self.manifest.unlink()
+        self.manifest.symlink_to(target)
+
+        with self.assertRaisesRegex(
+            PluginRegistryError, "registry is unsafe"
+        ):
+            update_plugins(
+                self.manifest,
+                lambda document: {
+                    **document,
+                    "marketplaces": [
+                        {"name": "acme", "source": "example/acme"}
+                    ],
+                    "plugins": ["sample@acme"],
+                },
+            )
+
+        self.assertEqual(target.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

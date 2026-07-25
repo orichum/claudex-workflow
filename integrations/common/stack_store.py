@@ -827,11 +827,12 @@ def _save_stack_at(
                                 parent, _BINDING_ORIGINAL
                             )
                         )
+                    _fsync_directory(parent)
                     _write_transaction_marker(
                         parent, "pending", binding_existed
                     )
-                    recovery_ready = True
                     _fsync_directory(parent)
+                    recovery_ready = True
                     if staged_binding is not None:
                         os.replace(staged_binding, binding_path)
                         staged_binding = None

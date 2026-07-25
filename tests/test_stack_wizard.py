@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 import fcntl
 import io
 import json
@@ -14,6 +15,7 @@ import termios
 import tempfile
 import threading
 import traceback
+from types import MappingProxyType
 from typing import Callable
 import unittest
 from unittest import mock
@@ -570,6 +572,215 @@ class StackWizardTests(unittest.TestCase):
         self.assertNotIn("oc-c-", review)
         self.assertNotIn("oc-r-", review)
         self.assertNotIn(".json", review)
+
+    def test_edit_noop_preserves_native_candidate_ids_and_bindings(self) -> None:
+        document = stack_wizard.serialize_model_stacks(self.stacks)
+        candidates = [
+            candidate
+            for stack in document["stacks"].values()
+            for choices in (
+                stack["controller"],
+                *stack["agents"].values(),
+            )
+            for candidate in choices
+        ]
+        for ordinal, candidate in enumerate(candidates, 1):
+            candidate["id"] = f"oc-c-{ordinal + 100:016x}"
+        stacks = normalize_model_stacks(document)
+        architecture_id = stacks.stacks["balanced"].agents[
+            "architecture-advisor"
+        ][0].id
+        snapshot = StackSnapshot(
+            stacks,
+            StackBindings(
+                {architecture_id: "oc-a-bbbbbbbbbbbbbbbb"}
+            ),
+            "0" * 64,
+            None,
+        )
+        io_adapter = ScriptedIO(
+            choices=[
+                "Edit existing",
+                "balanced",
+                "Continue to review",
+                "Continue to save",
+            ],
+            confirmations=[True, False],
+        )
+
+        result = StackWizard(
+            snapshot,
+            self.catalog,
+            self.accounts,
+            io_adapter,
+        ).run(Path("/work/project"))
+
+        before = {
+            (scope, candidate.model): candidate.id
+            for scope, choices in (
+                ("controller", stacks.stacks["balanced"].controller),
+                *stacks.stacks["balanced"].agents.items(),
+            )
+            for candidate in choices
+        }
+        after = {
+            (scope, candidate.model): candidate.id
+            for scope, choices in (
+                (
+                    "controller",
+                    result.stacks.stacks["balanced"].controller,
+                ),
+                *result.stacks.stacks["balanced"].agents.items(),
+            )
+            for candidate in choices
+        }
+        self.assertEqual(after, before)
+        self.assertEqual(
+            dict(result.bindings.candidate_accounts),
+            {architecture_id: "oc-a-bbbbbbbbbbbbbbbb"},
+        )
+
+    def test_edit_reorder_preserves_candidate_ids_and_local_bindings(
+        self,
+    ) -> None:
+        document = stack_wizard.serialize_model_stacks(self.stacks)
+        architecture = document["stacks"]["balanced"]["agents"][
+            "architecture-advisor"
+        ]
+        architecture[0]["id"] = "oc-c-1111111111111111"
+        architecture.append(
+            {
+                "id": "oc-c-2222222222222222",
+                "model": "claude-sonnet-5",
+                "providers": ["anthropic"],
+            }
+        )
+        stacks = normalize_model_stacks(document)
+        snapshot = StackSnapshot(
+            stacks,
+            StackBindings(
+                {
+                    "oc-c-1111111111111111": "oc-a-bbbbbbbbbbbbbbbb",
+                    "oc-c-2222222222222222": "oc-a-bbbbbbbbbbbbbbbb",
+                }
+            ),
+            "0" * 64,
+            None,
+        )
+        wizard = StackWizard(
+            snapshot, self.catalog, self.accounts, ScriptedIO()
+        )
+        draft = wizard._draft_from_stack(
+            "Edit existing", "balanced", "balanced"
+        )
+        agents = dict(draft.agents)
+        agents["architecture-advisor"] = tuple(
+            reversed(agents["architecture-advisor"])
+        )
+        draft = replace(
+            draft, agents=MappingProxyType(agents)
+        )
+
+        materialized, bindings = wizard._materialize(draft)
+
+        self.assertEqual(
+            [
+                candidate.id
+                for candidate in materialized.stacks[
+                    "balanced"
+                ].agents["architecture-advisor"]
+            ],
+            ["oc-c-2222222222222222", "oc-c-1111111111111111"],
+        )
+        self.assertEqual(
+            dict(bindings.candidate_accounts),
+            {
+                "oc-c-1111111111111111": "oc-a-bbbbbbbbbbbbbbbb",
+                "oc-c-2222222222222222": "oc-a-bbbbbbbbbbbbbbbb",
+            },
+        )
+
+    def test_edit_changed_candidate_keeps_its_existing_identity(self) -> None:
+        wizard = StackWizard(
+            self.snapshot,
+            self.catalog,
+            self.accounts,
+            ScriptedIO(),
+        )
+        draft = wizard._draft_from_stack(
+            "Edit existing", "balanced", "balanced"
+        )
+        original = draft.agents["architecture-advisor"][0]
+        agents = dict(draft.agents)
+        agents["architecture-advisor"] = (
+            replace(original, model="claude-sonnet-5"),
+        )
+        draft = replace(draft, agents=MappingProxyType(agents))
+
+        materialized, _ = wizard._materialize(draft)
+
+        self.assertEqual(
+            materialized.stacks["balanced"].agents[
+                "architecture-advisor"
+            ][0].id,
+            self.stacks.stacks["balanced"].agents[
+                "architecture-advisor"
+            ][0].id,
+        )
+
+    def test_review_allows_internal_prefixes_in_display_values(self) -> None:
+        document = stack_wizard.serialize_model_stacks(self.stacks)
+        document["models"]["gpt-5.6-sol"]["routes"]["openai"] = (
+            "oc-r-labs"
+        )
+        stacks = normalize_model_stacks(document)
+        controller_id = stacks.stacks["balanced"].controller[0].id
+        snapshot = StackSnapshot(
+            stacks,
+            StackBindings(
+                {controller_id: "oc-a-aaaaaaaaaaaaaaaa"}
+            ),
+            "0" * 64,
+            None,
+        )
+        accounts = (
+            replace(self.accounts[0], name="oc-a-heavy"),
+            *self.accounts[1:],
+        )
+        catalog = LiveCatalog(
+            choices=(
+                LiveModelChoice(
+                    "gpt",
+                    "openai",
+                    "oc-r-labs",
+                    ("oc-a-aaaaaaaaaaaaaaaa",),
+                    ("oc-a-heavy",),
+                ),
+                *(
+                    choice
+                    for choice in self.catalog.choices
+                    if choice.upstream != "gpt-5.6-sol"
+                ),
+            ),
+            unclassified=(),
+        )
+        io_adapter = ScriptedIO(
+            choices=[
+                "Clone existing",
+                "balanced",
+                "Continue to review",
+            ],
+            confirmations=[False],
+            text=["display-prefixes"],
+        )
+
+        StackWizard(
+            snapshot, catalog, accounts, io_adapter
+        ).run(Path("/work/project"))
+
+        review = "\n".join(io_adapter.shown)
+        self.assertIn("oc-a-heavy", review)
+        self.assertIn("openai/oc-r-labs", review)
 
     def test_safe_delete_rejects_default_and_referenced_stack(self) -> None:
         for projects, expected in (

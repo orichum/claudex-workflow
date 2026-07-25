@@ -331,7 +331,21 @@ def _selected_routes(effective: Optional[EffectiveStack]) -> dict[str, list[str]
 def _configured_models(
     routing: Mapping[str, object], requested_stack: Optional[str]
 ) -> set[str]:
+    from .stack_definition import NormalizedStacks, StackDefinition
+
     name = requested_stack or str(routing["defaultStack"])
+    if isinstance(routing, NormalizedStacks):
+        stack = routing.stacks.get(name)
+        if not isinstance(stack, StackDefinition):
+            return set()
+        return {
+            candidate.model
+            for candidates in (
+                stack.controller,
+                *stack.agents.values(),
+            )
+            for candidate in candidates
+        }
     stacks = routing["stacks"]
     if not isinstance(stacks, Mapping) or name not in stacks:
         return set()

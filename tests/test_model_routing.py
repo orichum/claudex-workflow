@@ -206,6 +206,39 @@ class ModelRoutingTests(unittest.TestCase):
             {role: "fallback/" + role for role in ROLES},
         )
 
+    def test_catalogue_marks_all_normalized_stack_candidates_configured(
+        self,
+    ) -> None:
+        document = self.focused_model_stacks()
+        document["models"]["agent/fallback"] = {
+            "family": "gpt",
+            "routes": {"openai": "upstream/fallback"},
+        }
+        document["stacks"]["balanced"]["agents"][
+            "repository-explorer"
+        ].append(
+            {
+                "id": "oc-c-0000000000000007",
+                "model": "agent/fallback",
+                "providers": ["openai"],
+            }
+        )
+        normalized = normalize_model_stacks(document)
+
+        rendered = model_routing._render_catalogue_table(
+            normalized,
+            ("controller/main", "agent/main", "agent/fallback"),
+            None,
+            None,
+        )
+
+        for model in ("controller/main", "agent/main", "agent/fallback"):
+            self.assertIn(
+                f"{model}".ljust(len("controller/main"))
+                + " | configured candidate",
+                rendered,
+            )
+
     def test_routing_view_accepts_focused_model_stacks_document(self) -> None:
         focused = {
             "schemaVersion": 2,

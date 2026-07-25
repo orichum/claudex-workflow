@@ -539,10 +539,123 @@ class StackStoreTests(unittest.TestCase):
         self.assertEqual(self.model_path.read_bytes(), original_model)
         self.assertEqual(self.binding_path.read_bytes(), original_binding)
 
+    def test_recovery_snapshots_and_marker_are_synced_in_separate_epochs(self):
+        from integrations.common import stack_store
+
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        updated_bindings = StackBindings(
+            {"oc-c-2000000000000001": self.account_id}
+        )
+        events: list[str] = []
+        real_replace_private_file = stack_store._replace_private_file
+        real_replace = os.replace
+        real_fsync_directory = stack_store._fsync_directory
+
+        def observe_private_replace(path: Path, payload: bytes) -> None:
+            if path.name == stack_store._MODEL_ORIGINAL:
+                events.append("snapshot:model")
+            elif path.name == stack_store._BINDING_ORIGINAL:
+                events.append("snapshot:binding")
+            elif path.name == stack_store._TRANSACTION_MARKER:
+                events.append(
+                    "marker:" + json.loads(payload.decode("utf-8"))["state"]
+                )
+            real_replace_private_file(path, payload)
+
+        def observe_replace(source: object, target: object) -> None:
+            if Path(target) == self.binding_path:
+                events.append("publish:binding")
+            elif Path(target) == self.model_path:
+                events.append("publish:model")
+            real_replace(source, target)
+
+        def observe_fsync(path: Path) -> None:
+            events.append("fsync:directory")
+            real_fsync_directory(path)
+
+        with (
+            mock.patch.object(
+                stack_store,
+                "_replace_private_file",
+                side_effect=observe_private_replace,
+            ),
+            mock.patch.object(
+                stack_store.os, "replace", side_effect=observe_replace
+            ),
+            mock.patch.object(
+                stack_store,
+                "_fsync_directory",
+                side_effect=observe_fsync,
+            ),
+        ):
+            save_stack(
+                snapshot, snapshot.stacks, updated_bindings
+            )
+
+        snapshot_sync = events.index(
+            "fsync:directory",
+            events.index("snapshot:binding") + 1,
+        )
+        pending = events.index("marker:pending")
+        marker_sync = events.index("fsync:directory", pending + 1)
+        self.assertLess(events.index("snapshot:model"), snapshot_sync)
+        self.assertLess(events.index("snapshot:binding"), snapshot_sync)
+        self.assertLess(snapshot_sync, pending)
+        self.assertLess(pending, marker_sync)
+        self.assertLess(marker_sync, events.index("publish:binding"))
+        self.assertLess(marker_sync, events.index("publish:model"))
+
+    def test_crash_before_snapshot_directory_sync_never_publishes_marker(self):
+        from integrations.common import stack_store
+
+        self.write_bindings(
+            {"oc-c-1000000000000001": self.account_id}
+        )
+        snapshot = load_stack_snapshot(
+            self.model_path, self.binding_path
+        )
+        original_model = self.model_path.read_bytes()
+        original_binding = self.binding_path.read_bytes()
+        observations: list[bool] = []
+        calls = 0
+        real_fsync_directory = stack_store._fsync_directory
+
+        def crash_at_first_sync(path: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                observations.append(
+                    (self.private / stack_store._TRANSACTION_MARKER).exists()
+                )
+                raise OSError("injected snapshot directory sync failure")
+            real_fsync_directory(path)
+
+        with mock.patch.object(
+            stack_store,
+            "_fsync_directory",
+            side_effect=crash_at_first_sync,
+        ), self.assertRaises(StackStoreError):
+            save_stack(
+                snapshot,
+                snapshot.stacks,
+                StackBindings(
+                    {"oc-c-2000000000000001": self.account_id}
+                ),
+            )
+
+        self.assertEqual(observations, [False])
+        self.assertEqual(self.model_path.read_bytes(), original_model)
+        self.assertEqual(self.binding_path.read_bytes(), original_binding)
+
     def test_every_directory_fsync_boundary_has_defined_outcome(self):
         from integrations.common import stack_store
 
-        for boundary in (1, 2, 3, 4):
+        for boundary in (1, 2, 3, 4, 5):
             with self.subTest(boundary=boundary):
                 self.write_model_document(self.document())
                 self.write_bindings(
@@ -582,7 +695,7 @@ class StackStoreTests(unittest.TestCase):
                     "_fsync_directory",
                     side_effect=fail_boundary,
                 ):
-                    if boundary < 4:
+                    if boundary < 5:
                         with self.assertRaises(StackStoreError):
                             save_stack(
                                 snapshot,

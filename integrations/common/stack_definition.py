@@ -219,6 +219,15 @@ def _candidate_list(
     candidate_models = tuple(candidate.model for candidate in candidates)
     if len(candidate_models) != len(set(candidate_models)):
         raise StackDefinitionError(f"{label} has duplicate candidates")
+    routes = [
+        (provider, models[candidate.model].routes[provider])
+        for candidate in candidates
+        for provider in candidate.providers
+    ]
+    if len(routes) != len(set(routes)):
+        raise StackDefinitionError(
+            f"{label} has a duplicate provider route"
+        )
     families = {models[model].family for model in candidate_models}
     if len(families) != 1:
         raise StackDefinitionError(

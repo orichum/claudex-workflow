@@ -265,6 +265,29 @@ class StackDefinitionTests(unittest.TestCase):
         with self.assertRaisesRegex(StackDefinitionError, "route"):
             normalize_model_stacks(document)
 
+    def test_rejects_duplicate_provider_upstream_routes_in_candidate_list(
+        self,
+    ) -> None:
+        document = self.v2_document()
+        document["models"]["gpt-5.6-terra-alias"] = {
+            "family": "gpt",
+            "routes": {"openai": "gpt-5.6-terra"},
+        }
+        document["stacks"]["balanced"]["agents"][
+            "repository-explorer"
+        ].append(
+            {
+                "id": "oc-c-1111111111111111",
+                "model": "gpt-5.6-terra-alias",
+                "providers": ["openai"],
+            }
+        )
+
+        with self.assertRaisesRegex(
+            StackDefinitionError, "duplicate provider route"
+        ):
+            normalize_model_stacks(document)
+
     def test_rejects_extra_nested_fields_and_invalid_provider_lists(
         self,
     ) -> None:

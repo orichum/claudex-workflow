@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -52,6 +53,9 @@ from .stack_store import (
 
 
 BACK = -1
+_INTERNAL_ID = re.compile(
+    r"(?<![A-Za-z0-9])oc-(?:a|c|r)-[a-f0-9]{16}(?![A-Za-z0-9])"
+)
 
 
 class WizardCancelled(RuntimeError):
@@ -95,6 +99,7 @@ class WizardResult:
 
 @dataclass(frozen=True)
 class _DraftCandidate:
+    source_id: str | None
     model: str
     family: str
     providers: tuple[str, ...]
@@ -488,17 +493,25 @@ class StackWizard:
         self, action: str, source_name: str, stack_name: str
     ) -> _Draft:
         source = self._snapshot.stacks.stacks[source_name]
+        preserve_identity = action == "Edit existing"
         return _Draft(
             action=action,
             source_name=source_name,
             stack_name=stack_name,
             controller=tuple(
-                self._draft_candidate(candidate) for candidate in source.controller
+                self._draft_candidate(
+                    candidate,
+                    preserve_identity=preserve_identity,
+                )
+                for candidate in source.controller
             ),
             agents=MappingProxyType(
                 {
                     role: tuple(
-                        self._draft_candidate(candidate)
+                        self._draft_candidate(
+                            candidate,
+                            preserve_identity=preserve_identity,
+                        )
                         for candidate in source.agents[role]
                     )
                     for role in ROLES
@@ -507,7 +520,10 @@ class StackWizard:
         )
 
     def _draft_candidate(
-        self, candidate: StackCandidate
+        self,
+        candidate: StackCandidate,
+        *,
+        preserve_identity: bool,
     ) -> _DraftCandidate:
         definition = self._snapshot.stacks.models[candidate.model]
         account_id = self._snapshot.bindings.candidate_accounts.get(
@@ -515,6 +531,7 @@ class StackWizard:
         )
         account = self._accounts_by_id.get(account_id or "")
         return _DraftCandidate(
+            source_id=candidate.id if preserve_identity else None,
             model=candidate.model,
             family=definition.family,
             providers=candidate.providers,
@@ -779,6 +796,11 @@ class StackWizard:
                         else live.account_names[account_index - 1]
                     )
                     return _DraftCandidate(
+                        source_id=(
+                            current.source_id
+                            if current is not None
+                            else None
+                        ),
                         model=logical_model,
                         family=live.family,
                         providers=(live.provider,),
@@ -868,17 +890,27 @@ class StackWizard:
         if not isinstance(raw_stacks, dict):
             raise RoutingError("model stacks are invalid")
 
+        def identifier(
+            scope: str, ordinal: int, candidate: _DraftCandidate
+        ) -> str:
+            if (
+                draft.action == "Edit existing"
+                and candidate.source_id is not None
+            ):
+                return candidate.source_id
+            return candidate_id(
+                draft.stack_name,
+                scope,
+                ordinal,
+                candidate.model,
+            )
+
         def raw_candidates(
             scope: str, candidates: tuple[_DraftCandidate, ...]
         ) -> list[dict[str, object]]:
             return [
                 {
-                    "id": candidate_id(
-                        draft.stack_name,
-                        scope,
-                        ordinal,
-                        candidate.model,
-                    ),
+                    "id": identifier(scope, ordinal, candidate),
                     "model": candidate.model,
                     "providers": list(candidate.providers),
                 }
@@ -933,16 +965,13 @@ class StackWizard:
         )
         for scope, candidates in selected_drafts:
             for ordinal, candidate in enumerate(candidates):
-                identifier = candidate_id(
-                    draft.stack_name,
-                    scope,
-                    ordinal,
-                    candidate.model,
+                candidate_identifier = identifier(
+                    scope, ordinal, candidate
                 )
-                if identifier not in target_ids:
+                if candidate_identifier not in target_ids:
                     raise RoutingError("candidate normalization failed")
                 if candidate.account_id is not None:
-                    bindings[identifier] = candidate.account_id
+                    bindings[candidate_identifier] = candidate.account_id
         return stacks, StackBindings(bindings)
 
     def _upstream(self, model: str, provider: str) -> str:
@@ -1013,13 +1042,8 @@ class StackWizard:
                     f"account {policy} · same-model recovery {recovery}"
                 )
         rendered = "\n".join(lines)
-        for forbidden in (
-            "oc-a-",
-            "oc-c-",
-            "oc-r-",
-        ):
-            if forbidden in rendered:
-                raise RoutingError("review contains internal metadata")
+        if _INTERNAL_ID.search(rendered):
+            raise RoutingError("review contains internal metadata")
         return rendered
 
     def _first_missing(
