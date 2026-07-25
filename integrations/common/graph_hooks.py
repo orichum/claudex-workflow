@@ -295,6 +295,9 @@ def _managed_launcher(content: str) -> Path | None:
     launcher = Path(command[0])
     if not _valid_launcher(launcher):
         raise GraphHookError("Orichum graph hook launcher is unsafe")
+    canonical = _hook_block(launcher).splitlines()[1]
+    if lines[starts[0] + 1] != canonical:
+        raise GraphHookError("Orichum graph hook command is not canonical")
     return launcher
 
 

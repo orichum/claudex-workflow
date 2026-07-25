@@ -385,6 +385,70 @@ class GraphHookTests(unittest.TestCase):
 
         self.assertNotEqual(graph_hook_status(self.repository), "installed")
 
+    def test_status_and_cleanup_require_canonical_command_serialization(
+        self,
+    ) -> None:
+        install_graph_hooks(self.repository, self.launcher)
+        canonical = f"'{self.launcher}' graph hook-update \"$PWD\""
+        self.assertEqual(graph_hook_status(self.repository), "installed")
+        self.assertIn(
+            f"\n{canonical}\n",
+            self.hook("post-commit").read_text(encoding="utf-8"),
+        )
+        self.git(
+            self.repository,
+            "config",
+            "merge.graphify.name",
+            "graphify graph.json union merge",
+        )
+        self.git(
+            self.repository,
+            "config",
+            "merge.graphify.driver",
+            "graphify merge-driver %O %A %B",
+        )
+        attributes = self.repository / ".gitattributes"
+        original_attributes = b"graphify-out/graph.json merge=graphify\n"
+        attributes.write_bytes(original_attributes)
+        variants = (
+            canonical.replace('"$PWD"', "'$PWD'"),
+            canonical.replace('"$PWD"', r"\$PWD"),
+            canonical.replace('"$PWD"', "$PWD"),
+            f"{canonical}; echo forged",
+            canonical.replace(" graph ", "  graph "),
+            f"{canonical} ",
+        )
+
+        for command in variants:
+            with self.subTest(command=command):
+                for name in ("post-commit", "post-checkout"):
+                    self.write_hook(
+                        name,
+                        "#!/bin/sh\n"
+                        "# orichum-graph-hook-start\n"
+                        f"{command}\n"
+                        "# orichum-graph-hook-end\n",
+                    )
+                self.assertNotEqual(
+                    graph_hook_status(self.repository),
+                    "installed",
+                )
+                with self.assertRaisesRegex(GraphHookError, "not managed"):
+                    remove_upstream_graphify_hooks(self.repository)
+                self.assertEqual(
+                    attributes.read_bytes(),
+                    original_attributes,
+                )
+                self.assertEqual(
+                    self.git(
+                        self.repository,
+                        "config",
+                        "--get",
+                        "merge.graphify.driver",
+                    ),
+                    "graphify merge-driver %O %A %B",
+                )
+
     def test_attribute_cleanup_preserves_unrelated_bytes_and_line_endings(
         self,
     ) -> None:
