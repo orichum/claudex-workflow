@@ -27,8 +27,26 @@ current machine.
 | `orichum provider account ...` | Add, rename, reprioritize, enable, disable, sync, or remove |
 | `orichum plugin ...` | List, add, sync, update, or remove optional plugins |
 | `orichum headroom status` | Inspect Headroom |
+| `orichum graph [PATH]` | Build or refresh central Graphify data for repositories below `PATH` (default: `.`) |
+| `orichum graph status [PATH]` | Read graph, working-tree, hook, output, and Graphify version status without changing state |
+| `orichum graph identity PATH --set ID` | Set an explicit repository identity such as `github.com/xebia/X-ACE-UI` |
+| `orichum graph identity PATH --clear` | Clear the explicit identity and return to remote-derived identity |
 | `orichum doctor` | Validate the complete local installation |
 | `orichum sessions` | List logical sessions |
 | `orichum session routes ID` | Inspect a session's frozen routes |
 | `orichum resume ID` | Resume the same logical session |
 | `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |
+
+## Graph examples
+
+```bash
+orichum graph .
+orichum graph ~/xebia
+orichum graph status .
+orichum graph identity . --set github.com/xebia/X-ACE-UI
+```
+
+`orichum graph status` is read-only. An explicit identity is useful for a
+repository without a remote or when clones that should share revision graphs
+cannot derive the same unambiguous fetch identity. Graph commands manage
+Graphify only; they do not mine or query Mempalace.

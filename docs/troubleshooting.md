@@ -57,8 +57,59 @@ Set the expected identity with `orichum context update ROOT
 ## Missing MCP
 
 MCPs are intentionally conditional. Check that the project context has the
-required Docker profile or palace, that the current repository has a valid
-Graphify graph, and that `orichum doctor` finds the MCP binaries.
+required Docker profile or palace and that `orichum doctor` finds the MCP
+binaries.
+
+For Graphify, inspect the exact repository state:
+
+```bash
+orichum graph status .
+```
+
+The Graphify MCP is omitted when its central graph is missing, stale, invalid,
+or does not match the current clean or dirty state. Session startup never
+rebuilds it. Run `orichum graph .`, confirm the status is `current`, then start
+a new session.
+
+## Wrong graph identity or no graph identity
+
+Graph status reports `(invalid)` when a repository has no configured identity
+and no usable fetch remote, or when multiple fetch remotes are ambiguous.
+Inspect remotes, then set a stable override if needed:
+
+```bash
+git remote -v
+orichum graph identity . --set github.com/xebia/X-ACE-UI
+orichum graph .
+```
+
+Use `orichum graph identity . --clear` to return to remote-derived identity.
+Changing identity selects a different central namespace; it does not move or
+delete graphs stored under the old identity.
+
+## Graph does not match after an edit or checkout
+
+Dirty content selects an isolated working graph rather than the clean revision
+graph. A commit or checkout changes the selected state and the installed Git
+hook launches a detached refresh. Git returns before Graphify finishes, so
+status can briefly show a missing graph:
+
+```bash
+orichum graph status .
+orichum graph .
+```
+
+The explicit command waits for the refresh and is the deterministic recovery
+path. It also reinstalls the marked post-commit and post-checkout hook sections
+without replacing unrelated user hook content.
+
+## Legacy repository-local Graphify output
+
+Active Graphify output belongs in Orichum's private data directory. A
+recognized repository-local `graphify-out` is migration input only. The next
+`orichum graph .` migrates it transactionally when no central graph is active
+for that state. If migration reports unknown or unsafe entries, preserve the
+directory and inspect it; Orichum will not delete unrecognized data.
 
 ## Population appears slow
 

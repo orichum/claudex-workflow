@@ -62,9 +62,24 @@ Inspect what Orichum will use:
 orichum config paths
 orichum context list
 orichum stack list
+orichum graph status .
 orichum sessions
 orichum doctor
 ```
+
+Build or refresh Graphify data for the current repository, or for every
+repository below a directory:
+
+```bash
+orichum graph .
+orichum graph ~/xebia
+```
+
+Orichum stores Graphify output centrally rather than in the checkout. Clean
+graphs are shared by repositories with the same identity and commit; dirty
+working states stay isolated per checkout. See
+[Memory and code graph](docs/memory-and-code-graph.md) for identity overrides,
+hooks, worktrees, migration, and pruning.
 
 ## How a session flows
 
