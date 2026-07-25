@@ -35,15 +35,15 @@ validated source, not the MCP's live target. Each physical session copies its
 bytes into private `run_dir/graph.json` with mode `0600`, records the digest in
 immutable context, and points `mcp.json` at that snapshot.
 
-Session startup does not build or refresh a graph. If the graph is missing,
-stale, invalid, or changes during verification, Graphify is omitted from that
-physical run. Run `orichum graph .` explicitly and start or resume into a new
+Session startup does not build or refresh a graph. Materialization retries once
+against the latest stable validated binding. If it obtains a stable match, the
+physical run snapshots the graph and includes Graphify. If no valid binding
+exists or instability persists, it creates the physical session without
+Graphify. Run `orichum graph .` explicitly and start or resume into a new
 physical run when a graph is needed. An existing physical session keeps its
-immutable snapshot even if the central graph is later replaced. A resume or
-other new run snapshots the current valid graph, or omits Graphify if the
-central source is unavailable or changes while it is copied. Queries are still
-on demand after Graphify is loaded; no graph payload is injected into every
-prompt.
+immutable snapshot even if the central graph is later replaced. Queries are
+still on demand after Graphify is loaded; no graph payload is injected into
+every prompt.
 
 This avoids cross-project profile, memory, and graph leakage while allowing
 multiple projects, clones, worktrees, and sessions on one machine.

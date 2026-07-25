@@ -104,9 +104,11 @@ context, and points the Graphify MCP at that snapshot rather than central
 storage.
 
 An existing physical session remains on its snapshot generation when the
-central graph changes. A resume or other new physical run snapshots the current
-valid central graph, or omits Graphify if the graph is unavailable or races
-with the copy. Build the graph first, then start a new session:
+central graph changes. Materialization of a resume or other new physical run
+retries once against the latest stable validated binding. A stable match is
+snapshotted and includes Graphify; if no valid binding exists or instability
+persists, the physical session is created without Graphify. Build the graph
+first, then start a new session:
 
 ```bash
 orichum graph .
