@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 import os
 import shutil
 import subprocess
 import tempfile
-import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -19,6 +18,29 @@ from integrations.common.graph_manager import (
     resolve_repository_identity,
     working_tree_fingerprint,
 )
+
+
+def _resolve_after_flock_barrier(
+    repository: str,
+    data_root: str,
+    barrier,
+    results,
+) -> None:
+    import integrations.common.graph_manager as graph_manager
+
+    flock = graph_manager.fcntl.flock
+
+    def synchronized_flock(descriptor, operation):
+        barrier.wait(timeout=10)
+        return flock(descriptor, operation)
+
+    graph_manager.fcntl.flock = synchronized_flock
+    try:
+        target = graph_manager.resolve_graph_target(Path(repository), Path(data_root))
+    except BaseException as error:
+        results.put(("error", repr(error)))
+    else:
+        results.put(("ok", target.state_id))
 
 
 class GraphManagerTests(unittest.TestCase):
@@ -200,28 +222,133 @@ class GraphManagerTests(unittest.TestCase):
 
         self.assertNotEqual(main_target.state_id, linked_target.state_id)
 
+    def test_prior_worktree_config_ids_are_migrated_for_main_and_linked(self) -> None:
+        linked = self.root / "prior-linked"
+        self.addCleanup(
+            lambda: self._git(
+                self.first_clone, "worktree", "remove", "--force", str(linked)
+            )
+            if linked.exists()
+            else None
+        )
+        self._git(
+            self.first_clone,
+            "config",
+            "--local",
+            "extensions.worktreeConfig",
+            "true",
+        )
+        self._git(self.first_clone, "worktree", "add", "--detach", str(linked))
+        identities = {
+            self.first_clone: uuid.uuid4(),
+            linked: uuid.uuid4(),
+        }
+        for repository, identity in identities.items():
+            self._git(
+                repository,
+                "config",
+                "--worktree",
+                "orichum.checkoutIdentity",
+                str(identity),
+            )
+            (repository / "dirty.txt").write_text("changed\n", encoding="utf-8")
+            fingerprint = working_tree_fingerprint(repository)
+
+            target = resolve_graph_target(repository, self.data_root)
+
+            self.assertEqual(target.state_id, f"{identity.hex}-{fingerprint}")
+
+    def test_checkout_identity_publish_is_synced_before_atomic_replace(self) -> None:
+        (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        synced = False
+        replaced = False
+        fsync = os.fsync
+        replace = os.replace
+
+        def record_sync(descriptor):
+            nonlocal synced
+            synced = True
+            return fsync(descriptor)
+
+        def checked_replace(source, destination):
+            nonlocal replaced
+            self.assertTrue(synced)
+            replaced = True
+            return replace(source, destination)
+
+        with mock.patch(
+            "integrations.common.graph_manager.os.fsync", record_sync
+        ), mock.patch(
+            "integrations.common.graph_manager.os.replace", checked_replace
+        ):
+            target = resolve_graph_target(self.first_clone, self.data_root)
+
+        self.assertTrue(replaced)
+        persisted = Path(
+            self._git(
+                self.first_clone, "rev-parse", "--absolute-git-dir"
+            ).strip()
+        ) / "orichum.checkoutIdentity"
+        self.assertEqual(uuid.UUID(persisted.read_text()).hex, target.state_id[:32])
+
+    def test_failed_checkout_identity_replace_cleans_temporary_state(self) -> None:
+        (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        git_dir = Path(
+            self._git(
+                self.first_clone, "rev-parse", "--absolute-git-dir"
+            ).strip()
+        )
+
+        with mock.patch(
+            "integrations.common.graph_manager.os.replace",
+            side_effect=OSError("simulated publish failure"),
+        ), self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, self.data_root)
+
+        self.assertFalse((git_dir / "orichum.checkoutIdentity").exists())
+        self.assertEqual(
+            list(git_dir.glob(".orichum.checkoutIdentity.*.tmp")),
+            [],
+        )
+
     def test_concurrent_checkout_initialization_returns_one_persisted_id(self) -> None:
         (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
-        start = threading.Barrier(2)
-        barrier = threading.Barrier(2)
-        write_text = Path.write_text
+        context = multiprocessing.get_context("fork")
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_resolve_after_flock_barrier,
+                args=(
+                    str(self.first_clone),
+                    str(self.data_root),
+                    barrier,
+                    results,
+                ),
+            )
+            for _ in range(2)
+        ]
 
-        def synchronized_write(path, *arguments, **kwargs):
-            if path.name == "orichum.checkoutIdentity":
-                barrier.wait(timeout=5)
-            return write_text(path, *arguments, **kwargs)
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 0)
 
-        def resolve(_unused):
-            start.wait(timeout=5)
-            return resolve_graph_target(self.first_clone, self.data_root)
-
-        with mock.patch.object(Path, "write_text", synchronized_write):
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                targets = list(executor.map(resolve, range(2)))
-
-        self.assertEqual(targets[0].state_id, targets[1].state_id)
+        observed = [results.get(timeout=5) for _ in processes]
+        self.assertEqual([status for status, _value in observed], ["ok", "ok"])
+        state_ids = [value for _status, value in observed]
+        self.assertEqual(state_ids[0], state_ids[1])
+        persisted = Path(
+            self._git(
+                self.first_clone, "rev-parse", "--absolute-git-dir"
+            ).strip()
+        ) / "orichum.checkoutIdentity"
+        persisted_id = uuid.UUID(persisted.read_text()).hex
+        self.assertEqual(state_ids[0][:32], persisted_id)
         self.assertEqual(
-            targets[0].state_id,
+            state_ids[0],
             resolve_graph_target(self.first_clone, self.data_root).state_id,
         )
 

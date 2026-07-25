@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 from typing import Literal
 from urllib.parse import quote, unquote, urlsplit
 import uuid
@@ -305,14 +306,17 @@ def _checkout_id(repository: Path) -> str:
     is_main_worktree = git_dir == Path(common_dir)
     state_file = git_dir / "orichum.checkoutIdentity"
     with _checkout_state_lock(git_dir):
-        legacy = _git(
-            repository, "config", "--local", "--get", "orichum.checkoutIdentity"
-        )
         result = _git(
             repository, "config", "--local", "extensions.worktreeConfig", "true"
         )
         if result.returncode != 0:
             raise GraphManagerError("Worktree configuration cannot be enabled")
+        prior_worktree = _git(
+            repository, "config", "--worktree", "--get", "orichum.checkoutIdentity"
+        )
+        legacy = _git(
+            repository, "config", "--local", "--get", "orichum.checkoutIdentity"
+        )
         try:
             persisted = state_file.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
@@ -324,27 +328,70 @@ def _checkout_id(repository: Path) -> str:
                 return uuid.UUID(persisted).hex
             except ValueError as error:
                 raise GraphManagerError("Persisted checkout identity is invalid") from error
-        remove_legacy = legacy.returncode == 0 and is_main_worktree
-        if remove_legacy:
+        remove_prior_worktree = prior_worktree.returncode == 0
+        remove_legacy = (
+            not remove_prior_worktree
+            and legacy.returncode == 0
+            and is_main_worktree
+        )
+        configured = prior_worktree if remove_prior_worktree else legacy
+        if remove_prior_worktree or remove_legacy:
             try:
-                checkout_id = uuid.UUID(legacy.stdout.strip()).hex
+                checkout_id = uuid.UUID(configured.stdout.strip()).hex
             except ValueError as error:
                 raise GraphManagerError("Persisted checkout identity is invalid") from error
         else:
             checkout_id = uuid.uuid4().hex
+        temporary_path: Path | None = None
         try:
-            descriptor = os.open(
-                state_file,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-                0o600,
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".orichum.checkoutIdentity.",
+                suffix=".tmp",
+                dir=git_dir,
+            )
+            temporary_path = Path(temporary_name)
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "w", encoding="ascii") as file:
+                    descriptor = -1
+                    file.write(checkout_id)
+                    file.flush()
+                    os.fsync(file.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            os.replace(temporary_path, state_file)
+            temporary_path = None
+            directory = os.open(
+                git_dir,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
             )
             try:
-                os.write(descriptor, checkout_id.encode("ascii"))
-                os.fchmod(descriptor, 0o600)
+                os.fsync(directory)
             finally:
-                os.close(descriptor)
+                os.close(directory)
         except OSError as error:
             raise GraphManagerError("Checkout identity cannot be persisted") from error
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+        if remove_prior_worktree:
+            result = _git(
+                repository,
+                "config",
+                "--worktree",
+                "--unset-all",
+                "orichum.checkoutIdentity",
+            )
+            if result.returncode != 0:
+                raise GraphManagerError("Prior checkout identity cannot be removed")
         if remove_legacy:
             result = _git(
                 repository,
