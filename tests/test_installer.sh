@@ -297,6 +297,18 @@ Path(sys.argv[2]).write_text(source[start:end], encoding="utf-8")
 PY
 # shellcheck source=/dev/null
 source "$migration_library"
+rollback_library="$fixture/installed-control-plane-rollback.sh"
+python3 - "$ROOT/install.sh" "$rollback_library" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index("rollback_install_transaction()")
+end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
+Path(sys.argv[2]).write_text(source[start:end], encoding="utf-8")
+PY
+# shellcheck source=/dev/null
+source "$rollback_library"
 
 v1_config="$fixture/v1-config"
 v1_candidate="$fixture/v1-candidate"
@@ -306,7 +318,13 @@ for control_file in \
     controller-policy.md; do
   install -m 0600 "$ROOT/config/$control_file" "$v1_config/$control_file"
 done
-printf '{"schemaVersion":2,"accounts":[]}\n' >"$v1_config/accounts.json"
+printf '%s\n' \
+  '{"schemaVersion":2,"accounts":[{' \
+  '"id":"oc-a-1111111111111111","name":"Primary OpenAI",' \
+  '"provider":"openai","credentialRef":"openai.json","pool":"shared",' \
+  '"routingPrefix":"oc-r-1111111111111111","priority":100,' \
+  '"state":"active","originalPrefix":null,"originalPriority":null}]}' \
+  >"$v1_config/accounts.json"
 chmod 0600 "$v1_config/accounts.json"
 jq '
   {
@@ -340,6 +358,7 @@ printf '%s\n' \
   '"oc-c-c64159d152c2cf90":"oc-a-1111111111111111"}}' \
   >"$v1_config/stack-bindings.json"
 chmod 0600 "$v1_config/model-stacks.json" "$v1_config/stack-bindings.json"
+rm "$v1_config/plugins.json"
 cp "$v1_config/model-stacks.json" "$fixture/v1-model-stacks.saved"
 cp "$v1_config/stack-bindings.json" "$fixture/v1-bindings.saved"
 install -d -m 0700 "$fixture/v1-snapshot"
@@ -350,26 +369,62 @@ snapshot_path "$v1_config/stack-bindings.json" \
 
 stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v1_config" "$v1_candidate"
-if (exit 73); then
-  printf 'forced post-staging failure unexpectedly succeeded\n' >&2
-  exit 1
-fi
 cmp "$fixture/v1-model-stacks.saved" "$v1_config/model-stacks.json"
 cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
 jq -e '.schemaVersion == 2 and .stacks.balanced' \
   "$v1_candidate/model-stacks.json" >/dev/null
 cmp "$fixture/v1-bindings.saved" "$v1_candidate/stack-bindings.json"
-activate_installed_control_plane "$v1_candidate" "$v1_config"
-restore_snapshot "$v1_config/model-stacks.json" \
-  "$fixture/v1-snapshot" model-stacks
-restore_snapshot "$v1_config/stack-bindings.json" \
-  "$fixture/v1-snapshot" stack-bindings
-cmp "$fixture/v1-model-stacks.saved" "$v1_config/model-stacks.json"
-cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
-activate_installed_control_plane "$v1_candidate" "$v1_config"
+
+activation_snapshot="$fixture/activation-snapshot"
+install -d -m 0700 "$activation_snapshot"
+activate_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v1_candidate" "$v1_config" \
+  "$activation_snapshot"
 jq -e '.schemaVersion == 2 and .stacks.balanced' \
   "$v1_config/model-stacks.json" >/dev/null
+
+trap - ERR
+set +e
+(
+  workflow_cleanup_init
+  snapshot_dir="$activation_snapshot"
+  INSTALLED_CONFIG_ROOT="$v1_config"
+  WORKFLOW_ROOT="$ROOT"
+  ORICHUM_PYTHON="$python_bin/python3.14"
+  config_transaction_active=true
+  python_transaction_active=false
+  private_tools_transaction_active=false
+  cliproxy_transaction_active=false
+  endpoint_transaction_active=false
+  claudex_proxy_transaction_active=false
+  headroom_transaction_active=false
+  claudex_proxy_runtime_mutated=false
+  orichum_launcher_mutated=false
+  endpoint_lock_owned=false
+  WORKFLOW_ROLLBACK_HANDLER=rollback_install_transaction
+  WORKFLOW_TRANSACTION_ACTIVE=true
+  verify_committed_control_plane() { return 73; }
+  verify_committed_control_plane
+  workflow_cleanup "$?"
+)
+activation_failure_rc=$?
+set -e
+trap report_test_failure ERR
+[[ "$activation_failure_rc" -eq 73 ]]
+cmp "$fixture/v1-model-stacks.saved" "$v1_config/model-stacks.json"
 cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
+[[ ! -e "$v1_config/plugins.json" && ! -L "$v1_config/plugins.json" ]]
+[[ -z "$(find "$v1_config" -maxdepth 1 -name '.model-stacks.transaction*' \
+  -print -quit)" ]]
+
+activate_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v1_candidate" "$v1_config" \
+  "$activation_snapshot"
+jq -e '.schemaVersion == 2 and .stacks.balanced' \
+  "$v1_config/model-stacks.json" >/dev/null
+jq -e \
+  '.candidateAccounts["oc-c-c64159d152c2cf90"] == "oc-a-1111111111111111"' \
+  "$v1_config/stack-bindings.json" >/dev/null
 [[ "$(path_mode "$v1_config/model-stacks.json")" == 600 ]]
 [[ "$(path_mode "$v1_config/stack-bindings.json")" == 600 ]]
 
@@ -384,7 +439,9 @@ jq '
 chmod 0600 "$v2_config/model-stacks.json"
 stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"
-activate_installed_control_plane "$v2_candidate" "$v2_config"
+activate_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v2_candidate" "$v2_config" \
+  "$fixture/v2-activation-snapshot"
 jq -e '.schemaVersion == 2 and .stacks.heavy' \
   "$v2_config/model-stacks.json" >/dev/null
 cp "$v2_config/model-stacks.json" "$fixture/v2-first-run.saved"
@@ -392,9 +449,72 @@ cp "$v2_config/stack-bindings.json" "$fixture/v2-bindings.saved"
 rm -rf -- "$v2_candidate"
 stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"
-activate_installed_control_plane "$v2_candidate" "$v2_config"
+activate_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v2_candidate" "$v2_config" \
+  "$fixture/v2-activation-snapshot"
 cmp "$fixture/v2-first-run.saved" "$v2_config/model-stacks.json"
 cmp "$fixture/v2-bindings.saved" "$v2_config/stack-bindings.json"
+
+concurrent_config="$fixture/concurrent-config"
+concurrent_candidate="$fixture/concurrent-candidate"
+concurrent_snapshot="$fixture/concurrent-snapshot"
+concurrent_ready="$fixture/concurrent.ready"
+concurrent_release="$fixture/concurrent.release"
+install -d -m 0700 "$concurrent_config"
+cp -p "$v2_config/"* "$concurrent_config/"
+stage_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" \
+  "$concurrent_config" "$concurrent_candidate"
+mkfifo "$concurrent_ready" "$concurrent_release"
+python3 - \
+  "$ROOT" "$concurrent_config" "$concurrent_ready" \
+  "$concurrent_release" <<'PY' &
+from dataclasses import replace
+from pathlib import Path
+import sys
+from types import MappingProxyType
+
+root = Path(sys.argv[1])
+config = Path(sys.argv[2]).resolve()
+ready = Path(sys.argv[3])
+release = Path(sys.argv[4])
+sys.path.insert(0, str(root))
+
+from integrations.common.project_context import control_plane_transaction
+from integrations.common.stack_store import load_stack_snapshot, save_stack
+
+model = config / "model-stacks.json"
+bindings = config / "stack-bindings.json"
+with control_plane_transaction(config):
+    with ready.open("wb") as signal:
+        signal.write(b"x")
+    with release.open("rb") as gate:
+        gate.read(1)
+    snapshot = load_stack_snapshot(model, bindings)
+    updated = replace(
+        snapshot.stacks,
+        models=MappingProxyType(
+            {
+                **snapshot.stacks.models,
+                "concurrent-model": next(
+                    iter(snapshot.stacks.models.values())
+                ),
+            }
+        ),
+    )
+    save_stack(snapshot, updated, snapshot.bindings)
+PY
+writer_pid=$!
+IFS= read -r -n 1 <"$concurrent_ready"
+activate_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" \
+  "$concurrent_candidate" "$concurrent_config" "$concurrent_snapshot" &
+activation_pid=$!
+printf x >"$concurrent_release"
+wait "$writer_pid"
+wait "$activation_pid"
+jq -e '.models["concurrent-model"] and .defaultStack == "heavy"' \
+  "$concurrent_config/model-stacks.json" >/dev/null
 
 unlocked_config="$fixture/unlocked-config"
 unlocked_candidate="$fixture/unlocked-candidate"
@@ -410,8 +530,84 @@ chmod 0600 "$unlocked_config/accounts.json"
 stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$unlocked_config" "$unlocked_candidate"
 [[ ! -e "$unlocked_candidate/stack-bindings.json" ]]
-activate_installed_control_plane "$unlocked_candidate" "$unlocked_config"
+activate_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$unlocked_candidate" "$unlocked_config" \
+  "$fixture/unlocked-activation-snapshot"
 [[ ! -e "$unlocked_config/stack-bindings.json" ]]
+
+unsafe_config="$fixture/unsafe-config"
+unsafe_candidate="$fixture/unsafe-candidate"
+install -d -m 0700 "$unsafe_config"
+cp -p "$v1_config/"* "$unsafe_config/"
+mv "$unsafe_config/model-stacks.json" "$unsafe_config/model-stacks.real"
+ln -s model-stacks.real "$unsafe_config/model-stacks.json"
+if stage_installed_control_plane \
+    "$python_bin/python3.14" "$ROOT" "$unsafe_config" "$unsafe_candidate" \
+    >"$fixture/unsafe-symlink.stdout" \
+    2>"$fixture/unsafe-symlink.stderr"; then
+  printf 'symlinked installed model stacks were accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'model stacks is unsafe' "$fixture/unsafe-symlink.stderr"
+rm "$unsafe_config/model-stacks.json"
+mv "$unsafe_config/model-stacks.real" "$unsafe_config/model-stacks.json"
+chmod 0644 "$unsafe_config/model-stacks.json"
+if stage_installed_control_plane \
+    "$python_bin/python3.14" "$ROOT" "$unsafe_config" "$unsafe_candidate" \
+    >"$fixture/unsafe-mode.stdout" 2>"$fixture/unsafe-mode.stderr"; then
+  printf 'unsafe installed model-stack mode was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'model stacks is unsafe' "$fixture/unsafe-mode.stderr"
+chmod 0600 "$unsafe_config/model-stacks.json"
+mv "$unsafe_config/stack-bindings.json" \
+  "$unsafe_config/stack-bindings.real"
+ln -s stack-bindings.real "$unsafe_config/stack-bindings.json"
+if stage_installed_control_plane \
+    "$python_bin/python3.14" "$ROOT" "$unsafe_config" "$unsafe_candidate" \
+    >"$fixture/unsafe-binding-symlink.stdout" \
+    2>"$fixture/unsafe-binding-symlink.stderr"; then
+  printf 'symlinked installed stack bindings were accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'stack bindings are unsafe' \
+  "$fixture/unsafe-binding-symlink.stderr"
+rm "$unsafe_config/stack-bindings.json"
+mv "$unsafe_config/stack-bindings.real" \
+  "$unsafe_config/stack-bindings.json"
+chmod 0644 "$unsafe_config/stack-bindings.json"
+if stage_installed_control_plane \
+    "$python_bin/python3.14" "$ROOT" "$unsafe_config" "$unsafe_candidate" \
+    >"$fixture/unsafe-binding-mode.stdout" \
+    2>"$fixture/unsafe-binding-mode.stderr"; then
+  printf 'unsafe installed stack-binding mode was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'stack bindings are unsafe' "$fixture/unsafe-binding-mode.stderr"
+
+python3 - "$ROOT" "$unsafe_config/model-stacks.json" <<'PY'
+import os
+from pathlib import Path
+import sys
+from unittest import mock
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common import install_control_plane
+
+with mock.patch.object(
+    install_control_plane.os, "getuid", return_value=os.getuid() + 1
+):
+    try:
+        install_control_plane._private_bytes(
+            Path(sys.argv[2]), "model stacks", 1024 * 1024
+        )
+    except install_control_plane.InstallControlPlaneError as error:
+        if "unsafe" not in str(error):
+            raise
+    else:
+        raise SystemExit("foreign-owner model stacks were accepted")
+PY
 
 for script in \
     install.sh lib/workflow.sh bin/orichum bin/orichum-context \

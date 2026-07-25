@@ -299,29 +299,55 @@ def _serialize_bindings(updated: StackBindings) -> bytes:
 def _validate_bindings(
     stacks: NormalizedStacks, bindings: StackBindings, binding_path: Path
 ) -> None:
-    candidates = _candidate_ids(stacks)
-    missing = sorted(
-        set(bindings.candidate_accounts) - candidates
-    )
-    if missing:
-        raise StackStoreError(
-            "stack binding references an unknown candidate"
-        )
     try:
         accounts = load_accounts(binding_path.parent / "accounts.json")
     except AccountError as error:
         raise StackStoreError(
             "account registry is unavailable for stack bindings"
         ) from error
+    validate_stack_bindings(stacks, bindings, accounts)
+
+
+def validate_stack_bindings(
+    stacks: NormalizedStacks,
+    bindings: StackBindings,
+    accounts: Sequence[Account],
+) -> None:
+    """Validate machine-local locks against stack candidates and accounts."""
+    candidates = {
+        candidate.id: candidate
+        for stack in stacks.stacks.values()
+        for choices in (stack.controller, *stack.agents.values())
+        for candidate in choices
+    }
+    missing = sorted(
+        set(bindings.candidate_accounts) - set(candidates)
+    )
+    if missing:
+        raise StackStoreError(
+            "stack binding references an unknown candidate"
+        )
     active = {
-        account.id for account in accounts if account.state == "active"
+        account.id: account
+        for account in accounts
+        if account.state == "active"
     }
     inactive = sorted(
-        set(bindings.candidate_accounts.values()) - active
+        set(bindings.candidate_accounts.values()) - set(active)
     )
     if inactive:
         raise StackStoreError(
             "stack binding must reference an active account"
+        )
+    incompatible = [
+        candidate
+        for candidate, account_id in bindings.candidate_accounts.items()
+        if active[account_id].provider
+        not in candidates[candidate].providers
+    ]
+    if incompatible:
+        raise StackStoreError(
+            "stack binding account must use an allowed provider"
         )
 
 
@@ -638,6 +664,66 @@ def save_stack(
     )
 
 
+def restore_stack_files(
+    model_path: Path,
+    binding_path: Path,
+    *,
+    expected_stack_digest: str,
+    expected_binding_digest: str | None,
+    original_model: bytes | None,
+    original_binding: bytes | None,
+) -> None:
+    """Restore exact installer snapshots if no later writer changed them."""
+    model_path = Path(model_path)
+    binding_path = Path(binding_path)
+    parent = _require_shared_private_parent(model_path, binding_path)
+    try:
+        with stack_binding_transaction(binding_path) as transaction:
+            with _model_lock(parent):
+                _recover_transaction(model_path, binding_path)
+                current = _file_bytes(
+                    model_path,
+                    label="model stacks",
+                    limit=MAX_CONFIG_BYTES,
+                    required_mode=0o600,
+                )
+                if (
+                    hashlib.sha256(current).hexdigest()
+                    != expected_stack_digest
+                    or transaction.digest() != expected_binding_digest
+                ):
+                    raise StackStoreError(
+                        "stack files changed after installer activation"
+                    )
+                if original_model is None:
+                    _unlink(binding_path)
+                    _unlink(model_path)
+                    _fsync_directory(parent)
+                    return
+                _replace_private_file(
+                    _recovery_path(parent, _MODEL_ORIGINAL),
+                    original_model,
+                )
+                if original_binding is None:
+                    _unlink(_recovery_path(parent, _BINDING_ORIGINAL))
+                else:
+                    _replace_private_file(
+                        _recovery_path(parent, _BINDING_ORIGINAL),
+                        original_binding,
+                    )
+                _write_transaction_marker(
+                    parent,
+                    "pending",
+                    original_binding is not None,
+                )
+                _fsync_directory(parent)
+                _recover_transaction(model_path, binding_path)
+    except StackStoreError:
+        raise
+    except StackBindingError as error:
+        raise StackStoreError(str(error)) from error
+
+
 def _save_stack_at(
     model_path: Path,
     binding_path: Path,
@@ -668,9 +754,6 @@ def _save_stack_at(
                         "stack files changed during update"
                     )
                 model_payload = _serialize_stacks(updated)
-                binding_payload = _serialize_bindings(
-                    updated_bindings
-                )
                 _validate_bindings(
                     updated, updated_bindings, binding_path
                 )
@@ -684,6 +767,12 @@ def _save_stack_at(
                         required_mode=0o600,
                     )
                 )
+                binding_payload = (
+                    None
+                    if original_binding is None
+                    and not updated_bindings.candidate_accounts
+                    else _serialize_bindings(updated_bindings)
+                )
                 staged_model: Path | None = None
                 staged_binding: Path | None = None
                 recovery_ready = False
@@ -692,9 +781,10 @@ def _save_stack_at(
                     staged_model = _stage(
                         model_path, model_payload, 0o600
                     )
-                    staged_binding = _stage(
-                        binding_path, binding_payload, 0o600
-                    )
+                    if binding_payload is not None:
+                        staged_binding = _stage(
+                            binding_path, binding_payload, 0o600
+                        )
                     _replace_private_file(
                         _recovery_path(parent, _MODEL_ORIGINAL),
                         current_model,
@@ -717,8 +807,9 @@ def _save_stack_at(
                     )
                     recovery_ready = True
                     _fsync_directory(parent)
-                    os.replace(staged_binding, binding_path)
-                    staged_binding = None
+                    if staged_binding is not None:
+                        os.replace(staged_binding, binding_path)
+                        staged_binding = None
                     os.replace(staged_model, model_path)
                     staged_model = None
                     _fsync_directory(parent)

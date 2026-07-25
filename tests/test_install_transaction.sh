@@ -209,21 +209,18 @@ rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'remove_orichum_python_generation' "$ROOT/install.sh"
-rg -Fq 'snapshot_path "$INSTALLED_CONFIG_ROOT/model-stacks.json"' \
+rg -Fq 'from integrations.common.install_control_plane import activate' \
   "$ROOT/install.sh"
-rg -Fq 'snapshot_path "$INSTALLED_CONFIG_ROOT/stack-bindings.json"' \
+rg -Fq 'from integrations.common.install_control_plane import rollback' \
   "$ROOT/install.sh"
-rg -Fq 'restore_snapshot "$INSTALLED_CONFIG_ROOT/model-stacks.json"' \
-  "$ROOT/install.sh"
-rg -Fq 'restore_snapshot "$INSTALLED_CONFIG_ROOT/stack-bindings.json"' \
-  "$ROOT/install.sh"
+rg -Fq 'rollback_installed_control_plane' "$ROOT/install.sh"
 rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
 rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
 settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
   "$ROOT/install.sh" | cut -d: -f1)"
 transaction_end_line="$(rg -n -F 'WORKFLOW_TRANSACTION_ACTIVE=false' \
   "$ROOT/install.sh" | tail -1 | cut -d: -f1)"
-[[ "$settings_line" -gt "$transaction_end_line" ]]
+[[ "$settings_line" -lt "$transaction_end_line" ]]
 
 python3 - "$ROOT/install.sh" <<'PY'
 import sys
@@ -234,10 +231,10 @@ end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
 rollback = source[start:end]
 
 stop_route = rollback.index("claudex_proxy_runtime_mutated")
-restore_python = rollback.index("rollback_python_activation")
 restore_installed_config = rollback.index(
-    'restore_snapshot "$INSTALLED_CONFIG_ROOT/model-stacks.json"'
+    "rollback_installed_control_plane"
 )
+restore_python = rollback.index("rollback_python_activation")
 restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
     'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
@@ -247,8 +244,8 @@ restore_route = rollback.index("restore_claudex_proxy_service")
 restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
-    < restore_python
     < restore_installed_config
+    < restore_python
     < restore_private_tools
     < restore_cliproxy
     < restore_endpoint

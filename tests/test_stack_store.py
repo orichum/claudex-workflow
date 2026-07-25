@@ -21,6 +21,7 @@ from integrations.common.stack_store import (
     load_stack_snapshot,
     save_stack,
     validate_stack_assignment,
+    validate_stack_bindings,
 )
 
 
@@ -208,6 +209,9 @@ class StackStoreTests(unittest.TestCase):
         second_staged = threading.Event()
         first_errors: list[BaseException] = []
         second_errors: list[BaseException] = []
+        first_update = normalize_model_stacks(
+            self.document_with_stack("first")
+        )
         from integrations.common import stack_store
 
         real_stage = stack_store._stage
@@ -232,7 +236,7 @@ class StackStoreTests(unittest.TestCase):
             try:
                 save_stack(
                     first_snapshot,
-                    first_snapshot.stacks,
+                    first_update,
                     first_snapshot.bindings,
                 )
             except BaseException as error:
@@ -789,6 +793,61 @@ class StackStoreTests(unittest.TestCase):
         self.assertEqual(
             self.read_model_document(), self.document()
         )
+
+    def test_save_preserves_absent_binding_when_empty_and_unchanged(self):
+        self.assertFalse(self.binding_path.exists())
+
+        save_stack(
+            self.snapshot,
+            self.snapshot.stacks,
+            self.snapshot.bindings,
+        )
+
+        self.assertFalse(self.binding_path.exists())
+
+    def test_combined_binding_validation_requires_usable_matching_account(self):
+        candidate = "oc-c-2000000000000001"
+        valid = self.active_account()
+        validate_stack_bindings(
+            self.snapshot.stacks,
+            StackBindings({candidate: valid.id}),
+            (valid,),
+        )
+
+        with self.assertRaisesRegex(StackStoreError, "unknown candidate"):
+            validate_stack_bindings(
+                self.snapshot.stacks,
+                StackBindings(
+                    {"oc-c-ffffffffffffffff": valid.id}
+                ),
+                (valid,),
+            )
+
+        disabled = Account(
+            **{
+                **valid.__dict__,
+                "state": "disabled",
+            }
+        )
+        with self.assertRaisesRegex(StackStoreError, "active account"):
+            validate_stack_bindings(
+                self.snapshot.stacks,
+                StackBindings({candidate: valid.id}),
+                (disabled,),
+            )
+
+        wrong_provider = Account(
+            **{
+                **valid.__dict__,
+                "provider": "anthropic",
+            }
+        )
+        with self.assertRaisesRegex(StackStoreError, "allowed provider"):
+            validate_stack_bindings(
+                self.snapshot.stacks,
+                StackBindings({candidate: valid.id}),
+                (wrong_provider,),
+            )
 
     def test_save_rejects_binding_to_missing_candidate_or_inactive_account(self):
         missing_candidate = StackBindings(

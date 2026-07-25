@@ -183,7 +183,7 @@ project_root="$fixture/project"
 nested_project="$project_root/nested/repository"
 palace="$fixture/palace"
 install -d -m 0700 \
-  "$config_root" "$data_root" "$data_root/state" \
+  "$config_root" "$data_root" "$data_root/auth" "$data_root/state" \
   "$nested_project" "$palace"
 for control_file in \
     model-stacks.json providers.json plugins.json runtime.json \
@@ -193,7 +193,7 @@ done
 
 python3 - \
   "$config_root/accounts.json" "$config_root/projects.json" \
-  "$project_root" "$palace" <<'PY'
+  "$project_root" "$palace" "$data_root/auth" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -203,6 +203,7 @@ accounts_path = Path(sys.argv[1])
 projects_path = Path(sys.argv[2])
 project = str(Path(sys.argv[3]).resolve())
 palace = str(Path(sys.argv[4]).resolve())
+auth_dir = Path(sys.argv[5])
 accounts = []
 for identifier, name, provider, prefix, priority in (
     (
@@ -248,6 +249,22 @@ for identifier, name, provider, prefix, priority in (
             "originalPriority": None,
         }
     )
+    credential = auth_dir / f"{provider}-{identifier[-1]}.json"
+    credential.write_text(
+        json.dumps(
+            {
+                "type": "codex" if provider == "openai" else "claude",
+                "account_id": identifier,
+                "prefix": prefix,
+                "priority": priority,
+                "disabled": False,
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(credential, 0o600)
 accounts_path.write_text(
     json.dumps({"schemaVersion": 2, "accounts": accounts}, indent=2) + "\n",
     encoding="utf-8",
@@ -444,66 +461,25 @@ if [[ -e "$config_root/stack-bindings.json" ]]; then
     "$config_root/stack-bindings.json" >/dev/null
 fi
 
-ORICHUM_CONFIG_HOME="$config_root" \
-ORICHUM_DATA_HOME="$data_root" \
-  python3 - "$ROOT" "$nested_project" "$fixture/routes.json" <<'PY'
+(
+  cd "$nested_project"
+  ORICHUM_CONFIG_HOME="$config_root" \
+  ORICHUM_DATA_HOME="$data_root" \
+    python3 - "$ROOT" "$fixture/routes.json" "$fixture/session.id" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
-launch = Path(sys.argv[2])
-output = Path(sys.argv[3])
+output = Path(sys.argv[2])
+session_id = Path(sys.argv[3])
 sys.path.insert(0, str(root))
 
-from integrations.common.account_registry import load_accounts
-from integrations.common.orichum_cli import _paths
-from integrations.common.orichum_config import (
-    default_config_paths,
-    load_control_plane,
-)
-from integrations.common.orichum_sessions import (
-    create_logical_session,
-    resolve_session_plan,
-)
-from integrations.common.project_context import resolve_control_plane_context
-from integrations.common.stack_bindings import load_stack_bindings
+from integrations.common import orichum_cli
 
-paths = _paths()
-config = load_control_plane(default_config_paths(paths["config"]))
-accounts = load_accounts(paths["config"] / "accounts.json")
-context = resolve_control_plane_context(
-    config.documents["projects"], launch
-)
-route = context["route"]
-available = frozenset(
-    f"oc-r-{account.id[-16:]}/{upstream}"
-    for account in accounts
-    for upstream in (
-        ("gpt-5.6-sol", "gpt-5.6-terra")
-        if account.provider == "openai"
-        else ("claude-sonnet-5", "claude-opus-4-8")
-    )
-)
-plan = resolve_session_plan(
-    config.documents,
-    accounts,
-    pools=tuple(route["accountPools"]),
-    requested_stack=route["modelStack"],
-    health={},
-    selection_ordinal=0,
-    bindings=load_stack_bindings(
-        paths["config"] / "stack-bindings.json"
-    ),
-    available_models=available,
-)
-logical = create_logical_session(
-    paths["state"],
-    project_root=Path(route["contextRootReal"]),
-    stack=plan.stack,
-    controller=plan.controller,
-    agents=plan.agents,
-)
+
+class LaunchRecorded(RuntimeError):
+    pass
 
 
 def rendered(binding):
@@ -518,22 +494,53 @@ def rendered(binding):
     }
 
 
-output.write_text(
-    json.dumps(
-        {
-            "session": logical.id,
-            "stack": logical.stack,
-            "controller": rendered(logical.controller),
-            "architecture-advisor": rendered(
-                logical.agents["architecture-advisor"]
-            ),
-        },
-        indent=2,
+def record_launch(prepared, *_args, **_kwargs):
+    logical = prepared.logical
+    output.write_text(
+        json.dumps(
+            {
+                "session": logical.id,
+                "stack": logical.stack,
+                "controller": rendered(logical.controller),
+                "architecture-advisor": rendered(
+                    logical.agents["architecture-advisor"]
+                ),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
-    + "\n",
-    encoding="utf-8",
-)
+    session_id.write_text(logical.id + "\n", encoding="ascii")
+    raise LaunchRecorded
+
+
+orichum_cli._verify_runtime = lambda _paths: None
+orichum_cli._launch_session = record_launch
+try:
+    orichum_cli.main(["run"])
+except LaunchRecorded:
+    pass
+else:
+    raise SystemExit("real session preparation did not reach final launch")
 PY
+)
+
+session_id="$(<"$fixture/session.id")"
+ORICHUM_CONFIG_HOME="$config_root" \
+ORICHUM_DATA_HOME="$data_root" \
+  python3 -I -B -c \
+    'import sys; sys.path.insert(0, sys.argv.pop(1)); from integrations.common.orichum_cli import main; raise SystemExit(main(sys.argv[1:]))' \
+    "$ROOT" session routes "$session_id" >"$fixture/session-routes.output"
+rg -Fq 'controller' "$fixture/session-routes.output"
+rg -Fq 'oc-a-0000000000000001' \
+  "$fixture/session-routes.output"
+rg -Fq 'oc-a-0000000000000002 (openai)' \
+  "$fixture/session-routes.output"
+rg -Fq 'architecture-advisor' "$fixture/session-routes.output"
+rg -Fq 'oc-a-0000000000000003' "$fixture/session-routes.output"
+rg -Fq 'oc-a-0000000000000004 (anthropic)' \
+  "$fixture/session-routes.output"
 
 jq -e '
   .stack == "heavy" and

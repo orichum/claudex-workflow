@@ -12,89 +12,75 @@ stage_installed_control_plane() {
   local workflow_root="$2"
   local installed_root="$3"
   local candidate_root="$4"
-  local control_file source_file
-
-  install -d -m 0700 "$candidate_root"
-  for control_file in \
-      model-stacks.json projects.json providers.json plugins.json runtime.json \
-      controller-policy.md; do
-    source_file="$installed_root/$control_file"
-    if [[ ! -e "$source_file" ]]; then
-      source_file="$workflow_root/config/$control_file"
-    fi
-    install -m 0600 "$source_file" "$candidate_root/$control_file"
-  done
-  if [[ -e "$installed_root/accounts.json" ]]; then
-    install -m 0600 "$installed_root/accounts.json" \
-      "$candidate_root/accounts.json"
-  else
-    printf '{"schemaVersion":2,"accounts":[]}\n' \
-      >"$candidate_root/accounts.json"
-    chmod 0600 "$candidate_root/accounts.json"
-  fi
-  if [[ -e "$installed_root/stack-bindings.json" ]]; then
-    install -m 0600 "$installed_root/stack-bindings.json" \
-      "$candidate_root/stack-bindings.json"
-  fi
-
   (
     cd "$workflow_root"
     PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-      "$workflow_root" "$candidate_root" <<'PY'
-import json
-import os
-from pathlib import Path
+      "$workflow_root" "$installed_root" "$candidate_root" <<'PY'
 import sys
+from pathlib import Path
 
 root = Path(sys.argv[1])
-candidate = Path(sys.argv[2]).resolve(strict=True)
 sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import stage
 
-from integrations.common.orichum_config import (
-    default_config_paths,
-    load_control_plane,
-)
-from integrations.common.stack_bindings import load_stack_bindings
-from integrations.common.stack_definition import (
-    normalize_model_stacks,
-    serialize_model_stacks,
-)
-
-model_stacks = candidate / "model-stacks.json"
-document = json.loads(model_stacks.read_text(encoding="utf-8"))
-canonical = serialize_model_stacks(normalize_model_stacks(document))
-model_stacks.write_text(
-    json.dumps(canonical, indent=2, ensure_ascii=False) + "\n",
-    encoding="utf-8",
-)
-os.chmod(model_stacks, 0o600)
-load_control_plane(default_config_paths(candidate))
-bindings = candidate / "stack-bindings.json"
-if bindings.exists():
-    load_stack_bindings(bindings)
+stage(root, Path(sys.argv[2]), Path(sys.argv[3]))
 PY
   )
 }
 
 activate_installed_control_plane() {
-  local candidate_root="$1"
-  local installed_root="$2"
-  local control_file staged_file
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local candidate_root="$3"
+  local installed_root="$4"
+  local snapshot_root="$5"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$candidate_root" "$installed_root" \
+      "$snapshot_root" <<'PY'
+import sys
+from pathlib import Path
 
-  for control_file in \
-      model-stacks.json projects.json providers.json plugins.json runtime.json \
-      controller-policy.md accounts.json; do
-    staged_file="$installed_root/.$control_file.orichum.$$"
-    install -m 0600 "$candidate_root/$control_file" "$staged_file"
-    mv -f "$staged_file" "$installed_root/$control_file"
-  done
-  if [[ -e "$candidate_root/stack-bindings.json" ]]; then
-    staged_file="$installed_root/.stack-bindings.json.orichum.$$"
-    install -m 0600 "$candidate_root/stack-bindings.json" "$staged_file"
-    mv -f "$staged_file" "$installed_root/stack-bindings.json"
-  fi
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import activate
+
+activate(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+PY
+  )
+}
+
+rollback_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local installed_root="$3"
+  local snapshot_root="$4"
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$installed_root" "$snapshot_root" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import rollback
+
+rollback(Path(sys.argv[2]), Path(sys.argv[3]))
+PY
+  )
+}
+
+verify_committed_control_plane() {
+  local installed_root="$1"
+  local data_root="$2"
+  ORICHUM_CONFIG_HOME="$installed_root" \
+  ORICHUM_DATA_HOME="$data_root" \
+    "$WORKFLOW_ROOT/bin/orichum" config validate >/dev/null
 }
 # END installed control-plane transaction
+
 
 USER_BIN_DIR="${USER_BIN_DIR:-$HOME/.local/bin}"
 WORKFLOW_DATA_ROOT="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || \
@@ -279,10 +265,6 @@ export ORICHUM_PYTHON_VALIDATED
 export ORICHUM_INSTALL_BOOTSTRAP=false
 
 candidate_config_root="$installer_temp/control-plane"
-snapshot_path "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
-  "$snapshot_dir" installed-model-stacks
-snapshot_path "$INSTALLED_CONFIG_ROOT/stack-bindings.json" \
-  "$snapshot_dir" installed-stack-bindings
 stage_installed_control_plane \
   "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
   "$INSTALLED_CONFIG_ROOT" "$candidate_config_root" || \
@@ -1159,19 +1141,14 @@ rollback_install_transaction() {
     fi
   fi
 
-  if [[ "${python_transaction_active:-false}" == true ]]; then
-    rollback_python_activation || rollback_ready=false
+  if [[ "${config_transaction_active:-false}" == true ]]; then
+    rollback_installed_control_plane \
+      "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+      "$INSTALLED_CONFIG_ROOT" "$snapshot_dir" || rollback_ready=false
   fi
 
-  if [[ "${config_transaction_active:-false}" == true ]]; then
-    restore_snapshot "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
-      "$snapshot_dir" installed-model-stacks || rollback_ready=false
-    snapshot_path_matches "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
-      "$snapshot_dir" installed-model-stacks || rollback_ready=false
-    restore_snapshot "$INSTALLED_CONFIG_ROOT/stack-bindings.json" \
-      "$snapshot_dir" installed-stack-bindings || rollback_ready=false
-    snapshot_path_matches "$INSTALLED_CONFIG_ROOT/stack-bindings.json" \
-      "$snapshot_dir" installed-stack-bindings || rollback_ready=false
+  if [[ "${python_transaction_active:-false}" == true ]]; then
+    rollback_python_activation || rollback_ready=false
   fi
 
   if [[ "${private_tools_transaction_active:-false}" == true ]]; then
@@ -1255,7 +1232,7 @@ rollback_install_transaction() {
 
 WORKFLOW_ROLLBACK_HANDLER=rollback_install_transaction
 WORKFLOW_TRANSACTION_ACTIVE=true
-config_transaction_active=true
+config_transaction_active=false
 
 endpoint_lock_token="$$:$RANDOM:$RANDOM"
 acquire_endpoint_config_lock \
@@ -1780,24 +1757,16 @@ if [[ "$endpoint_lock_owned" == true ]]; then
   endpoint_lock_owned=false
 fi
 activate_installed_control_plane \
-  "$candidate_config_root" "$INSTALLED_CONFIG_ROOT" || \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+  "$candidate_config_root" "$INSTALLED_CONFIG_ROOT" "$snapshot_dir" || \
   workflow_die "installed Orichum control plane could not be committed"
+config_transaction_active=true
 ORICHUM_CONFIG_ROOT="$INSTALLED_CONFIG_ROOT"
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
 export ORICHUM_CONFIG_HOME
-ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
-ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
-  "$WORKFLOW_ROOT/bin/orichum" config validate >/dev/null || \
+verify_committed_control_plane \
+  "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" || \
   workflow_die "committed Orichum control plane is invalid"
-cliproxy_transaction_active=false
-headroom_transaction_active=false
-claudex_proxy_transaction_active=false
-claudex_proxy_runtime_mutated=false
-endpoint_transaction_active=false
-private_tools_transaction_active=false
-python_transaction_active=false
-config_transaction_active=false
-WORKFLOW_TRANSACTION_ACTIVE=false
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
@@ -1850,3 +1819,12 @@ else
   ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
     "$USER_BIN_DIR/orichum" doctor
 fi
+cliproxy_transaction_active=false
+headroom_transaction_active=false
+claudex_proxy_transaction_active=false
+claudex_proxy_runtime_mutated=false
+endpoint_transaction_active=false
+private_tools_transaction_active=false
+python_transaction_active=false
+config_transaction_active=false
+WORKFLOW_TRANSACTION_ACTIVE=false

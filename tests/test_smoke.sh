@@ -183,6 +183,11 @@ rg -Fq \
 rg -Fq 'Claudex template is pending provider login' "$ROOT/doctor.sh"
 rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
+rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
+rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
+rg -Fq \
+  'Account display names are shown only by explicit account-management and stack' \
+  "$ROOT/README.md"
 rg -Fq 'validate_orichum_python' \
   "$ROOT/bin/orichum-runtime-ready"
 for parallel_health_contract in \

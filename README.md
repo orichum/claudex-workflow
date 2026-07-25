@@ -139,9 +139,9 @@ orichum provider account remove ACCOUNT_ID
 orichum provider account sync
 ```
 
-Account names are shown only by the explicit account-management command.
-Credential filenames, routing prefixes, tokens, and secrets are never printed
-there.
+Account display names are shown only by explicit account-management and stack
+inspection/configuration commands. Credential filenames, routing prefixes,
+tokens, and secrets are never printed by those commands.
 
 ### Configure live model stacks
 
