@@ -1421,7 +1421,7 @@ def _status_rows(
                     output,
                 )
             )
-            if dirty:
+            if dirty or graph_state == "invalid":
                 details.append(f"  checkout: {repository}")
         except GraphManagerError as error:
             rows.append(

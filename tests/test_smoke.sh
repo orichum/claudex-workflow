@@ -35,6 +35,11 @@ printf '#!/usr/bin/env bash\nexit 99\n' >"$fixture/fake-bin/python3"
 chmod 0755 "$fixture/fake-bin/python3"
 export ORICHUM_DATA_HOME="$fixture/data"
 caller_dir="$(cd "$fixture/caller" && pwd -P)"
+graph_from_caller="$(
+  cd "$caller_dir"
+  PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum-graph" .
+)"
+[[ "$graph_from_caller" == "[discover] found 0 repositories" ]]
 observed_cwd="$(
   cd "$caller_dir"
   OBSERVE_CWD=1 PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum" config

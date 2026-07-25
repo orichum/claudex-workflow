@@ -1537,6 +1537,29 @@ output.mkdir(parents=True, exist_ok=True)
         self.assertEqual(self.snapshot_tree(self.data_root), before_data)
         self.assertEqual(self.snapshot_tree(self.repository), before_repository)
 
+    def test_graph_status_details_clean_repository_with_invalid_graph(
+        self,
+    ) -> None:
+        status, _, stderr = self.run_graph(str(self.repository))
+        self.assertEqual(status, 0, stderr)
+        target = graph_manager.resolve_graph_target(
+            self.repository, self.data_root
+        )
+        target.graph_file.write_text("{}", encoding="utf-8")
+        before_data = self.snapshot_tree(self.data_root)
+        before_repository = self.snapshot_tree(self.repository)
+
+        status, stdout, stderr = self.run_graph(
+            "status", str(self.repository)
+        )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("invalid", stdout)
+        self.assertIn(f"  checkout: {self.repository}", stdout)
+        self.assertEqual(self.snapshot_tree(self.data_root), before_data)
+        self.assertEqual(self.snapshot_tree(self.repository), before_repository)
+
     def test_graph_identity_set_clear_and_validation(self) -> None:
         status, _, stderr = self.run_graph(
             "identity",
