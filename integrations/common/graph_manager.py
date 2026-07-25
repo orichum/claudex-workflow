@@ -8,6 +8,7 @@ import ctypes
 from dataclasses import dataclass
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,15 @@ class GraphTarget:
     output_dir: Path
     graph_file: Path
     metadata_file: Path
+
+
+@dataclass(frozen=True)
+class GraphBinding:
+    identity: str
+    revision: str
+    state_id: str
+    graph_file: Path
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -532,6 +542,90 @@ def _resolve_graph_target(
 def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
     """Return the central Graphify location for this repository state."""
     return _resolve_graph_target(repository, data_root, persist=True)
+
+
+def _graph_file_digest(graph_file: Path) -> str:
+    graph_file = _path_without_symlink(graph_file, "Graph file")
+    descriptor = None
+    try:
+        descriptor = os.open(
+            graph_file,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+        ):
+            raise GraphError("Graphify graph is unsafe")
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(descriptor)
+        path_after = os.stat(graph_file, follow_symlinks=False)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if any(
+            getattr(before, field) != getattr(after, field)
+            or getattr(after, field) != getattr(path_after, field)
+            for field in stable_fields
+        ):
+            raise GraphError("Graphify graph changed during validation")
+        return digest.hexdigest()
+    except GraphError:
+        raise
+    except OSError as error:
+        raise GraphError("Graphify graph is unavailable") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def resolve_available_graph(
+    repository: Path, data_root: Path
+) -> GraphBinding | None:
+    """Return a read-only binding for the graph matching repository state."""
+    try:
+        target = _resolve_graph_target(repository, data_root, persist=False)
+        status = inspect_graph(target)
+        if status.status != "current":
+            return None
+        digest = _graph_file_digest(target.graph_file)
+        current = _resolve_graph_target(repository, data_root, persist=False)
+        if (
+            current.identity.key != target.identity.key
+            or current.revision != target.revision
+            or current.state_id != target.state_id
+            or current.graph_file != target.graph_file
+            or inspect_graph(current).status != "current"
+        ):
+            return None
+        if not hmac.compare_digest(
+            digest, _graph_file_digest(current.graph_file)
+        ):
+            return None
+        return GraphBinding(
+            identity=current.identity.key,
+            revision=current.revision,
+            state_id=current.state_id,
+            graph_file=current.graph_file,
+            sha256=digest,
+        )
+    except GraphManagerError:
+        return None
 
 
 _LEGACY_GRAPHIFY_ENTRIES = frozenset(

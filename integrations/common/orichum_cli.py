@@ -76,6 +76,7 @@ from .stack_wizard import run_stack_wizard
 from .session_config import (
     SessionError,
     SessionPaths,
+    bind_session_graph,
     create_resolved_session,
 )
 
@@ -647,6 +648,7 @@ def _prepare_new_session(
     context = resolve_control_plane_context(
         config.documents["projects"], launch_dir
     )
+    context = bind_session_graph(context, paths["data"])
     route = context.get("route")
     if not isinstance(route, dict):
         raise CliError("launch directory is not mapped to an Orichum project")
@@ -705,6 +707,7 @@ def _prepare_resume(
     context = resolve_control_plane_context(
         config.documents["projects"], launch_dir
     )
+    context = bind_session_graph(context, paths["data"])
     route = context.get("route")
     if (
         not isinstance(route, dict)

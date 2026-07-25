@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +28,7 @@ from integrations.common.session_config import (
     verify_session,
 )
 from integrations.common.model_routing import EffectiveStack
+from integrations.common.graph_manager import resolve_graph_target
 
 
 class SessionConfigTests(unittest.TestCase):
@@ -161,6 +163,98 @@ class SessionConfigTests(unittest.TestCase):
             self.config_path,
             **self.routing_options(),
         )
+
+    def init_repository(
+        self,
+        repository: Path | None = None,
+        *,
+        content: str = "initial\n",
+    ) -> Path:
+        repository = self.launch_dir if repository is None else repository
+        repository.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "-C", str(repository), "init", "-q"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "config",
+                "user.email",
+                "tests@example.invalid",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "config", "user.name", "Session tests"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/session-graph.git",
+            ],
+            check=True,
+        )
+        (repository / "tracked.txt").write_text(content, encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "tracked.txt"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "fixture"],
+            check=True,
+        )
+        return repository.resolve(strict=True)
+
+    def create_central_graph(
+        self,
+        repository: Path,
+        *,
+        revision: str | None = None,
+        identity: str | None = None,
+        state_id: str | None = None,
+        graph_document: dict | None = None,
+    ):
+        self.runtime.chmod(0o700)
+        target = resolve_graph_target(repository, self.runtime)
+        target.output_dir.mkdir(parents=True, mode=0o700)
+        target.output_dir.chmod(0o700)
+        target.graph_file.write_text(
+            json.dumps(
+                graph_document
+                or {"nodes": [{"id": "tracked", "source_file": "tracked.txt"}]}
+            ),
+            encoding="utf-8",
+        )
+        target.graph_file.chmod(0o600)
+        target.metadata_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "repository_identity": identity or target.identity.key,
+                    "revision": revision or target.revision,
+                    "state_id": state_id or target.state_id,
+                    "kind": target.kind,
+                    "built_at_commit": revision or target.revision,
+                    **(
+                        {"checkout_path": str(target.repository)}
+                        if target.kind == "working"
+                        else {}
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        target.metadata_file.chmod(0o600)
+        return target
 
     def assert_rejected(self, action) -> None:
         with self.assertRaises(SessionError):
@@ -594,30 +688,170 @@ class SessionConfigTests(unittest.TestCase):
             },
         )
 
-    def test_graphify_is_added_only_for_a_repository_with_a_graph(self) -> None:
-        repository = self.launch_dir / "repository"
-        graph = repository / "graphify-out" / "graph.json"
-        graph.parent.mkdir(parents=True)
-        graph.write_text("{}", encoding="utf-8")
+    def test_session_uses_matching_central_graph(self) -> None:
+        repository = self.init_repository()
+        graph = self.create_central_graph(repository)
 
-        with mock.patch(
-            "integrations.common.project_context._git_root",
-            return_value=str(repository.resolve()),
+        session = self.create()
+        context = json.loads(session.context_file.read_text())
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+
+        self.assertEqual(context["graph"]["identity"], graph.identity.key)
+        self.assertEqual(
+            servers["graphify"],
+            {
+                "command": "/opt/tools/graphify-mcp",
+                "args": ["--graph", str(graph.graph_file)],
+            },
+        )
+
+    def test_stale_graph_is_omitted_without_blocking_session(self) -> None:
+        repository = self.init_repository()
+        self.create_central_graph(repository, revision="0" * 40)
+
+        session = self.create()
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+
+        self.assertNotIn("graphify", servers)
+
+    def test_graph_digest_mismatch_is_omitted(self) -> None:
+        repository = self.init_repository()
+        graph = self.create_central_graph(repository)
+        real_resolver = session_config.resolve_available_graph
+        calls = 0
+
+        def replace_after_binding(repository_path, data_root):
+            nonlocal calls
+            binding = real_resolver(repository_path, data_root)
+            calls += 1
+            if calls == 1:
+                graph.graph_file.write_text(
+                    json.dumps(
+                        {"nodes": [{"id": "replacement", "source_file": "tracked.txt"}]}
+                    ),
+                    encoding="utf-8",
+                )
+                graph.graph_file.chmod(0o600)
+            return binding
+
+        with mock.patch.object(
+            session_config,
+            "resolve_available_graph",
+            side_effect=replace_after_binding,
         ):
-            session = create_session(
+            session = self.create()
+
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        self.assertNotIn("graphify", servers)
+
+    def test_unsafe_central_graph_path_is_omitted(self) -> None:
+        repository = self.init_repository()
+        graph = self.create_central_graph(repository)
+        outside = self.fixture / "outside-graph.json"
+        outside.write_text(
+            graph.graph_file.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        graph.graph_file.unlink()
+        graph.graph_file.symlink_to(outside)
+
+        session = self.create()
+
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        self.assertNotIn("graphify", servers)
+
+    def test_wrong_repository_identity_is_omitted(self) -> None:
+        repository = self.init_repository()
+        self.create_central_graph(repository, identity="github.com/other/repository")
+
+        session = self.create()
+
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        self.assertNotIn("graphify", servers)
+
+    def test_dirty_state_mismatch_is_omitted(self) -> None:
+        repository = self.init_repository()
+        self.create_central_graph(repository)
+        (repository / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+        session = self.create()
+
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        self.assertNotIn("graphify", servers)
+
+    def test_new_physical_session_binds_replacement_without_mutating_existing_mcp(
+        self,
+    ) -> None:
+        repository = self.init_repository()
+        graph = self.create_central_graph(repository)
+        first = self.create()
+        first_mcp = first.mcp_file.read_bytes()
+        first_context = json.loads(first.context_file.read_text())
+        graph.graph_file.write_text(
+            json.dumps(
+                {"nodes": [{"id": "replacement", "source_file": "tracked.txt"}]}
+            ),
+            encoding="utf-8",
+        )
+        graph.graph_file.chmod(0o600)
+
+        resumed = self.create()
+        resumed_context = json.loads(resumed.context_file.read_text())
+
+        self.assertEqual(first.mcp_file.read_bytes(), first_mcp)
+        self.assertNotEqual(
+            first_context["graph"]["sha256"],
+            resumed_context["graph"]["sha256"],
+        )
+        self.assertIn(
+            "graphify",
+            json.loads(resumed.mcp_file.read_text())["mcpServers"],
+        )
+
+    def test_concurrent_sessions_keep_repository_graph_bindings_isolated(
+        self,
+    ) -> None:
+        first_repository = self.init_repository(
+            self.launch_dir / "first", content="first\n"
+        )
+        second_repository = self.init_repository(
+            self.launch_dir / "second", content="second\n"
+        )
+        first_graph = self.create_central_graph(first_repository)
+        second_graph = self.create_central_graph(second_repository)
+
+        def create_for(repository: Path):
+            return create_session(
                 self.workflow_root,
                 repository,
                 self.config_path,
                 **self.routing_options(),
             )
 
-        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_session, second_session = executor.map(
+                create_for, (first_repository, second_repository)
+            )
+
+        first_context = json.loads(first_session.context_file.read_text())
+        second_context = json.loads(second_session.context_file.read_text())
+        self.assertEqual(first_context["graph"]["stateId"], first_graph.state_id)
+        self.assertEqual(second_context["graph"]["stateId"], second_graph.state_id)
+        self.assertNotEqual(
+            first_context["graph"]["revision"],
+            second_context["graph"]["revision"],
+        )
         self.assertEqual(
-            servers["graphify"],
-            {
-                "command": "/opt/tools/graphify-mcp",
-                "args": ["--graph", str(graph.resolve())],
-            },
+            json.loads(first_session.mcp_file.read_text())["mcpServers"]["graphify"][
+                "args"
+            ],
+            ["--graph", str(first_graph.graph_file)],
+        )
+        self.assertEqual(
+            json.loads(second_session.mcp_file.read_text())["mcpServers"][
+                "graphify"
+            ]["args"],
+            ["--graph", str(second_graph.graph_file)],
         )
 
     def test_unsafe_palace_preserves_mapped_route(self) -> None:

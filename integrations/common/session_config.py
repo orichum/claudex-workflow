@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from integrations.common.graph_manager import GraphBinding, resolve_available_graph
 from integrations.common.model_routing import (
     EffectiveStack,
     ROLES,
@@ -204,7 +205,60 @@ def _canonical_json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _session_mcp_payload(context: dict[str, object]) -> dict[str, object]:
+def _graph_context_payload(binding: GraphBinding) -> dict[str, object]:
+    return {
+        "identity": binding.identity,
+        "revision": binding.revision,
+        "stateId": binding.state_id,
+        "graphFile": str(binding.graph_file),
+        "sha256": binding.sha256,
+    }
+
+
+def bind_session_graph(
+    context: dict[str, object], data_root: Path
+) -> dict[str, object]:
+    """Snapshot the currently available central graph into session context."""
+    bound = dict(context)
+    bound.pop("graph", None)
+    repository = bound.get("repoRootReal")
+    if not isinstance(repository, str) or not repository:
+        return bound
+    graph = resolve_available_graph(Path(repository), data_root)
+    if graph is not None:
+        bound["graph"] = _graph_context_payload(graph)
+    return bound
+
+
+def _verified_context_graph(
+    context: dict[str, object], data_root: Path
+) -> GraphBinding | None:
+    repository = context.get("repoRootReal")
+    graph = context.get("graph")
+    if (
+        not isinstance(repository, str)
+        or not repository
+        or not isinstance(graph, dict)
+        or set(graph)
+        != {"identity", "revision", "stateId", "graphFile", "sha256"}
+    ):
+        return None
+    current = resolve_available_graph(Path(repository), data_root)
+    if current is None:
+        return None
+    expected = _graph_context_payload(current)
+    if any(
+        not isinstance(graph.get(key), str)
+        or not hmac.compare_digest(graph[key], value)
+        for key, value in expected.items()
+    ):
+        return None
+    return current
+
+
+def _session_mcp_payload(
+    context: dict[str, object], data_root: Optional[Path] = None
+) -> dict[str, object]:
     """Expose only installed, project-relevant MCP servers for this session."""
     servers: dict[str, object] = {}
     route = context.get("route")
@@ -231,22 +285,17 @@ def _session_mcp_payload(context: dict[str, object]) -> dict[str, object]:
                 "args": ["--palace", palace],
             }
 
-    repo_root = context.get("repoRootReal")
     graphify = shutil.which("graphify-mcp")
-    if graphify and isinstance(repo_root, str) and repo_root:
-        repo = Path(repo_root)
-        graph = repo / "graphify-out" / "graph.json"
-        try:
-            graph = graph.resolve(strict=True)
-            graph.relative_to(repo)
-        except (FileNotFoundError, OSError, RuntimeError, ValueError):
-            pass
-        else:
-            if graph.is_file():
-                servers["graphify"] = {
-                    "command": graphify,
-                    "args": ["--graph", str(graph)],
-                }
+    graph = (
+        _verified_context_graph(context, data_root)
+        if graphify and data_root is not None
+        else None
+    )
+    if graphify and graph is not None:
+        servers["graphify"] = {
+            "command": graphify,
+            "args": ["--graph", str(graph.graph_file)],
+        }
 
     return {"mcpServers": servers}
 
@@ -459,6 +508,7 @@ def create_session(
     else:
         data_root = _require_directory(_absolute_lexical(data_root), expected_mode=0o700)
     context = resolve_context(load_config(config_path), launch_dir)
+    context = bind_session_graph(context, data_root)
     routing = load_routing_view(routing_path)
     route = context.get("route")
     requested_stack = (
@@ -501,6 +551,7 @@ def create_resolved_session(
         raise SessionError("resolved effective models are invalid") from error
     if not isinstance(context, dict):
         raise SessionError("resolved session context is invalid")
+    context = bind_session_graph(context, data_root)
     return _materialize_session(
         workflow_root,
         data_root,
@@ -548,7 +599,9 @@ def _materialize_session(
         )
 
         mcp_file = run_dir / "mcp.json"
-        atomic_json(mcp_file, _session_mcp_payload(context), 0o600)
+        atomic_json(
+            mcp_file, _session_mcp_payload(context, data_root), 0o600
+        )
         session = verify_session(
             workflow_root,
             run_dir,
@@ -914,6 +967,9 @@ def verify_session(
 ) -> SessionPaths:
     """Revalidate immutable routing, context, plugin, and MCP session state."""
     run_dir = _absolute_lexical(run_dir)
+    _, verified_data_root, _, _ = _validated_session_ancestors(
+        workflow_root, data_root
+    )
     binding = verify_context_binding(
         workflow_root,
         run_dir,
@@ -924,7 +980,9 @@ def verify_session(
     )
     mcp_file = binding.run_dir / "mcp.json"
     mcp_bytes = _read_owned_file(binding.run_dir, "mcp.json", 0o600)
-    if mcp_bytes != _canonical_json_bytes(_session_mcp_payload(binding.context)):
+    if mcp_bytes != _canonical_json_bytes(
+        _session_mcp_payload(binding.context, verified_data_root)
+    ):
         raise SessionError("session MCP configuration does not match its context")
     if (
         not isinstance(effective_models_sha256, str)
