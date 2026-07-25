@@ -143,6 +143,52 @@ Account names are shown only by the explicit account-management command.
 Credential filenames, routing prefixes, tokens, and secrets are never printed
 there.
 
+### Configure live model stacks
+
+Build stacks from the models that the local CLIProxyAPI advertises for your
+currently registered accounts:
+
+```bash
+orichum stack available
+orichum stack configure
+orichum stack list
+orichum stack show heavy
+```
+
+`stack available` is a read-only view of the live catalogue. The interactive
+`stack configure` wizard will only let you select routes that are live at the
+time of review and save; it never invents a provider family from a model name.
+Each candidate can either stay automatic within one selected provider or lock
+to one named account. Automatic candidates may roll over to another eligible
+account for that same provider. An account lock never rolls over to a different
+account, and neither policy silently crosses providers.
+
+Candidates listed together for a controller or role are ordered startup
+choices. Runtime recovery is separate: a newly created logical session freezes
+its exact primary route and at most one same-model, same-family account
+fallback. Existing logical sessions remain immutable when a stack is edited,
+deleted, or reassigned; create a new session or an explicit fork to use the new
+selection.
+
+At the final wizard step, Orichum can assign the saved stack to the longest
+matching project context for the current directory. Launches from nested
+directories inherit that project assignment. The portable stack definition is
+stored in `~/.config/orichum/model-stacks.json`; optional machine-local account
+locks are stored privately in `~/.config/orichum/stack-bindings.json`. Both
+paths follow `ORICHUM_CONFIG_HOME` when it is set. Installer upgrades normalize
+older stack definitions transactionally, preserve user-created stacks and
+account locks, and leave both private files unchanged if the upgrade rolls
+back.
+
+```mermaid
+flowchart LR
+    L["Live CLIProxyAPI discovery"] --> W["Interactive stack choices"]
+    W --> R["Review routes and account policy"]
+    R --> S["Transactional save"]
+    S --> P["Optional project assignment"]
+    P --> N["New immutable session binding"]
+```
+
 ## Usage
 
 ### Add a project context

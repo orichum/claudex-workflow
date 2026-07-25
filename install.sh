@@ -6,10 +6,101 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 
+# BEGIN installed control-plane transaction
+stage_installed_control_plane() {
+  local python_runtime="$1"
+  local workflow_root="$2"
+  local installed_root="$3"
+  local candidate_root="$4"
+  local control_file source_file
+
+  install -d -m 0700 "$candidate_root"
+  for control_file in \
+      model-stacks.json projects.json providers.json plugins.json runtime.json \
+      controller-policy.md; do
+    source_file="$installed_root/$control_file"
+    if [[ ! -e "$source_file" ]]; then
+      source_file="$workflow_root/config/$control_file"
+    fi
+    install -m 0600 "$source_file" "$candidate_root/$control_file"
+  done
+  if [[ -e "$installed_root/accounts.json" ]]; then
+    install -m 0600 "$installed_root/accounts.json" \
+      "$candidate_root/accounts.json"
+  else
+    printf '{"schemaVersion":2,"accounts":[]}\n' \
+      >"$candidate_root/accounts.json"
+    chmod 0600 "$candidate_root/accounts.json"
+  fi
+  if [[ -e "$installed_root/stack-bindings.json" ]]; then
+    install -m 0600 "$installed_root/stack-bindings.json" \
+      "$candidate_root/stack-bindings.json"
+  fi
+
+  (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+      "$workflow_root" "$candidate_root" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+candidate = Path(sys.argv[2]).resolve(strict=True)
+sys.path.insert(0, str(root))
+
+from integrations.common.orichum_config import (
+    default_config_paths,
+    load_control_plane,
+)
+from integrations.common.stack_bindings import load_stack_bindings
+from integrations.common.stack_definition import (
+    normalize_model_stacks,
+    serialize_model_stacks,
+)
+
+model_stacks = candidate / "model-stacks.json"
+document = json.loads(model_stacks.read_text(encoding="utf-8"))
+canonical = serialize_model_stacks(normalize_model_stacks(document))
+model_stacks.write_text(
+    json.dumps(canonical, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+os.chmod(model_stacks, 0o600)
+load_control_plane(default_config_paths(candidate))
+bindings = candidate / "stack-bindings.json"
+if bindings.exists():
+    load_stack_bindings(bindings)
+PY
+  )
+}
+
+activate_installed_control_plane() {
+  local candidate_root="$1"
+  local installed_root="$2"
+  local control_file staged_file
+
+  for control_file in \
+      model-stacks.json projects.json providers.json plugins.json runtime.json \
+      controller-policy.md accounts.json; do
+    staged_file="$installed_root/.$control_file.orichum.$$"
+    install -m 0600 "$candidate_root/$control_file" "$staged_file"
+    mv -f "$staged_file" "$installed_root/$control_file"
+  done
+  if [[ -e "$candidate_root/stack-bindings.json" ]]; then
+    staged_file="$installed_root/.stack-bindings.json.orichum.$$"
+    install -m 0600 "$candidate_root/stack-bindings.json" "$staged_file"
+    mv -f "$staged_file" "$installed_root/stack-bindings.json"
+  fi
+}
+# END installed control-plane transaction
+
 USER_BIN_DIR="${USER_BIN_DIR:-$HOME/.local/bin}"
 WORKFLOW_DATA_ROOT="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || \
   workflow_die "refusing unsafe ORICHUM_DATA_HOME"
 ORICHUM_CONFIG_ROOT="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
+INSTALLED_CONFIG_ROOT="$ORICHUM_CONFIG_ROOT"
 case "$ORICHUM_CONFIG_ROOT" in
   /*) ;;
   *) workflow_die "ORICHUM_CONFIG_HOME must be an absolute path" ;;
@@ -187,19 +278,18 @@ ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
 export ORICHUM_PYTHON_VALIDATED
 export ORICHUM_INSTALL_BOOTSTRAP=false
 
-for control_file in \
-    model-stacks.json projects.json providers.json plugins.json runtime.json \
-    controller-policy.md; do
-  if [[ ! -e "$ORICHUM_CONFIG_ROOT/$control_file" ]]; then
-    install -m 0600 "$WORKFLOW_ROOT/config/$control_file" \
-      "$ORICHUM_CONFIG_ROOT/$control_file"
-  fi
-done
-if [[ ! -e "$ORICHUM_CONFIG_ROOT/accounts.json" ]]; then
-  printf '{"schemaVersion":2,"accounts":[]}\n' \
-    >"$ORICHUM_CONFIG_ROOT/accounts.json"
-  chmod 0600 "$ORICHUM_CONFIG_ROOT/accounts.json"
-fi
+candidate_config_root="$installer_temp/control-plane"
+snapshot_path "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
+  "$snapshot_dir" installed-model-stacks
+snapshot_path "$INSTALLED_CONFIG_ROOT/stack-bindings.json" \
+  "$snapshot_dir" installed-stack-bindings
+stage_installed_control_plane \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+  "$INSTALLED_CONFIG_ROOT" "$candidate_config_root" || \
+  workflow_die "installed Orichum control plane could not be staged"
+ORICHUM_CONFIG_ROOT="$candidate_config_root"
+ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
+export ORICHUM_CONFIG_HOME
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
 ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
   "$WORKFLOW_ROOT/bin/orichum" config validate >/dev/null || \
@@ -1073,6 +1163,17 @@ rollback_install_transaction() {
     rollback_python_activation || rollback_ready=false
   fi
 
+  if [[ "${config_transaction_active:-false}" == true ]]; then
+    restore_snapshot "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
+      "$snapshot_dir" installed-model-stacks || rollback_ready=false
+    snapshot_path_matches "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
+      "$snapshot_dir" installed-model-stacks || rollback_ready=false
+    restore_snapshot "$INSTALLED_CONFIG_ROOT/stack-bindings.json" \
+      "$snapshot_dir" installed-stack-bindings || rollback_ready=false
+    snapshot_path_matches "$INSTALLED_CONFIG_ROOT/stack-bindings.json" \
+      "$snapshot_dir" installed-stack-bindings || rollback_ready=false
+  fi
+
   if [[ "${private_tools_transaction_active:-false}" == true ]]; then
     restore_private_tool_state \
       "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
@@ -1154,6 +1255,7 @@ rollback_install_transaction() {
 
 WORKFLOW_ROLLBACK_HANDLER=rollback_install_transaction
 WORKFLOW_TRANSACTION_ACTIVE=true
+config_transaction_active=true
 
 endpoint_lock_token="$$:$RANDOM:$RANDOM"
 acquire_endpoint_config_lock \
@@ -1677,6 +1779,16 @@ if [[ "$endpoint_lock_owned" == true ]]; then
     workflow_die "endpoint model publication lock could not be released"
   endpoint_lock_owned=false
 fi
+activate_installed_control_plane \
+  "$candidate_config_root" "$INSTALLED_CONFIG_ROOT" || \
+  workflow_die "installed Orichum control plane could not be committed"
+ORICHUM_CONFIG_ROOT="$INSTALLED_CONFIG_ROOT"
+ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
+export ORICHUM_CONFIG_HOME
+ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
+ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+  "$WORKFLOW_ROOT/bin/orichum" config validate >/dev/null || \
+  workflow_die "committed Orichum control plane is invalid"
 cliproxy_transaction_active=false
 headroom_transaction_active=false
 claudex_proxy_transaction_active=false
@@ -1684,6 +1796,7 @@ claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=false
 private_tools_transaction_active=false
 python_transaction_active=false
+config_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"

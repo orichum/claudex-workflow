@@ -280,6 +280,139 @@ printf '5.15.153.1-microsoft-standard-WSL2\n' >"$fixture/wsl2-osrelease"
 [[ "$(linux_environment_kind "$fixture/wsl1-osrelease")" == wsl1 ]]
 [[ "$(linux_environment_kind "$fixture/wsl2-osrelease")" == wsl2 ]]
 
+migration_library="$fixture/installed-control-plane.sh"
+python3 - "$ROOT/install.sh" "$migration_library" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = "# BEGIN installed control-plane transaction\n"
+end_marker = "# END installed control-plane transaction\n"
+try:
+    start = source.index(start_marker) + len(start_marker)
+    end = source.index(end_marker, start)
+except ValueError as error:
+    raise SystemExit("installed control-plane transaction library is missing") from error
+Path(sys.argv[2]).write_text(source[start:end], encoding="utf-8")
+PY
+# shellcheck source=/dev/null
+source "$migration_library"
+
+v1_config="$fixture/v1-config"
+v1_candidate="$fixture/v1-candidate"
+install -d -m 0700 "$v1_config"
+for control_file in \
+    model-stacks.json projects.json providers.json plugins.json runtime.json \
+    controller-policy.md; do
+  install -m 0600 "$ROOT/config/$control_file" "$v1_config/$control_file"
+done
+printf '{"schemaVersion":2,"accounts":[]}\n' >"$v1_config/accounts.json"
+chmod 0600 "$v1_config/accounts.json"
+jq '
+  {
+    schemaVersion: 1,
+    defaultStack,
+    models: (
+      .models | with_entries(
+        .value = {
+          provider: (.value.routes | keys[0]),
+          family: .value.family,
+          upstream: (.value.routes | to_entries[0].value)
+        }
+      )
+    ),
+    stacks: (
+      .stacks | with_entries(
+        .value = {
+          controller: .value.controller[0].model,
+          agents: (
+            .value.agents | with_entries(
+              .value = [.value[].model]
+            )
+          )
+        }
+      )
+    )
+  }
+' "$ROOT/config/model-stacks.json" >"$v1_config/model-stacks.json"
+printf '%s\n' \
+  '{"schemaVersion":1,"candidateAccounts":{' \
+  '"oc-c-c64159d152c2cf90":"oc-a-1111111111111111"}}' \
+  >"$v1_config/stack-bindings.json"
+chmod 0600 "$v1_config/model-stacks.json" "$v1_config/stack-bindings.json"
+cp "$v1_config/model-stacks.json" "$fixture/v1-model-stacks.saved"
+cp "$v1_config/stack-bindings.json" "$fixture/v1-bindings.saved"
+install -d -m 0700 "$fixture/v1-snapshot"
+snapshot_path "$v1_config/model-stacks.json" \
+  "$fixture/v1-snapshot" model-stacks
+snapshot_path "$v1_config/stack-bindings.json" \
+  "$fixture/v1-snapshot" stack-bindings
+
+stage_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v1_config" "$v1_candidate"
+if (exit 73); then
+  printf 'forced post-staging failure unexpectedly succeeded\n' >&2
+  exit 1
+fi
+cmp "$fixture/v1-model-stacks.saved" "$v1_config/model-stacks.json"
+cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
+jq -e '.schemaVersion == 2 and .stacks.balanced' \
+  "$v1_candidate/model-stacks.json" >/dev/null
+cmp "$fixture/v1-bindings.saved" "$v1_candidate/stack-bindings.json"
+activate_installed_control_plane "$v1_candidate" "$v1_config"
+restore_snapshot "$v1_config/model-stacks.json" \
+  "$fixture/v1-snapshot" model-stacks
+restore_snapshot "$v1_config/stack-bindings.json" \
+  "$fixture/v1-snapshot" stack-bindings
+cmp "$fixture/v1-model-stacks.saved" "$v1_config/model-stacks.json"
+cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
+activate_installed_control_plane "$v1_candidate" "$v1_config"
+jq -e '.schemaVersion == 2 and .stacks.balanced' \
+  "$v1_config/model-stacks.json" >/dev/null
+cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
+[[ "$(path_mode "$v1_config/model-stacks.json")" == 600 ]]
+[[ "$(path_mode "$v1_config/stack-bindings.json")" == 600 ]]
+
+v2_config="$fixture/v2-config"
+v2_candidate="$fixture/v2-candidate"
+install -d -m 0700 "$v2_config"
+cp -p "$v1_config/"* "$v2_config/"
+jq '
+  .defaultStack = "heavy" |
+  .stacks = {heavy: .stacks.balanced}
+' "$v1_config/model-stacks.json" >"$v2_config/model-stacks.json"
+chmod 0600 "$v2_config/model-stacks.json"
+stage_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"
+activate_installed_control_plane "$v2_candidate" "$v2_config"
+jq -e '.schemaVersion == 2 and .stacks.heavy' \
+  "$v2_config/model-stacks.json" >/dev/null
+cp "$v2_config/model-stacks.json" "$fixture/v2-first-run.saved"
+cp "$v2_config/stack-bindings.json" "$fixture/v2-bindings.saved"
+rm -rf -- "$v2_candidate"
+stage_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"
+activate_installed_control_plane "$v2_candidate" "$v2_config"
+cmp "$fixture/v2-first-run.saved" "$v2_config/model-stacks.json"
+cmp "$fixture/v2-bindings.saved" "$v2_config/stack-bindings.json"
+
+unlocked_config="$fixture/unlocked-config"
+unlocked_candidate="$fixture/unlocked-candidate"
+install -d -m 0700 "$unlocked_config"
+for control_file in \
+    model-stacks.json projects.json providers.json plugins.json runtime.json \
+    controller-policy.md; do
+  install -m 0600 "$ROOT/config/$control_file" \
+    "$unlocked_config/$control_file"
+done
+printf '{"schemaVersion":2,"accounts":[]}\n' >"$unlocked_config/accounts.json"
+chmod 0600 "$unlocked_config/accounts.json"
+stage_installed_control_plane \
+  "$python_bin/python3.14" "$ROOT" "$unlocked_config" "$unlocked_candidate"
+[[ ! -e "$unlocked_candidate/stack-bindings.json" ]]
+activate_installed_control_plane "$unlocked_candidate" "$unlocked_config"
+[[ ! -e "$unlocked_config/stack-bindings.json" ]]
+
 for script in \
     install.sh lib/workflow.sh bin/orichum bin/orichum-context \
     bin/orichum-doctor bin/orichum-headroom bin/orichum-login \

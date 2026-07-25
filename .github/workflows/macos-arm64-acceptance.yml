@@ -67,7 +67,8 @@ jobs:
               tests/test_smoke.sh \
               tests/test_plugins.sh \
               tests/test_installer.sh \
-              tests/test_install_transaction.sh; do
+              tests/test_install_transaction.sh \
+              tests/test_live_stack_routes.sh; do
             if ! bash "$test_script"; then
               printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
                 "$test_script"

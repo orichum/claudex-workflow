@@ -59,7 +59,8 @@ jobs:
               tests/test_smoke.sh \
               tests/test_plugins.sh \
               tests/test_installer.sh \
-              tests/test_install_transaction.sh; do
+              tests/test_install_transaction.sh \
+              tests/test_live_stack_routes.sh; do
             if ! bash "$test_script"; then
               printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
                 "$test_script"
@@ -271,3 +272,102 @@ jobs:
                 jq '{service, status, ready, object, modelCount: (.data | length)}'
             done
           fi
+
+  systemd-container:
+    name: Privileged Ubuntu 24.04 systemd user-service acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Exercise WSL-compatible user-service contract
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="orichum-systemd-acceptance:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container="orichum-systemd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            status="$?"
+            if [[ "$status" -ne 0 ]] && docker inspect "$container" >/dev/null 2>&1; then
+              docker exec "$container" journalctl --no-pager -n 120 || true
+            fi
+            docker rm --force "$container" >/dev/null 2>&1 || true
+            docker image rm "$image" >/dev/null 2>&1 || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          docker build --tag "$image" - <<'DOCKERFILE'
+          FROM ubuntu:24.04
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update \
+              && apt-get install --yes --no-install-recommends \
+                ca-certificates curl dbus-user-session gh git iproute2 jq \
+                npm python3 ripgrep sudo systemd systemd-sysv tar xz-utils \
+              && npm install --global @anthropic-ai/claude-code \
+              && apt-get clean \
+              && rm -rf /var/lib/apt/lists/*
+          STOPSIGNAL SIGRTMIN+3
+          CMD ["/sbin/init"]
+          DOCKERFILE
+          docker run --detach \
+            --name "$container" \
+            --privileged \
+            --cgroupns=host \
+            --tmpfs /run \
+            --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            "$image" >/dev/null
+          for _ in {1..60}; do
+            system_state="$(
+              docker exec "$container" systemctl is-system-running \
+                2>/dev/null || true
+            )"
+            if [[ "$system_state" == running || "$system_state" == degraded ]]; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$system_state" == running || "$system_state" == degraded ]]
+          docker exec "$container" useradd --create-home --shell /bin/bash orichum
+          docker cp . "$container:/home/orichum/workspace"
+          docker exec "$container" \
+            chown --recursive orichum:orichum /home/orichum/workspace
+          docker exec "$container" loginctl enable-linger orichum
+          uid="$(docker exec "$container" id -u orichum)"
+          docker exec "$container" systemctl start "user@$uid.service"
+          docker exec \
+            --user orichum \
+            --env HOME=/home/orichum \
+            --env XDG_RUNTIME_DIR="/run/user/$uid" \
+            --env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            "$container" systemctl --user show-environment >/dev/null
+          docker exec \
+            --user orichum \
+            --env HOME=/home/orichum \
+            "$container" \
+            bash -lc 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+          docker exec \
+            --user orichum \
+            --env HOME=/home/orichum \
+            --env XDG_RUNTIME_DIR="/run/user/$uid" \
+            --env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            --env GH_TOKEN="$GH_TOKEN" \
+            --env ORICHUM_DATA_HOME=/home/orichum/orichum-data \
+            --env ORICHUM_CONFIG_HOME=/home/orichum/orichum-config \
+            --env USER_BIN_DIR=/home/orichum/orichum-bin \
+            --env PATH=/home/orichum/.local/bin:/usr/local/bin:/usr/bin:/bin \
+            "$container" \
+            bash -lc '
+              set -euo pipefail
+              cd /home/orichum/workspace
+              bash tests/test_live_stack_routes.sh
+              ./install.sh
+              test "$(systemctl --user is-enabled orichum-cliproxy.service)" = enabled
+              test "$(systemctl --user is-active orichum-cliproxy.service)" = active
+              test "$(systemctl --user is-enabled orichum-headroom.service)" = enabled
+              test "$(systemctl --user is-active orichum-headroom.service)" = active
+              test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
+            '

@@ -209,6 +209,14 @@ rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'remove_orichum_python_generation' "$ROOT/install.sh"
+rg -Fq 'snapshot_path "$INSTALLED_CONFIG_ROOT/model-stacks.json"' \
+  "$ROOT/install.sh"
+rg -Fq 'snapshot_path "$INSTALLED_CONFIG_ROOT/stack-bindings.json"' \
+  "$ROOT/install.sh"
+rg -Fq 'restore_snapshot "$INSTALLED_CONFIG_ROOT/model-stacks.json"' \
+  "$ROOT/install.sh"
+rg -Fq 'restore_snapshot "$INSTALLED_CONFIG_ROOT/stack-bindings.json"' \
+  "$ROOT/install.sh"
 rg -Fq 'managed_listener_is_owned' "$ROOT/install.sh"
 rg -Fq 'managed_target_matches_definition_or_absent' "$ROOT/install.sh"
 settings_line="$(rg -n -F 'install -m 0600 "$WORKFLOW_ROOT/controller/settings.json"' \
@@ -227,6 +235,9 @@ rollback = source[start:end]
 
 stop_route = rollback.index("claudex_proxy_runtime_mutated")
 restore_python = rollback.index("rollback_python_activation")
+restore_installed_config = rollback.index(
+    'restore_snapshot "$INSTALLED_CONFIG_ROOT/model-stacks.json"'
+)
 restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
     'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
@@ -237,6 +248,7 @@ restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
     < restore_python
+    < restore_installed_config
     < restore_private_tools
     < restore_cliproxy
     < restore_endpoint
@@ -244,6 +256,23 @@ if not (
     < restore_headroom
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
+
+stage_config = source.index("stage_installed_control_plane")
+validate_candidate = source.index(
+    '"$WORKFLOW_ROOT/bin/orichum" config validate',
+    stage_config,
+)
+activate_config = source.index(
+    "activate_installed_control_plane", validate_candidate
+)
+transaction_end = source.index(
+    "WORKFLOW_TRANSACTION_ACTIVE=false", activate_config
+)
+if not stage_config < validate_candidate < activate_config < transaction_end:
+    raise SystemExit(
+        "installed control plane is not staged, validated, and committed "
+        "inside the installer transaction"
+    )
 
 if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:
     raise SystemExit("final Headroom readiness is not tied to usable route state")
