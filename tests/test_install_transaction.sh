@@ -226,6 +226,30 @@ python3 - "$ROOT/install.sh" <<'PY'
 import sys
 
 source = open(sys.argv[1], encoding="utf-8").read()
+workflow = open(
+    str(__import__("pathlib").Path(sys.argv[1]).parent / "lib/workflow.sh"),
+    encoding="utf-8",
+).read()
+acquire_start = workflow.index("acquire_workflow_lock()")
+acquire_end = workflow.index("release_workflow_lock()", acquire_start)
+acquire = workflow[acquire_start:acquire_end]
+if (
+    'hold_workflow_lock_descriptor "$lock_dir"' not in acquire
+    or 'exec 9<"$lock_dir"' not in workflow
+):
+    raise SystemExit("workflow lock acquisition does not retain lock FD 9")
+for helper in (
+    "recover_installed_control_plane()",
+    "activate_installed_control_plane()",
+    "rollback_installed_control_plane()",
+    "finalize_installed_control_plane()",
+):
+    start = source.index(helper)
+    end = source.index("\n}", start)
+    if "install_lock_fd" not in source[start:end]:
+        raise SystemExit(f"{helper} does not pass the held installer lock FD")
+if source.count('"$WORKFLOW_LOCK_FD"') < 4:
+    raise SystemExit("journal helper call sites omit the held installer lock FD")
 start = source.index("rollback_install_transaction()")
 end = source.index("WORKFLOW_ROLLBACK_HANDLER=", start)
 rollback = source[start:end]

@@ -182,6 +182,44 @@ def _private_child(path: Path) -> Path:
     return resolved / requested.name
 
 
+def _verify_install_lock(snapshot_root: Path, descriptor: int) -> None:
+    if type(descriptor) is not int or descriptor < 0:
+        raise InstallControlPlaneError(
+            "held installer lock descriptor is invalid"
+        )
+    lock_path = snapshot_root.parent / "install.lock"
+    parent_descriptor = -1
+    try:
+        held = os.fstat(descriptor)
+        current_lock = os.lstat(lock_path)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        parent_descriptor = os.open("..", flags, dir_fd=descriptor)
+        held_parent = os.fstat(parent_descriptor)
+        current_parent = os.lstat(snapshot_root.parent)
+    except OSError as error:
+        raise InstallControlPlaneError(
+            "held installer lock is unavailable"
+        ) from error
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    if (
+        not stat.S_ISDIR(held.st_mode)
+        or held.st_uid != os.getuid()
+        or stat.S_ISLNK(current_lock.st_mode)
+        or not stat.S_ISDIR(current_lock.st_mode)
+        or current_lock.st_uid != os.getuid()
+        or (held.st_dev, held.st_ino)
+        != (current_lock.st_dev, current_lock.st_ino)
+        or (held_parent.st_dev, held_parent.st_ino)
+        != (current_parent.st_dev, current_parent.st_ino)
+    ):
+        raise InstallControlPlaneError(
+            "held installer lock does not fence the journal state directory"
+        )
+
+
 def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
     if exclusive:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -413,10 +451,12 @@ def activate(
     candidate_root: Path,
     installed_root: Path,
     snapshot_root: Path,
+    install_lock_fd: int,
 ) -> None:
     candidate_root = Path(candidate_root).resolve(strict=True)
     installed_root = Path(installed_root).resolve(strict=True)
     snapshot_root = _private_child(snapshot_root)
+    _verify_install_lock(snapshot_root, install_lock_fd)
     _require_private_root(installed_root)
     journal_created = False
     try:
@@ -536,9 +576,14 @@ def activate(
         load_control_plane(default_config_paths(installed_root))
 
 
-def rollback(installed_root: Path, snapshot_root: Path) -> None:
+def rollback(
+    installed_root: Path,
+    snapshot_root: Path,
+    install_lock_fd: int,
+) -> None:
     installed_root = Path(installed_root).resolve(strict=True)
     snapshot_root = _private_child(snapshot_root)
+    _verify_install_lock(snapshot_root, install_lock_fd)
     if not snapshot_root.exists():
         return
     _require_private_root(snapshot_root)
@@ -671,14 +716,19 @@ def rollback(installed_root: Path, snapshot_root: Path) -> None:
         _remove_journal(snapshot_root)
 
 
-def recover(installed_root: Path, snapshot_root: Path) -> None:
+def recover(
+    installed_root: Path,
+    snapshot_root: Path,
+    install_lock_fd: int,
+) -> None:
     """Recover an unfinished journal while the installer lock is owned."""
-    rollback(installed_root, snapshot_root)
+    rollback(installed_root, snapshot_root, install_lock_fd)
 
 
-def finalize(snapshot_root: Path) -> None:
+def finalize(snapshot_root: Path, install_lock_fd: int) -> None:
     """Remove a committed journal after the outer install is durable."""
     snapshot_root = _private_child(snapshot_root)
+    _verify_install_lock(snapshot_root, install_lock_fd)
     if not snapshot_root.exists():
         return
     _require_private_root(snapshot_root)

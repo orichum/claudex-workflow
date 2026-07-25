@@ -1320,6 +1320,7 @@ workflow_cleanup_init() {
   WORKFLOW_CLEANUP_PATHS=()
   WORKFLOW_LOCK_DIR=
   WORKFLOW_LOCK_IDENTITY=
+  WORKFLOW_LOCK_FD=
   WORKFLOW_LOCK_GUARD_DIR=
   WORKFLOW_LOCK_GUARD_IDENTITY=
   WORKFLOW_LOCK_QUARANTINE_ACTIVE=false
@@ -1481,6 +1482,15 @@ release_workflow_lock_guard() {
   fi
 }
 
+hold_workflow_lock_descriptor() {
+  local lock_dir="$1"
+  if ! exec 9<"$lock_dir"; then
+    workflow_die "installer lock descriptor could not be retained"
+    return 1
+  fi
+  WORKFLOW_LOCK_FD=9
+}
+
 acquire_workflow_lock() {
   local lock_dir="$1"
   local guard_dir="$lock_dir.guard"
@@ -1500,6 +1510,11 @@ acquire_workflow_lock() {
     lock_identity="$$:$RANDOM:$RANDOM"
     printf '%s\n' "$lock_identity" >"$lock_dir/identity"
     printf '%s\n' "$$" >"$lock_dir/pid"
+    if ! hold_workflow_lock_descriptor "$lock_dir"; then
+      rm -rf -- "$lock_dir"
+      release_workflow_lock_guard "$guard_dir" || true
+      return 1
+    fi
     WORKFLOW_LOCK_DIR="$lock_dir"
     WORKFLOW_LOCK_IDENTITY="$lock_identity"
     release_workflow_lock_guard "$guard_dir"
@@ -1584,6 +1599,12 @@ acquire_workflow_lock() {
   lock_identity="$$:$RANDOM:$RANDOM"
   printf '%s\n' "$lock_identity" >"$lock_dir/identity"
   printf '%s\n' "$$" >"$lock_dir/pid"
+  if ! hold_workflow_lock_descriptor "$lock_dir"; then
+    rm -rf -- "$lock_dir"
+    resolve_workflow_lock_quarantine || true
+    release_workflow_lock_guard "$guard_dir" || true
+    return 1
+  fi
   WORKFLOW_LOCK_DIR="$lock_dir"
   WORKFLOW_LOCK_IDENTITY="$lock_identity"
   WORKFLOW_LOCK_QUARANTINE_RESTORE_REQUIRED=false
@@ -1614,6 +1635,10 @@ release_workflow_lock() {
      [[ -n "${WORKFLOW_LOCK_IDENTITY:-}" ]] && \
      [[ "$owner_identity" == "$WORKFLOW_LOCK_IDENTITY" ]]; then
     rm -rf -- "$lock_dir"
+    if [[ "${WORKFLOW_LOCK_FD:-}" == 9 ]]; then
+      exec 9<&-
+      WORKFLOW_LOCK_FD=
+    fi
     if [[ "${WORKFLOW_LOCK_DIR:-}" == "$lock_dir" ]]; then
       WORKFLOW_LOCK_DIR=
       WORKFLOW_LOCK_IDENTITY=

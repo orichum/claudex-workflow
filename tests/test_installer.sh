@@ -16,6 +16,9 @@ export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-installer-test.XXXXXX")"
 fixture="$(cd -P "$fixture" && pwd)"
 trap 'rm -rf -- "$fixture"' EXIT
+install -d -m 0700 "$fixture/install.lock"
+exec 9<"$fixture/install.lock"
+WORKFLOW_LOCK_FD=9
 
 python_data="$fixture/python-data"
 python_root="$python_data/python"
@@ -380,7 +383,7 @@ activation_snapshot="$fixture/activation-snapshot"
 install -d -m 0700 "$activation_snapshot"
 activate_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v1_candidate" "$v1_config" \
-  "$activation_snapshot"
+  "$activation_snapshot" "$WORKFLOW_LOCK_FD"
 jq -e '.schemaVersion == 2 and .stacks.balanced' \
   "$v1_config/model-stacks.json" >/dev/null
 
@@ -388,6 +391,7 @@ trap - ERR
 set +e
 (
   workflow_cleanup_init
+  WORKFLOW_LOCK_FD=9
   snapshot_dir="$activation_snapshot"
   control_plane_journal="$activation_snapshot"
   INSTALLED_CONFIG_ROOT="$v1_config"
@@ -421,7 +425,7 @@ cmp "$fixture/v1-bindings.saved" "$v1_config/stack-bindings.json"
 
 activate_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v1_candidate" "$v1_config" \
-  "$activation_snapshot"
+  "$activation_snapshot" "$WORKFLOW_LOCK_FD"
 jq -e '.schemaVersion == 2 and .stacks.balanced' \
   "$v1_config/model-stacks.json" >/dev/null
 jq -e \
@@ -443,20 +447,20 @@ stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"
 activate_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_candidate" "$v2_config" \
-  "$fixture/v2-activation-snapshot"
+  "$fixture/v2-activation-snapshot" "$WORKFLOW_LOCK_FD"
 jq -e '.schemaVersion == 2 and .stacks.heavy' \
   "$v2_config/model-stacks.json" >/dev/null
 cp "$v2_config/model-stacks.json" "$fixture/v2-first-run.saved"
 cp "$v2_config/stack-bindings.json" "$fixture/v2-bindings.saved"
 finalize_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" \
-  "$fixture/v2-activation-snapshot"
+  "$fixture/v2-activation-snapshot" "$WORKFLOW_LOCK_FD"
 rm -rf -- "$v2_candidate"
 stage_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_config" "$v2_candidate"
 activate_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$v2_candidate" "$v2_config" \
-  "$fixture/v2-activation-snapshot"
+  "$fixture/v2-activation-snapshot" "$WORKFLOW_LOCK_FD"
 cmp "$fixture/v2-first-run.saved" "$v2_config/model-stacks.json"
 cmp "$fixture/v2-bindings.saved" "$v2_config/stack-bindings.json"
 
@@ -513,7 +517,8 @@ writer_pid=$!
 IFS= read -r -n 1 <"$concurrent_ready"
 activate_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" \
-  "$concurrent_candidate" "$concurrent_config" "$concurrent_snapshot" &
+  "$concurrent_candidate" "$concurrent_config" "$concurrent_snapshot" \
+  "$WORKFLOW_LOCK_FD" &
 activation_pid=$!
 printf x >"$concurrent_release"
 wait "$writer_pid"
@@ -537,7 +542,7 @@ stage_installed_control_plane \
 [[ ! -e "$unlocked_candidate/stack-bindings.json" ]]
 activate_installed_control_plane \
   "$python_bin/python3.14" "$ROOT" "$unlocked_candidate" "$unlocked_config" \
-  "$fixture/unlocked-activation-snapshot"
+  "$fixture/unlocked-activation-snapshot" "$WORKFLOW_LOCK_FD"
 [[ ! -e "$unlocked_config/stack-bindings.json" ]]
 
 unsafe_config="$fixture/unsafe-config"

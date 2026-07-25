@@ -34,11 +34,12 @@ activate_installed_control_plane() {
   local candidate_root="$3"
   local installed_root="$4"
   local snapshot_root="$5"
+  local install_lock_fd="$6"
   (
     cd "$workflow_root"
     PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
       "$workflow_root" "$candidate_root" "$installed_root" \
-      "$snapshot_root" <<'PY'
+      "$snapshot_root" "$install_lock_fd" <<'PY'
 import sys
 from pathlib import Path
 
@@ -46,7 +47,12 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 from integrations.common.install_control_plane import activate
 
-activate(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+activate(
+    Path(sys.argv[2]),
+    Path(sys.argv[3]),
+    Path(sys.argv[4]),
+    int(sys.argv[5]),
+)
 PY
   )
 }
@@ -56,10 +62,12 @@ rollback_installed_control_plane() {
   local workflow_root="$2"
   local installed_root="$3"
   local snapshot_root="$4"
+  local install_lock_fd="$5"
   (
     cd "$workflow_root"
     PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-      "$workflow_root" "$installed_root" "$snapshot_root" <<'PY'
+      "$workflow_root" "$installed_root" "$snapshot_root" \
+      "$install_lock_fd" <<'PY'
 import sys
 from pathlib import Path
 
@@ -67,7 +75,7 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 from integrations.common.install_control_plane import rollback
 
-rollback(Path(sys.argv[2]), Path(sys.argv[3]))
+rollback(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))
 PY
   )
 }
@@ -77,10 +85,12 @@ recover_installed_control_plane() {
   local workflow_root="$2"
   local installed_root="$3"
   local journal_root="$4"
+  local install_lock_fd="$5"
   (
     cd "$workflow_root"
     PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-      "$workflow_root" "$installed_root" "$journal_root" <<'PY'
+      "$workflow_root" "$installed_root" "$journal_root" \
+      "$install_lock_fd" <<'PY'
 import sys
 from pathlib import Path
 
@@ -88,7 +98,7 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 from integrations.common.install_control_plane import recover
 
-recover(Path(sys.argv[2]), Path(sys.argv[3]))
+recover(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))
 PY
   )
 }
@@ -97,10 +107,11 @@ finalize_installed_control_plane() {
   local python_runtime="$1"
   local workflow_root="$2"
   local journal_root="$3"
+  local install_lock_fd="$4"
   (
     cd "$workflow_root"
     PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-      "$workflow_root" "$journal_root" <<'PY'
+      "$workflow_root" "$journal_root" "$install_lock_fd" <<'PY'
 import sys
 from pathlib import Path
 
@@ -108,7 +119,7 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 from integrations.common.install_control_plane import finalize
 
-finalize(Path(sys.argv[2]))
+finalize(Path(sys.argv[2]), int(sys.argv[3]))
 PY
   )
 }
@@ -169,7 +180,8 @@ acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
 control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"
 recover_installed_control_plane \
   python3 "$WORKFLOW_ROOT" \
-  "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" || \
+  "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
+  "$WORKFLOW_LOCK_FD" || \
   workflow_die "unfinished Orichum control-plane activation could not be recovered"
 
 case "$(uname -s)" in
@@ -1190,7 +1202,8 @@ rollback_install_transaction() {
   if [[ "${config_transaction_active:-false}" == true ]]; then
     rollback_installed_control_plane \
       "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
-      "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" || \
+      "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
+      "$WORKFLOW_LOCK_FD" || \
       rollback_ready=false
   fi
 
@@ -1807,7 +1820,7 @@ config_transaction_active=true
 activate_installed_control_plane \
   "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
   "$candidate_config_root" "$INSTALLED_CONFIG_ROOT" \
-  "$control_plane_journal" || \
+  "$control_plane_journal" "$WORKFLOW_LOCK_FD" || \
   workflow_die "installed Orichum control plane could not be committed"
 ORICHUM_CONFIG_ROOT="$INSTALLED_CONFIG_ROOT"
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
@@ -1868,7 +1881,8 @@ else
     "$USER_BIN_DIR/orichum" doctor
 fi
 finalize_installed_control_plane \
-  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$control_plane_journal" || \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$control_plane_journal" \
+  "$WORKFLOW_LOCK_FD" || \
   workflow_die "installed Orichum control-plane journal could not be finalized"
 cliproxy_transaction_active=false
 headroom_transaction_active=false

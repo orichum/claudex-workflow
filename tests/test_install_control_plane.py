@@ -52,6 +52,44 @@ class InstallControlPlaneTests(unittest.TestCase):
         ).read_bytes()
         stage(self.repository, self.installed, self.candidate)
 
+    def _lock_fd(self, journal: Path) -> int:
+        lock = Path(journal).parent / "install.lock"
+        try:
+            lock.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        descriptor = os.open(
+            lock,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        self.addCleanup(os.close, descriptor)
+        return descriptor
+
+    def _activate(self, journal: Path) -> None:
+        activate(
+            self.candidate,
+            self.installed,
+            journal,
+            self._lock_fd(journal),
+        )
+
+    def _rollback(self, journal: Path) -> None:
+        rollback(
+            self.installed,
+            journal,
+            self._lock_fd(journal),
+        )
+
+    def _recover(self, journal: Path) -> None:
+        recover(
+            self.installed,
+            journal,
+            self._lock_fd(journal),
+        )
+
+    def _finalize(self, journal: Path) -> None:
+        finalize(journal, self._lock_fd(journal))
+
     def _assert_original_state(self) -> None:
         self.assertEqual(
             (self.installed / "model-stacks.json").read_bytes(),
@@ -91,15 +129,16 @@ class InstallControlPlaneTests(unittest.TestCase):
                             self.candidate,
                             self.installed,
                             snapshot,
+                            self._lock_fd(snapshot),
                         )
-                rollback(self.installed, snapshot)
-                rollback(self.installed, snapshot)
+                self._rollback(snapshot)
+                self._rollback(snapshot)
                 self._assert_original_state()
 
     def test_rollback_before_manifest_is_a_safe_noop(self) -> None:
         snapshot = self.root / "pre-manifest-snapshot"
         snapshot.mkdir(mode=0o700)
-        rollback(self.installed, snapshot)
+        self._rollback(snapshot)
         self._assert_original_state()
 
     def test_activation_rejects_symlinked_journal_parent(self) -> None:
@@ -116,6 +155,9 @@ class InstallControlPlaneTests(unittest.TestCase):
                 self.candidate,
                 self.installed,
                 linked_state / "install-control-plane",
+                self._lock_fd(
+                    linked_state / "install-control-plane"
+                ),
             )
 
         self.assertFalse((state / "install-control-plane").exists())
@@ -176,7 +218,7 @@ class InstallControlPlaneTests(unittest.TestCase):
                 side_effect=record_snapshot,
             ),
         ):
-            activate(self.candidate, self.installed, journal)
+            self._activate(journal)
 
         self.assertEqual(events[0], ("fsync", state))
         first_snapshot = next(
@@ -190,7 +232,7 @@ class InstallControlPlaneTests(unittest.TestCase):
         self,
     ) -> None:
         snapshot = self.root / "account-snapshot"
-        activate(self.candidate, self.installed, snapshot)
+        self._activate(snapshot)
         account = Account(
             id="oc-a-1111111111111111",
             name="concurrent",
@@ -212,7 +254,7 @@ class InstallControlPlaneTests(unittest.TestCase):
             InstallControlPlaneError,
             "accounts.json changed after installer activation",
         ):
-            rollback(self.installed, snapshot)
+            self._rollback(snapshot)
 
         accounts = json.loads(
             (self.installed / "accounts.json").read_text()
@@ -235,7 +277,7 @@ class InstallControlPlaneTests(unittest.TestCase):
         shutil.rmtree(self.candidate)
         stage(self.repository, self.installed, self.candidate)
         journal = self.root / "plugin-journal"
-        activate(self.candidate, self.installed, journal)
+        self._activate(journal)
         writer_locked = threading.Event()
         release_writer = threading.Event()
         rollback_waiting = threading.Event()
@@ -264,7 +306,7 @@ class InstallControlPlaneTests(unittest.TestCase):
 
         def rollback_install() -> None:
             try:
-                rollback(self.installed, journal)
+                self._rollback(journal)
             except BaseException as error:
                 rollback_errors.append(error)
 
@@ -304,7 +346,7 @@ class InstallControlPlaneTests(unittest.TestCase):
         self,
     ) -> None:
         journal = self.root / "fsync-journal"
-        activate(self.candidate, self.installed, journal)
+        self._activate(journal)
         events: list[tuple[str, object]] = []
         real_write_manifest = (
             __import__(
@@ -334,7 +376,7 @@ class InstallControlPlaneTests(unittest.TestCase):
                 side_effect=record_manifest,
             ),
         ):
-            rollback(self.installed, journal)
+            self._rollback(journal)
 
         config_fsync = events.index(("fsync", self.installed))
         terminal = events.index(("manifest", "rolledBack"))
@@ -357,8 +399,14 @@ def checkpoint(name):
         os._exit(91)
 
 control._activation_checkpoint = checkpoint
-control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+control.activate(
+    Path(sys.argv[1]),
+    Path(sys.argv[2]),
+    Path(sys.argv[3]),
+    int(sys.argv[4]),
+)
 """
+        lock_fd = self._lock_fd(journal)
         killed = subprocess.run(
             [
                 sys.executable,
@@ -367,9 +415,11 @@ control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
                 str(self.candidate),
                 str(self.installed),
                 str(journal),
+                str(lock_fd),
             ],
             cwd=self.repository,
             check=False,
+            pass_fds=(lock_fd,),
         )
         self.assertEqual(killed.returncode, 91)
         self.assertTrue(journal.exists())
@@ -378,14 +428,14 @@ control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
             self.original_model,
         )
 
-        recover(self.installed, journal)
+        self._recover(journal)
 
         self._assert_original_state()
         self.assertFalse(journal.exists())
 
     def test_recovery_refuses_a_different_installed_root(self) -> None:
         journal = self.root / "target-bound-journal"
-        activate(self.candidate, self.installed, journal)
+        self._activate(journal)
         other = self.root / "other-installed"
         other.mkdir(mode=0o700)
 
@@ -393,21 +443,51 @@ control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
             InstallControlPlaneError,
             "different installed configuration root",
         ):
-            recover(other, journal)
+            recover(other, journal, self._lock_fd(journal))
 
         self.assertTrue(journal.exists())
         self.assertTrue((self.installed / "accounts.json").exists())
+
+    def test_recovery_rejects_replaced_state_after_lock_acquisition(
+        self,
+    ) -> None:
+        state = self.root / "fenced-state"
+        state.mkdir(mode=0o700)
+        held_lock = state / "install.lock"
+        held_lock.mkdir(mode=0o700)
+        descriptor = os.open(
+            held_lock,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        self.addCleanup(os.close, descriptor)
+        displaced = self.root / "displaced-state"
+        state.rename(displaced)
+        state.mkdir(mode=0o700)
+        (state / "install.lock").mkdir(mode=0o700)
+        replacement_journal = state / "install-control-plane"
+        replacement_journal.mkdir(mode=0o700)
+
+        with self.assertRaisesRegex(
+            InstallControlPlaneError,
+            "held installer lock",
+        ):
+            recover(self.installed, replacement_journal, descriptor)
+
+        self.assertTrue(replacement_journal.exists())
+        self.assertFalse(
+            (replacement_journal / "installed-control-plane.json").exists()
+        )
 
     def test_finalize_removes_committed_journal_without_rollback(
         self,
     ) -> None:
         journal = self.root / "finalize-journal"
-        activate(self.candidate, self.installed, journal)
+        self._activate(journal)
         committed_model = (
             self.installed / "model-stacks.json"
         ).read_bytes()
 
-        finalize(journal)
+        self._finalize(journal)
 
         self.assertFalse(journal.exists())
         self.assertEqual(
@@ -419,7 +499,7 @@ control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
         self,
     ) -> None:
         journal = self.root / "finalized-journal"
-        activate(self.candidate, self.installed, journal)
+        self._activate(journal)
         committed_model = (
             self.installed / "model-stacks.json"
         ).read_bytes()
@@ -428,13 +508,13 @@ control.activate(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
             side_effect=OSError("injected journal cleanup failure"),
         ):
             with self.assertRaises(OSError):
-                finalize(journal)
+                self._finalize(journal)
         manifest = json.loads(
             (journal / "installed-control-plane.json").read_text()
         )
         self.assertEqual(manifest["phase"], "finalized")
 
-        recover(self.installed, journal)
+        self._recover(journal)
 
         self.assertFalse(journal.exists())
         self.assertEqual(
