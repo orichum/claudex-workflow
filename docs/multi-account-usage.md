@@ -133,5 +133,5 @@ orichum doctor
 
 If an account does not appear in the wizard, verify that it is active, belongs
 to a pool visible to the project, and advertises the selected provider/model
-route. Configuration file responsibilities are listed in the
-[README control-plane table](../README.md#control-plane).
+route. Configuration file responsibilities are listed in
+[Configuration](configuration.md).

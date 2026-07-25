@@ -163,16 +163,16 @@ contexts="$(
 )"
 rg -Fq 'ACCOUNT POOLS' <<<"$contexts"
 rg -Fq 'MCP_DOCKER' "$ROOT/README.md"
-rg -Fq 'orichum fork' "$ROOT/README.md"
-rg -Fq 'orichum models stacks' "$ROOT/README.md"
-rg -Fq 'orichum stack available' "$ROOT/README.md"
-rg -Fq 'orichum stack configure' "$ROOT/README.md"
-rg -Fq 'orichum stack list' "$ROOT/README.md"
-rg -Fq 'orichum stack show heavy' "$ROOT/README.md"
-rg -Fq 'TARGET_STACK' "$ROOT/README.md"
-if rg -Fq 'claude-heavy' "$ROOT/README.md" || \
-   rg -Fq 'google-heavy' "$ROOT/README.md"; then
-  printf 'README references model stacks that are not configured\n' >&2
+rg -Fq 'orichum fork' "$ROOT/docs/sessions.md"
+rg -Fq 'orichum models stacks' "$ROOT/docs/sessions.md"
+rg -Fq 'orichum stack available' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum stack configure' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum stack list' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum stack show STACK' "$ROOT/docs/model-stacks.md"
+rg -Fq 'TARGET_STACK' "$ROOT/docs/sessions.md"
+if rg -Fq 'claude-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md || \
+   rg -Fq 'google-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md; then
+  printf 'documentation references model stacks that are not configured\n' >&2
   exit 1
 fi
 [[ "$(rg -c -- '--max-time 4' \
@@ -186,8 +186,8 @@ rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
 rg -Fq \
-  'Account display names are shown only by explicit account-management and stack' \
-  "$ROOT/README.md"
+  'Display names appear in explicit account and route inspection output.' \
+  "$ROOT/docs/providers-and-accounts.md"
 rg -Fq 'validate_orichum_python' \
   "$ROOT/bin/orichum-runtime-ready"
 for parallel_health_contract in \
