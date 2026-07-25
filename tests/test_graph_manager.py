@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -152,6 +155,76 @@ class GraphManagerTests(unittest.TestCase):
         self.assertEqual(first.state_id, after_movement.state_id)
         self.assertEqual(first.output_dir, after_movement.output_dir)
 
+    def test_legacy_main_worktree_id_is_migrated_without_linked_collision(self) -> None:
+        (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        legacy_id = uuid.uuid4()
+        self._git(
+            self.first_clone,
+            "config",
+            "--local",
+            "orichum.checkoutIdentity",
+            str(legacy_id),
+        )
+        fingerprint = working_tree_fingerprint(self.first_clone)
+
+        main_target = resolve_graph_target(self.first_clone, self.data_root)
+
+        self.assertEqual(main_target.state_id, f"{legacy_id.hex}-{fingerprint}")
+        legacy = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.first_clone),
+                "config",
+                "--local",
+                "--get",
+                "orichum.checkoutIdentity",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(legacy.returncode, 0)
+
+        linked = self.root / "legacy-linked"
+        self.addCleanup(
+            lambda: self._git(
+                self.first_clone, "worktree", "remove", "--force", str(linked)
+            )
+            if linked.exists()
+            else None
+        )
+        self._git(self.first_clone, "worktree", "add", "--detach", str(linked))
+        (linked / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        linked_target = resolve_graph_target(linked, self.data_root)
+
+        self.assertNotEqual(main_target.state_id, linked_target.state_id)
+
+    def test_concurrent_checkout_initialization_returns_one_persisted_id(self) -> None:
+        (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
+        start = threading.Barrier(2)
+        barrier = threading.Barrier(2)
+        write_text = Path.write_text
+
+        def synchronized_write(path, *arguments, **kwargs):
+            if path.name == "orichum.checkoutIdentity":
+                barrier.wait(timeout=5)
+            return write_text(path, *arguments, **kwargs)
+
+        def resolve(_unused):
+            start.wait(timeout=5)
+            return resolve_graph_target(self.first_clone, self.data_root)
+
+        with mock.patch.object(Path, "write_text", synchronized_write):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                targets = list(executor.map(resolve, range(2)))
+
+        self.assertEqual(targets[0].state_id, targets[1].state_id)
+        self.assertEqual(
+            targets[0].state_id,
+            resolve_graph_target(self.first_clone, self.data_root).state_id,
+        )
+
     def test_changed_content_changes_dirty_fingerprint(self) -> None:
         tracked = self.first_clone / "tracked.txt"
         tracked.write_text("first change\n", encoding="utf-8")
@@ -223,6 +296,17 @@ class GraphManagerTests(unittest.TestCase):
         with self.assertRaises(GraphManagerError):
             resolve_graph_target(
                 linked_parent / self.first_clone.name, self.data_root
+            )
+
+    def test_symlink_before_parent_traversal_is_rejected(self) -> None:
+        nested = self.root / "nested"
+        nested.mkdir()
+        linked_parent = self.root / "linked-parent"
+        linked_parent.symlink_to(nested, target_is_directory=True)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(
+                linked_parent / ".." / self.first_clone.name, self.data_root
             )
 
     def test_intermediate_data_root_symlink_is_rejected(self) -> None:
