@@ -1294,11 +1294,11 @@ def sync_graph(
             return _result(target, "migrated", node_count)
 
         status = inspect_graph(target)
-        if status.status in {"invalid", "stale"}:
-            raise GraphError(f"Existing graph is {status.status}")
         _prepare_target_parent(target)
-        if status.status == "missing":
-            action: Literal["created", "updated"] = "created"
+        if status.status in {"missing", "stale", "invalid"}:
+            action: Literal["created", "updated"] = (
+                "created" if status.status == "missing" else "updated"
+            )
             output_dir = target.output_dir.parent / (
                 f".graphify-out.staging-{uuid.uuid4().hex}"
             )

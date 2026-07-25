@@ -1046,6 +1046,86 @@ with counter.open("r+", encoding="ascii") as state:
 
         self.assertEqual(inspect_graph(self.target()).status, "stale")
 
+    def test_stale_graph_is_repaired_with_fresh_code_only_extract(self):
+        result = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        metadata_file = result.output_dir / "metadata.json"
+        metadata = json.loads(
+            metadata_file.read_text(encoding="utf-8")
+        )
+        metadata["built_at_commit"] = "0" * 40
+        metadata_file.write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+
+        repaired = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+
+        self.assertEqual(repaired.action, "updated")
+        self.assertEqual(
+            self.calls()[-1][:3],
+            ("extract", str(self.repository), "--code-only"),
+        )
+        self.assertEqual(inspect_graph(self.target()).status, "current")
+
+    def test_invalid_graph_is_repaired_with_fresh_code_only_extract(self):
+        result = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        result.graph_file.write_text("{}", encoding="utf-8")
+
+        repaired = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+
+        self.assertEqual(repaired.action, "updated")
+        self.assertEqual(
+            self.calls()[-1][:3],
+            ("extract", str(self.repository), "--code-only"),
+        )
+        self.assertEqual(inspect_graph(self.target()).status, "current")
+
+    def test_failed_repair_preserves_stale_target_for_diagnosis(self):
+        result = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        metadata_file = result.output_dir / "metadata.json"
+        metadata = json.loads(
+            metadata_file.read_text(encoding="utf-8")
+        )
+        metadata["built_at_commit"] = "0" * 40
+        metadata_file.write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        before = {
+            path.relative_to(result.output_dir): path.read_bytes()
+            for path in result.output_dir.rglob("*")
+            if path.is_file()
+        }
+
+        with mock.patch(
+            "integrations.common.graph_manager._atomic_exchange_directories",
+            side_effect=GraphError("simulated repair activation failure"),
+        ), self.assertRaises(GraphError):
+            sync_graph(
+                self.repository, self.data_root, graphify=self.graphify
+            )
+
+        after = {
+            path.relative_to(result.output_dir): path.read_bytes()
+            for path in result.output_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+        self.assertEqual(inspect_graph(self.target()).status, "stale")
+        self.assertEqual(len(self.calls()), 2)
+        self.assertEqual(
+            self.calls()[-1][:3],
+            ("extract", str(self.repository), "--code-only"),
+        )
+
     def test_concurrent_syncs_are_excluded_by_repository_lock(self):
         context = multiprocessing.get_context("fork")
         results = context.Queue()

@@ -1489,6 +1489,35 @@ output.mkdir(parents=True, exist_ok=True)
         self.assertEqual(status, 0, stderr)
         self.assertIn("[discover] found 2 repositories", stdout)
 
+    def test_graph_path_repairs_stale_target_and_reinstalls_hooks(self) -> None:
+        status, _, stderr = self.run_graph(str(self.repository))
+        self.assertEqual(status, 0, stderr)
+        target = graph_manager.resolve_graph_target(
+            self.repository, self.data_root
+        )
+        metadata = json.loads(
+            target.metadata_file.read_text(encoding="utf-8")
+        )
+        metadata["built_at_commit"] = "0" * 40
+        target.metadata_file.write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        post_commit = self.repository / ".git" / "hooks" / "post-commit"
+        post_commit.unlink()
+        self.assertEqual(
+            graph_manager.graph_hook_status(self.repository), "missing"
+        )
+
+        status, stdout, stderr = self.run_graph(str(self.repository))
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("[graphify 1/1] updated api", stdout)
+        self.assertEqual(graph_manager.inspect_graph(target).status, "current")
+        self.assertEqual(
+            graph_manager.graph_hook_status(self.repository), "installed"
+        )
+
     def test_graph_rejects_invalid_path_and_accepts_empty_scope(self) -> None:
         status, stdout, stderr = self.run_graph(str(self.root / "missing"))
         self.assertEqual(status, 2)
