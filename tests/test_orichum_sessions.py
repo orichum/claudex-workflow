@@ -363,6 +363,7 @@ class OrichumSessionTests(unittest.TestCase):
             graph.graph_file.write_text(
                 json.dumps(
                     {
+                        "built_at_commit": graph.revision,
                         "nodes": [
                             {
                                 "id": node_id,
@@ -474,17 +475,29 @@ class OrichumSessionTests(unittest.TestCase):
             resumed.physical.context_file.read_text()
         )
         resumed_mcp = json.loads(resumed.physical.mcp_file.read_text())
+        initial_context = json.loads(initial.context_file.read_text())
+        initial_snapshot = Path(initial_context["graph"]["graphFile"])
+        resumed_snapshot = Path(resumed_context["graph"]["graphFile"])
         self.assertNotEqual(initial.run_id, resumed.physical.run_id)
         self.assertEqual(resumed.logical.id, logical.id)
         self.assertEqual(resumed.logical.controller, logical.controller)
         self.assertEqual(resumed.logical.agents, logical.agents)
+        self.assertEqual(initial_snapshot.parent, initial.run_dir)
+        self.assertEqual(resumed_snapshot.parent, resumed.physical.run_dir)
+        self.assertNotEqual(initial_snapshot, resumed_snapshot)
+        self.assertNotEqual(
+            initial_snapshot.read_bytes(), resumed_snapshot.read_bytes()
+        )
         self.assertEqual(
             resumed_context["graph"]["sha256"],
             hashlib.sha256(graph.graph_file.read_bytes()).hexdigest(),
         )
         self.assertEqual(
+            resumed_snapshot.read_bytes(), graph.graph_file.read_bytes()
+        )
+        self.assertEqual(
             resumed_mcp["mcpServers"]["graphify"]["args"],
-            ["--graph", str(graph.graph_file)],
+            ["--graph", str(resumed_snapshot)],
         )
 
     def test_session_plan_pins_primary_fallback_and_routed_effective_models(self) -> None:

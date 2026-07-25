@@ -37,6 +37,10 @@ class _SessionMcpMismatch(SessionError):
     """An unpublished session's MCP snapshot no longer matches its context."""
 
 
+class _SessionGraphMismatch(SessionError):
+    """A central graph changed while an unpublished snapshot was copied."""
+
+
 @dataclass(frozen=True)
 class SessionPaths:
     run_id: str
@@ -214,7 +218,7 @@ def _graph_context_payload(binding: GraphBinding) -> dict[str, object]:
         "identity": binding.identity,
         "revision": binding.revision,
         "stateId": binding.state_id,
-        "graphFile": str(binding.graph_file),
+        "centralGraphFile": str(binding.graph_file),
         "sha256": binding.sha256,
     }
 
@@ -234,7 +238,7 @@ def bind_session_graph(
     return bound
 
 
-def _verified_context_graph(
+def _verified_central_context_graph(
     context: dict[str, object], data_root: Path
 ) -> GraphBinding | None:
     repository = context.get("repoRootReal")
@@ -244,7 +248,13 @@ def _verified_context_graph(
         or not repository
         or not isinstance(graph, dict)
         or set(graph)
-        != {"identity", "revision", "stateId", "graphFile", "sha256"}
+        != {
+            "identity",
+            "revision",
+            "stateId",
+            "centralGraphFile",
+            "sha256",
+        }
     ):
         return None
     current = resolve_available_graph(Path(repository), data_root)
@@ -260,8 +270,166 @@ def _verified_context_graph(
     return current
 
 
+def _copy_graph_snapshot(
+    binding: GraphBinding, run_dir: Path
+) -> Path:
+    source = binding.graph_file
+    destination = run_dir / "graph.json"
+    source_fd: Optional[int] = None
+    directory_fd: Optional[int] = None
+    target_fd: Optional[int] = None
+    temporary_name = f".graph.json.{secrets.token_hex(12)}"
+    replaced = False
+    try:
+        source_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        source_before = os.stat(source, follow_symlinks=False)
+        source_fd = os.open(source, source_flags)
+        source_opened = os.fstat(source_fd)
+        if (
+            stat.S_ISLNK(source_before.st_mode)
+            or not stat.S_ISREG(source_before.st_mode)
+            or source_before.st_uid != os.getuid()
+            or not _same_stable_state(source_before, source_opened)
+        ):
+            raise _SessionGraphMismatch(
+                "central graph changed before snapshot"
+            )
+
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        directory_fd = os.open(run_dir, directory_flags)
+        if not _same_stable_state(
+            os.fstat(directory_fd), _stable_lstat(run_dir)
+        ):
+            raise _SessionGraphMismatch(
+                "session directory changed before graph snapshot"
+            )
+        target_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            target_flags |= os.O_NOFOLLOW
+        target_fd = os.open(
+            temporary_name, target_flags, 0o600, dir_fd=directory_fd
+        )
+        os.fchmod(target_fd, 0o600)
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(source_fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            offset = 0
+            while offset < len(block):
+                written = os.write(target_fd, block[offset:])
+                if written <= 0:
+                    raise _SessionGraphMismatch(
+                        "session graph snapshot write stalled"
+                    )
+                offset += written
+
+        source_after = os.fstat(source_fd)
+        source_path_after = os.stat(source, follow_symlinks=False)
+        if (
+            not _same_stable_state(source_opened, source_after)
+            or not _same_stable_state(source_after, source_path_after)
+            or not hmac.compare_digest(digest.hexdigest(), binding.sha256)
+        ):
+            raise _SessionGraphMismatch(
+                "central graph changed during snapshot"
+            )
+        os.fsync(target_fd)
+        target_stat = os.fstat(target_fd)
+        os.close(target_fd)
+        target_fd = None
+        os.replace(
+            temporary_name,
+            destination.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        replaced = True
+        os.fsync(directory_fd)
+        installed = _require_owned_file(run_dir, destination, 0o600)
+        if not _same_object(target_stat, _stable_lstat(installed)):
+            raise _SessionGraphMismatch(
+                "session graph snapshot changed during publication"
+            )
+        return installed
+    except _SessionGraphMismatch:
+        raise
+    except (OSError, SessionError) as error:
+        raise _SessionGraphMismatch(
+            "session graph snapshot could not be published"
+        ) from error
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        if source_fd is not None:
+            os.close(source_fd)
+        if directory_fd is not None:
+            if not replaced:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(directory_fd)
+
+
+def _snapshot_session_graph(
+    context: dict[str, object], data_root: Path, run_dir: Path
+) -> dict[str, object]:
+    physical = dict(context)
+    if "graph" not in physical:
+        return physical
+    binding = _verified_central_context_graph(physical, data_root)
+    if binding is None:
+        raise _SessionGraphMismatch(
+            "central graph no longer matches session binding"
+        )
+    snapshot = _copy_graph_snapshot(binding, run_dir)
+    graph = _graph_context_payload(binding)
+    graph["graphFile"] = str(snapshot)
+    physical["graph"] = graph
+    return physical
+
+
+def _verified_snapshot_graph(
+    context: dict[str, object], run_dir: Path
+) -> Path | None:
+    graph = context.get("graph")
+    if graph is None:
+        return None
+    if (
+        not isinstance(graph, dict)
+        or set(graph)
+        != {
+            "identity",
+            "revision",
+            "stateId",
+            "centralGraphFile",
+            "graphFile",
+            "sha256",
+        }
+        or any(not isinstance(value, str) or not value for value in graph.values())
+    ):
+        raise SessionError("session graph binding is invalid")
+    snapshot = Path(graph["graphFile"])
+    if snapshot != run_dir / "graph.json":
+        raise SessionError("session graph snapshot path is invalid")
+    snapshot_bytes = _read_owned_file(run_dir, snapshot.name, 0o600)
+    observed = hashlib.sha256(snapshot_bytes).hexdigest()
+    if not hmac.compare_digest(observed, graph["sha256"]):
+        raise SessionError("session graph snapshot digest mismatch")
+    return snapshot
+
+
 def _session_mcp_payload(
-    context: dict[str, object], data_root: Optional[Path] = None
+    context: dict[str, object], run_dir: Optional[Path] = None
 ) -> dict[str, object]:
     """Expose only installed, project-relevant MCP servers for this session."""
     servers: dict[str, object] = {}
@@ -291,14 +459,14 @@ def _session_mcp_payload(
 
     graphify = shutil.which("graphify-mcp")
     graph = (
-        _verified_context_graph(context, data_root)
-        if graphify and data_root is not None
+        _verified_snapshot_graph(context, run_dir)
+        if run_dir is not None
         else None
     )
     if graphify and graph is not None:
         servers["graphify"] = {
             "command": graphify,
-            "args": ["--graph", str(graph.graph_file)],
+            "args": ["--graph", str(graph)],
         }
 
     return {"mcpServers": servers}
@@ -585,7 +753,7 @@ def _materialize_session(
                 plugin_source,
                 verification_data_root,
             )
-        except _SessionMcpMismatch:
+        except (_SessionMcpMismatch, _SessionGraphMismatch):
             if "graph" not in candidate:
                 raise
             if attempt == 0:
@@ -619,8 +787,11 @@ def _materialize_session_once(
         run_dir = require_private_direct_child(
             sessions, run_dir, expected_mode=0o700
         )
+        physical_context = _snapshot_session_graph(
+            context, data_root, run_dir
+        )
         context_file = run_dir / "context.json"
-        context_bytes = atomic_json(context_file, context, 0o600)
+        context_bytes = atomic_json(context_file, physical_context, 0o600)
         context_sha256 = hashlib.sha256(context_bytes).hexdigest()
 
         effective_file = run_dir / "effective-models.json"
@@ -634,7 +805,9 @@ def _materialize_session_once(
 
         mcp_file = run_dir / "mcp.json"
         atomic_json(
-            mcp_file, _session_mcp_payload(context, data_root), 0o600
+            mcp_file,
+            _session_mcp_payload(physical_context, run_dir),
+            0o600,
         )
         session = verify_session(
             workflow_root,
@@ -1001,9 +1174,6 @@ def verify_session(
 ) -> SessionPaths:
     """Revalidate immutable routing, context, plugin, and MCP session state."""
     run_dir = _absolute_lexical(run_dir)
-    _, verified_data_root, _, _ = _validated_session_ancestors(
-        workflow_root, data_root
-    )
     binding = verify_context_binding(
         workflow_root,
         run_dir,
@@ -1015,7 +1185,7 @@ def verify_session(
     mcp_file = binding.run_dir / "mcp.json"
     mcp_bytes = _read_owned_file(binding.run_dir, "mcp.json", 0o600)
     if mcp_bytes != _canonical_json_bytes(
-        _session_mcp_payload(binding.context, verified_data_root)
+        _session_mcp_payload(binding.context, binding.run_dir)
     ):
         raise _SessionMcpMismatch(
             "session MCP configuration does not match its context"
