@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
+import integrations.common.orichum_cli as orichum_cli
+import integrations.common.session_config as session_config
 from integrations.common.model_routing import ROLES
 from integrations.common.account_registry import Account
+from integrations.common.graph_manager import resolve_graph_target
+from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.orichum_sessions import (
     LogicalSessionError,
     RouteBinding,
@@ -310,6 +317,175 @@ class OrichumSessionTests(unittest.TestCase):
         pending.mkdir(mode=0o700)
 
         self.assertEqual(list_logical_sessions(self.state), ())
+
+    def test_resume_materializes_current_graph_without_changing_logical_routes(
+        self,
+    ) -> None:
+        data_root = self.state.parent
+        repository = data_root / "project"
+        repository.mkdir()
+        for arguments in (
+            ("init", "-q"),
+            ("config", "user.email", "tests@example.invalid"),
+            ("config", "user.name", "Resume tests"),
+        ):
+            subprocess.run(
+                ["git", "-C", str(repository), *arguments],
+                check=True,
+                capture_output=True,
+            )
+        (repository / "tracked.txt").write_text("initial\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "tracked.txt"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "fixture"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/resume.git",
+            ],
+            check=True,
+        )
+        graph = resolve_graph_target(repository, data_root)
+        graph.output_dir.mkdir(parents=True, mode=0o700)
+        graph.output_dir.chmod(0o700)
+
+        def write_graph(node_id: str) -> None:
+            graph.graph_file.write_text(
+                json.dumps(
+                    {
+                        "nodes": [
+                            {
+                                "id": node_id,
+                                "source_file": "tracked.txt",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph.graph_file.chmod(0o600)
+            graph.metadata_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "repository_identity": graph.identity.key,
+                        "revision": graph.revision,
+                        "state_id": graph.state_id,
+                        "kind": graph.kind,
+                        "built_at_commit": graph.revision,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph.metadata_file.chmod(0o600)
+
+        write_graph("initial")
+        controller = self.binding("gpt-5.6-sol", "gpt", 100)
+        agents = {
+            role: self.binding("gpt-5.6-terra", "gpt", 101 + index)
+            for index, role in enumerate(ROLES)
+        }
+        logical = create_logical_session(
+            self.state,
+            project_root=repository,
+            stack="balanced",
+            controller=controller,
+            agents=agents,
+        )
+        palace = data_root / "palace"
+        palace.mkdir(mode=0o700)
+        projects = {
+            "schemaVersion": 1,
+            "contexts": [
+                {
+                    "root": str(repository),
+                    "dockerProfile": None,
+                    "modelStack": None,
+                    "accountPools": ["work"],
+                    "memoryPalace": str(palace),
+                    "memoryWing": "work",
+                }
+            ],
+        }
+        config = ResolvedConfig(
+            documents={"projects": projects, "providers": {}},
+            sources={},
+        )
+        config_root = data_root / "config"
+        config_root.mkdir(mode=0o700)
+        paths = {
+            "data": data_root,
+            "state": self.state,
+            "config": config_root,
+        }
+        context = orichum_cli.resolve_control_plane_context(
+            projects, repository
+        )
+        with mock.patch.object(
+            session_config.shutil,
+            "which",
+            side_effect=lambda name: (
+                "/opt/tools/graphify-mcp"
+                if name == "graphify-mcp"
+                else None
+            ),
+        ):
+            initial = session_config.create_resolved_session(
+                orichum_cli.WORKFLOW_ROOT,
+                data_root=data_root,
+                context=context,
+                effective=orichum_cli._effective_for(logical),
+                plugin_source=orichum_cli.WORKFLOW_ROOT
+                / "controller"
+                / "plugin",
+            )
+            write_graph("replacement")
+            with (
+                mock.patch.object(orichum_cli, "_verify_runtime"),
+                mock.patch.object(
+                    orichum_cli, "load_accounts", return_value=()
+                ),
+                mock.patch.object(
+                    orichum_cli, "validate_account_bindings"
+                ),
+                mock.patch.object(
+                    orichum_cli, "_validate_session_routes"
+                ),
+                mock.patch.object(orichum_cli, "_validate_live_models"),
+            ):
+                resumed = orichum_cli._prepare_resume(
+                    paths,
+                    config,
+                    identifier=logical.id,
+                    launch_dir=repository,
+                )
+
+        resumed_context = json.loads(
+            resumed.physical.context_file.read_text()
+        )
+        resumed_mcp = json.loads(resumed.physical.mcp_file.read_text())
+        self.assertNotEqual(initial.run_id, resumed.physical.run_id)
+        self.assertEqual(resumed.logical.id, logical.id)
+        self.assertEqual(resumed.logical.controller, logical.controller)
+        self.assertEqual(resumed.logical.agents, logical.agents)
+        self.assertEqual(
+            resumed_context["graph"]["sha256"],
+            hashlib.sha256(graph.graph_file.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            resumed_mcp["mcpServers"]["graphify"]["args"],
+            ["--graph", str(graph.graph_file)],
+        )
 
     def test_session_plan_pins_primary_fallback_and_routed_effective_models(self) -> None:
         models = {

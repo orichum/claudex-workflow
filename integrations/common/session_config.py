@@ -33,6 +33,10 @@ class SessionError(RuntimeError):
     """Raised when session state does not satisfy its ownership boundary."""
 
 
+class _SessionMcpMismatch(SessionError):
+    """An unpublished session's MCP snapshot no longer matches its context."""
+
+
 @dataclass(frozen=True)
 class SessionPaths:
     run_id: str
@@ -570,6 +574,36 @@ def _materialize_session(
     plugin_source: Path,
     verification_data_root: Optional[Path],
 ) -> SessionPaths:
+    candidate = context
+    for attempt in range(3):
+        try:
+            return _materialize_session_once(
+                workflow_root,
+                data_root,
+                candidate,
+                effective,
+                plugin_source,
+                verification_data_root,
+            )
+        except _SessionMcpMismatch:
+            if "graph" not in candidate:
+                raise
+            if attempt == 0:
+                candidate = bind_session_graph(context, data_root)
+            else:
+                candidate = dict(context)
+                candidate.pop("graph", None)
+    raise SessionError("session graph binding could not be stabilized")
+
+
+def _materialize_session_once(
+    workflow_root: Path,
+    data_root: Path,
+    context: dict[str, object],
+    effective: EffectiveStack,
+    plugin_source: Path,
+    verification_data_root: Optional[Path],
+) -> SessionPaths:
     state = require_owned_component(data_root, "state", private=True, create=True)
     sessions = require_owned_component(state, "sessions", private=True, create=True)
     run_dir: Optional[Path] = None
@@ -983,7 +1017,9 @@ def verify_session(
     if mcp_bytes != _canonical_json_bytes(
         _session_mcp_payload(binding.context, verified_data_root)
     ):
-        raise SessionError("session MCP configuration does not match its context")
+        raise _SessionMcpMismatch(
+            "session MCP configuration does not match its context"
+        )
     if (
         not isinstance(effective_models_sha256, str)
         or len(effective_models_sha256) != 64

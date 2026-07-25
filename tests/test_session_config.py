@@ -771,13 +771,62 @@ class SessionConfigTests(unittest.TestCase):
 
     def test_dirty_state_mismatch_is_omitted(self) -> None:
         repository = self.init_repository()
+        (repository / "tracked.txt").write_text("dirty-a\n", encoding="utf-8")
         self.create_central_graph(repository)
-        (repository / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+        first_state = resolve_graph_target(repository, self.runtime).state_id
+        (repository / "tracked.txt").write_text("dirty-b\n", encoding="utf-8")
+        second_state = resolve_graph_target(repository, self.runtime).state_id
 
         session = self.create()
 
         servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        self.assertNotEqual(first_state, second_state)
         self.assertNotIn("graphify", servers)
+
+    def test_repeated_graph_replacement_falls_back_to_consistent_omission(
+        self,
+    ) -> None:
+        repository = self.init_repository()
+        graph = self.create_central_graph(repository)
+        real_verify = session_config.verify_session
+        replacements = 0
+
+        def replace_before_verify(*args, **kwargs):
+            nonlocal replacements
+            if replacements < 2:
+                replacements += 1
+                graph.graph_file.write_text(
+                    json.dumps(
+                        {
+                            "nodes": [
+                                {
+                                    "id": f"replacement-{replacements}",
+                                    "source_file": "tracked.txt",
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                graph.graph_file.chmod(0o600)
+            return real_verify(*args, **kwargs)
+
+        with mock.patch.object(
+            session_config,
+            "verify_session",
+            side_effect=replace_before_verify,
+        ):
+            session = self.create()
+
+        context = json.loads(session.context_file.read_text())
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        self.assertNotIn("graph", context)
+        self.assertNotIn("graphify", servers)
+        self.assertEqual(replacements, 2)
+        self.assertEqual(
+            [path for path in session.run_dir.parent.glob("run.*")],
+            [session.run_dir],
+        )
 
     def test_new_physical_session_binds_replacement_without_mutating_existing_mcp(
         self,
