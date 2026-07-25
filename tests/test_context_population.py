@@ -19,6 +19,7 @@ from integrations.common.context_population import (
     discover_git_worktrees,
 )
 from integrations.common import context_population
+from integrations.common.graph_hooks import graph_hook_status
 
 
 class ContextPopulationDiscoveryTests(unittest.TestCase):
@@ -950,6 +951,17 @@ if operation == "hook":
         escaped_wing = r"wing\nforged\u001b[31m\u0085\u2028"
         self.assertIn(escaped_name, joined)
         self.assertIn(escaped_wing, joined)
+        hook_events = [
+            event for event in progress if "hook not managed" in event
+        ]
+        self.assertEqual(len(hook_events), 1)
+        self.assertLessEqual(len(hook_events[0]), 1024)
+        self.assertNotEqual(graph_hook_status(repository), "installed")
+        self.assertFalse((repository / ".git/hooks/post-commit").exists())
+        self.assertFalse((repository / ".git/hooks/post-checkout").exists())
+        self.assertTrue(tuple(self.data_root.rglob("graph.json")))
+        self.assertEqual(result.repositories[0].action, "created")
+        self.assertEqual(result.repositories[0].hook_status, "not managed")
 
         rendered = context_population.render_population_result(result)
         self.assertNotIn("\n[graphify forged]", rendered)

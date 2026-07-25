@@ -1290,7 +1290,7 @@ def sync_graph(
             if node_count is None:
                 raise GraphError("Migrated graph is invalid")
             prune_orphaned_working_graphs(target.identity, data_root)
-            _install_graph_hooks(target.repository)
+            _install_graph_hooks(target.repository, progress)
             return _result(target, "migrated", node_count)
 
         status = inspect_graph(target)
@@ -1328,7 +1328,7 @@ def sync_graph(
             node_count = _validate_output(target, output_dir)
             _activate_staged_output(output_dir, target.output_dir)
             prune_orphaned_working_graphs(target.identity, data_root)
-            _install_graph_hooks(target.repository)
+            _install_graph_hooks(target.repository, progress)
             return _result(target, action, node_count)
         except BaseException:
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -1399,11 +1399,35 @@ def _orichum_launcher() -> Path:
     return Path(__file__).resolve().parents[2] / "bin" / "orichum"
 
 
-def _install_graph_hooks(repository: Path) -> None:
+def _bounded_hook_diagnostic(error: GraphHookError) -> str:
+    escaped = []
+    length = 0
+    for character in str(error):
+        if character.isprintable() and character not in "\r\n":
+            rendered = character
+        else:
+            codepoint = ord(character)
+            rendered = (
+                f"\\u{codepoint:04x}"
+                if codepoint <= 0xFFFF
+                else f"\\U{codepoint:08x}"
+            )
+        escaped.append(rendered)
+        length += len(rendered)
+        if length >= 256:
+            break
+    return "".join(escaped)[:256]
+
+
+def _install_graph_hooks(
+    repository: Path,
+    progress: Callable[[str], None] | None = None,
+) -> None:
     try:
         install_graph_hooks(repository, _orichum_launcher())
     except GraphHookError as error:
-        raise GraphError(str(error)) from error
+        if progress is not None:
+            progress(f"hook not managed: {_bounded_hook_diagnostic(error)}")
 
 
 _HOOK_SYNC_LAUNCHER = (
