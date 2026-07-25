@@ -81,6 +81,13 @@ class _DeadlineRawIO(io.RawIOBase):
         self._sock.settimeout(_remaining(self._deadline))
         return self._sock.recv_into(target)
 
+    def close(self) -> None:
+        if not self.closed:
+            try:
+                self._sock.close()
+            finally:
+                super().close()
+
 
 class _DeadlineSocket:
     def __init__(self, sock: object, deadline: float) -> None:
@@ -95,7 +102,7 @@ class _DeadlineSocket:
         if mode != "rb":
             raise CatalogError("CLIProxyAPI response mode is invalid")
         return io.BufferedReader(
-            _DeadlineRawIO(self._sock, self._deadline)
+            _DeadlineRawIO(self._sock.dup(), self._deadline)
         )
 
     def close(self) -> None:

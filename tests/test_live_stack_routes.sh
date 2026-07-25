@@ -296,7 +296,7 @@ PY
 port_file="$fixture/cliproxy.port"
 server_log="$fixture/cliproxy.log"
 python3 - "$port_file" <<'PY' 2>"$server_log" &
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import sys
@@ -348,7 +348,7 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+server = HTTPServer(("127.0.0.1", 0), Handler)
 Path(sys.argv[1]).write_text(
     str(server.server_address[1]), encoding="ascii"
 )
@@ -458,6 +458,10 @@ if os.waitstatus_to_exitcode(status) != 0:
 PY
 ); then
   sed -n '1,240p' "$wizard_output" >&2
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    printf 'ERROR: fake CLIProxyAPI server exited while the wizard was running\n' >&2
+  fi
+  sed -n '1,120p' "$server_log" >&2
   exit 1
 fi
 rg -Fq 'Saved stack heavy.' "$wizard_output"

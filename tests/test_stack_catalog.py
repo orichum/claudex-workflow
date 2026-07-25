@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import http.client
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import math
+import threading
+import time
 from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest import mock
@@ -313,6 +316,34 @@ class StackCatalogTests(unittest.TestCase):
                         fetch_live_catalog(8317, timeout=timeout)
                 connect.assert_not_called()
 
+    def test_fetch_reads_http_10_body_after_connection_socket_closes(self) -> None:
+        payload = b'{"object":"list","data":[]}'
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.flush()
+                time.sleep(0.05)
+                self.wfile.write(payload)
+
+            def log_message(self, _format: str, *_arguments: object) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            document = fetch_live_catalog(server.server_address[1])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=1)
+
+        self.assertEqual(document, {"object": "list", "data": []})
+
     def test_fetch_enforces_total_deadline_during_slow_body(self) -> None:
         class Clock:
             value = 0.0
@@ -337,6 +368,9 @@ class StackCatalogTests(unittest.TestCase):
 
             def sendall(self, _payload: bytes) -> None:
                 return
+
+            def dup(self):
+                return self
 
             def recv_into(self, target: bytearray) -> int:
                 source = header if header else body
