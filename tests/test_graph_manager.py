@@ -775,6 +775,39 @@ with counter.open("r+", encoding="ascii") as state:
         self.assertEqual(second.action, "updated")
         self.assertEqual(self.calls()[-1][0], "update")
 
+    def test_clean_revision_graph_is_shared_across_clones(self):
+        first = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        second_clone = self.root / "second-clone"
+        subprocess.run(
+            ["git", "clone", "-q", str(self.repository), str(second_clone)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(second_clone), "remote", "set-url", "origin",
+                "https://github.com/example/repository.git",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        second_target = resolve_graph_target(second_clone, self.data_root)
+
+        self.assertEqual(first.output_dir, second_target.output_dir)
+        self.assertEqual(inspect_graph(second_target).status, "current")
+        second = sync_graph(
+            second_clone, self.data_root, graphify=self.graphify
+        )
+        self.assertEqual(second.action, "updated")
+        metadata = json.loads(
+            second_target.metadata_file.read_text(encoding="utf-8")
+        )
+        self.assertNotIn("checkout_path", metadata)
+
     def test_failed_update_preserves_last_valid_graph(self):
         first = sync_graph(
             self.repository, self.data_root, graphify=self.graphify
@@ -787,33 +820,100 @@ with counter.open("r+", encoding="ascii") as state:
 
         self.assertEqual(first.graph_file.read_bytes(), original)
 
-    def test_failed_activation_and_rename_rollback_restore_valid_graph(self):
+    def test_failed_atomic_exchange_preserves_valid_graph(self):
         first = sync_graph(
             self.repository, self.data_root, graphify=self.graphify
         )
         original = first.graph_file.read_bytes()
-        real_replace = os.replace
-
-        def fail_publish_to_active(source, destination):
-            source = Path(source)
-            destination = Path(destination)
-            if (
-                destination == first.output_dir
-                and (
-                    source.name.startswith(".graphify-out.staging-")
-                    or source.name.startswith(".graphify-out.backup-")
-                )
-            ):
-                raise OSError("simulated publish failure")
-            return real_replace(source, destination)
 
         with mock.patch(
-            "integrations.common.graph_manager.os.replace",
-            side_effect=fail_publish_to_active,
+            "integrations.common.graph_manager._atomic_exchange_directories",
+            side_effect=GraphError("simulated exchange failure"),
         ), self.assertRaises(GraphError):
             sync_graph(self.repository, self.data_root, graphify=self.graphify)
 
         self.assertEqual(first.graph_file.read_bytes(), original)
+
+    def test_update_activation_never_removes_the_active_directory(self):
+        import integrations.common.graph_manager as graph_manager
+
+        first = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        real_replace = os.replace
+
+        def require_active_during_publish(source, destination):
+            if Path(destination) == first.output_dir:
+                self.assertTrue(
+                    first.output_dir.exists(),
+                    "active graph disappeared during update activation",
+                )
+            return real_replace(source, destination)
+
+        with mock.patch(
+            "integrations.common.graph_manager.os.replace",
+            side_effect=require_active_during_publish,
+        ):
+            second = sync_graph(
+                self.repository, self.data_root, graphify=self.graphify
+            )
+
+        self.assertEqual(second.action, "updated")
+        self.assertEqual(inspect_graph(self.target()).status, "current")
+
+    def test_atomic_exchange_fails_closed_on_unsupported_platform(self):
+        import integrations.common.graph_manager as graph_manager
+
+        active = self.root / "active"
+        staged = self.root / "staged"
+        active.mkdir()
+        staged.mkdir()
+        (active / "marker").write_text("active", encoding="utf-8")
+        (staged / "marker").write_text("staged", encoding="utf-8")
+
+        with mock.patch.object(
+            graph_manager.sys, "platform", "win32"
+        ), self.assertRaises(GraphError):
+            graph_manager._atomic_exchange_directories(staged, active)
+
+        self.assertEqual(
+            (active / "marker").read_text(encoding="utf-8"), "active"
+        )
+        self.assertEqual(
+            (staged / "marker").read_text(encoding="utf-8"), "staged"
+        )
+
+    def test_exchange_cleanup_failure_leaves_active_and_allows_retry(self):
+        import integrations.common.graph_manager as graph_manager
+
+        active = self.root / "active"
+        staged = self.root / "staged"
+        active.mkdir()
+        staged.mkdir()
+        (active / "marker").write_text("old", encoding="utf-8")
+        (staged / "marker").write_text("new", encoding="utf-8")
+
+        with mock.patch.object(
+            graph_manager.shutil,
+            "rmtree",
+            side_effect=OSError("simulated interrupted cleanup"),
+        ):
+            graph_manager._activate_staged_output(staged, active)
+
+        self.assertEqual(
+            (active / "marker").read_text(encoding="utf-8"), "new"
+        )
+        self.assertEqual(
+            (staged / "marker").read_text(encoding="utf-8"), "old"
+        )
+
+        newer = self.root / "newer"
+        newer.mkdir()
+        (newer / "marker").write_text("newer", encoding="utf-8")
+        graph_manager._activate_staged_output(newer, active)
+        self.assertEqual(
+            (active / "marker").read_text(encoding="utf-8"), "newer"
+        )
 
     def test_project_root_and_submodule_discovery(self):
         nested = self.repository / "vendor" / "module"
@@ -1038,16 +1138,57 @@ with counter.open("r+", encoding="ascii") as state:
         )
         for name in (
             "cost.json",
+            "manifest.json",
+            ".graphify_build.json",
             ".graphify_labels.json",
             ".graphify_analysis.json",
+            ".graphify_semantic_marker",
             ".needs_update",
+            "needs_update",
+            "example-project-callflow.html",
         ):
             (legacy / name).write_text("{}\n", encoding="utf-8")
+        cache = legacy / "cache"
+        cache.mkdir()
+        (cache / "stat-index.json").write_text("{}\n", encoding="utf-8")
         obsidian = legacy / "obsidian"
         obsidian.mkdir()
         (obsidian / "index.md").write_text("# Graph\n", encoding="utf-8")
 
         self.assertTrue(migrate_legacy_graph(self.target()))
+
+    def test_unignored_legacy_output_migrates_once_to_revision_target(self):
+        self._git("config", "core.excludesFile", os.devnull)
+        (self.repository / ".git" / "info" / "exclude").write_text(
+            "", encoding="utf-8"
+        )
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        (legacy / "graph.json").write_text(
+            json.dumps({
+                "nodes": [{"id": "node", "source_file": "source.py"}]
+            }),
+            encoding="utf-8",
+        )
+
+        before = resolve_graph_target(self.repository, self.data_root)
+        first = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+        second = sync_graph(
+            self.repository, self.data_root, graphify=self.graphify
+        )
+
+        self.assertEqual(before.kind, "revision")
+        self.assertEqual(first.action, "migrated")
+        self.assertEqual(first.output_dir, before.output_dir)
+        self.assertEqual(second.action, "updated")
+        identity_root = self.data_root / "graphs" / before.identity.key
+        self.assertFalse((identity_root / "working").exists())
+        self.assertEqual(
+            tuple((identity_root / "revisions").rglob("graph.json")),
+            (first.graph_file,),
+        )
 
     def test_unknown_legacy_entry_refuses_migration_and_preserves_source(self):
         legacy = self.repository / "graphify-out"
@@ -1065,6 +1206,34 @@ with counter.open("r+", encoding="ascii") as state:
 
         self.assertTrue(legacy.exists())
         self.assertFalse(self.target().output_dir.exists())
+
+    def test_nested_or_arbitrary_callflow_html_refuses_migration(self):
+        for relative in (
+            Path("architecture.html"),
+            Path("docs") / "example-project-callflow.html",
+        ):
+            with self.subTest(relative=relative):
+                legacy = self.repository / "graphify-out"
+                legacy.mkdir()
+                (legacy / "graph.json").write_text(
+                    json.dumps({
+                        "nodes": [{
+                            "id": "node",
+                            "source_file": "source.py",
+                        }]
+                    }),
+                    encoding="utf-8",
+                )
+                artifact = legacy / relative
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text("<html></html>\n", encoding="utf-8")
+
+                with self.assertRaises(GraphError):
+                    migrate_legacy_graph(self.target())
+
+                self.assertTrue(legacy.exists())
+                self.assertFalse(self.target().output_dir.exists())
+                shutil.rmtree(legacy)
 
     def test_legacy_migration_refuses_foreign_owned_source(self):
         legacy = self.repository / "graphify-out"
@@ -1164,6 +1333,46 @@ with counter.open("r+", encoding="ascii") as state:
             (legacy / "replacement.txt").read_text(encoding="utf-8"),
             "replacement\n",
         )
+
+    def test_quarantine_cleanup_failure_rolls_back_and_retry_migrates(self):
+        import integrations.common.graph_manager as graph_manager
+
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        (legacy / "graph.json").write_text(
+            json.dumps({
+                "nodes": [{"id": "node", "source_file": "source.py"}]
+            }),
+            encoding="utf-8",
+        )
+        target = self.target()
+        real_rmtree = shutil.rmtree
+        failed = False
+
+        def fail_quarantine_cleanup(path, *arguments, **keywords):
+            nonlocal failed
+            if (
+                not failed
+                and Path(path).name.startswith(
+                    ".orichum-legacy-graphify-"
+                )
+            ):
+                failed = True
+                raise OSError("simulated quarantine cleanup failure")
+            return real_rmtree(path, *arguments, **keywords)
+
+        with mock.patch.object(
+            graph_manager.shutil,
+            "rmtree",
+            side_effect=fail_quarantine_cleanup,
+        ), self.assertRaises(GraphError):
+            migrate_legacy_graph(target)
+
+        self.assertTrue(legacy.exists())
+        self.assertFalse(target.output_dir.exists())
+        self.assertTrue(migrate_legacy_graph(target))
+        self.assertFalse(legacy.exists())
+        self.assertEqual(inspect_graph(target).status, "current")
 
     def test_prunes_only_orphaned_working_graphs(self):
         identity = self.target().identity

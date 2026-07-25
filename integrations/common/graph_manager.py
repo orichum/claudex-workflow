@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import Callable, Literal
 from urllib.parse import quote, unquote, urlsplit
@@ -244,6 +247,10 @@ def _status(repository: Path) -> bytes:
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
+                "--",
+                ".",
+                ":(exclude,top)graphify-out",
+                ":(exclude,top)graphify-out/**",
             ],
             check=False,
             capture_output=True,
@@ -475,23 +482,54 @@ _LEGACY_GRAPHIFY_ENTRIES = frozenset(
         ".graphify_analysis.json",
         ".graphify_cached.json",
         ".graphify_detect.json",
+        ".graphify_extract.json",
+        ".graphify_build.json",
         ".graphify_labels.json",
+        ".graphify_learning.json",
+        ".graphify_obsidian_manifest.json",
         ".graphify_python",
         ".graphify_root",
         ".graphify_semantic.json",
+        ".graphify_semantic_marker",
+        ".graphify_semantic_new.json",
         ".graphify_uncached.txt",
+        ".graphify_version",
+        ".graph.tmp.json",
         ".needs_update",
         "GRAPH_REPORT.md",
+        "GRAPH_TREE.html",
+        "cache",
         "cost.json",
         "cypher.txt",
         "graph.graphml",
         "graph.html",
         "graph.json",
         "graph.svg",
+        "index.md",
+        "manifest.json",
+        "memory",
+        "merged-graph.json",
+        "needs_update",
         "obsidian",
+        "reflections",
+        "transcripts",
         "wiki",
     }
 )
+
+
+def _recognized_legacy_entry(name: str) -> bool:
+    return (
+        name in _LEGACY_GRAPHIFY_ENTRIES
+        or re.fullmatch(r"\.graphify_chunk_\d+\.json", name) is not None
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", name) is not None
+        or re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+            r"-callflow\.html",
+            name,
+        )
+        is not None
+    )
 
 
 def _private_directory(path: Path, label: str, *, create: bool = False) -> Path:
@@ -611,15 +649,17 @@ def _validate_graph_file(graph_file: Path) -> int:
 
 
 def _metadata(target: GraphTarget) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
         "schema_version": 1,
         "repository_identity": target.identity.key,
         "revision": target.revision,
         "state_id": target.state_id,
         "kind": target.kind,
-        "checkout_path": str(target.repository),
         "built_at_commit": target.revision,
     }
+    if target.kind == "working":
+        metadata["checkout_path"] = str(target.repository)
+    return metadata
 
 
 def _valid_working_metadata(
@@ -680,10 +720,14 @@ def _validate_output(target: GraphTarget, output_dir: Path) -> int:
         "revision",
         "state_id",
         "kind",
-        "checkout_path",
     ):
         if metadata.get(key) != expected[key]:
             raise GraphError("Graph metadata does not match its target")
+    if (
+        target.kind == "working"
+        and metadata.get("checkout_path") != expected["checkout_path"]
+    ):
+        raise GraphError("Graph metadata does not match its target")
     return node_count
 
 
@@ -821,7 +865,7 @@ def _copy_legacy_tree(source: Path, destination: Path) -> dict[str, str]:
         ):
             raise GraphError("Legacy Graphify output is unsafe")
         entries = set(os.listdir(root_descriptor))
-        if entries - _LEGACY_GRAPHIFY_ENTRIES:
+        if any(not _recognized_legacy_entry(name) for name in entries):
             raise GraphError(
                 "Legacy Graphify output contains unknown entries"
             )
@@ -855,33 +899,62 @@ def _target_data_root(target: GraphTarget) -> Path:
 
 
 def _activate_staged_output(staged: Path, active: Path) -> None:
-    backup = active.parent / f".graphify-out.backup-{uuid.uuid4().hex}"
-    moved_active = False
-    safe_to_remove_backup = False
+    if not os.path.lexists(active):
+        try:
+            os.replace(staged, active)
+        except OSError as error:
+            raise GraphError("Graph activation failed") from error
+        return
+    _atomic_exchange_directories(staged, active)
     try:
-        if os.path.lexists(active):
-            os.replace(active, backup)
-            moved_active = True
-        os.replace(staged, active)
-        safe_to_remove_backup = True
-    except OSError as error:
-        if moved_active and not os.path.lexists(active):
-            try:
-                os.replace(backup, active)
-            except OSError:
-                try:
-                    shutil.copytree(backup, active)
-                except OSError as copy_error:
-                    raise GraphError(
-                        "Graph activation and rollback failed"
-                    ) from copy_error
-                safe_to_remove_backup = True
-            else:
-                safe_to_remove_backup = True
-        raise GraphError("Graph activation failed") from error
-    finally:
-        if safe_to_remove_backup and backup.exists():
-            shutil.rmtree(backup, ignore_errors=True)
+        shutil.rmtree(staged)
+    except OSError:
+        pass
+
+
+def _atomic_exchange_directories(first: Path, second: Path) -> None:
+    """Atomically exchange two directory entries on supported platforms."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    at_fdcwd = -2
+    first_bytes = os.fsencode(first)
+    second_bytes = os.fsencode(second)
+    if sys.platform == "darwin":
+        exchange = getattr(libc, "renameatx_np", None)
+        if exchange is None:
+            raise GraphError("Atomic graph activation is unsupported")
+        exchange.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        exchange.restype = ctypes.c_int
+        result = exchange(
+            at_fdcwd, first_bytes, at_fdcwd, second_bytes, 0x00000002
+        )
+    elif sys.platform.startswith("linux"):
+        exchange = getattr(libc, "renameat2", None)
+        if exchange is None:
+            raise GraphError("Atomic graph activation is unsupported")
+        exchange.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        exchange.restype = ctypes.c_int
+        result = exchange(
+            at_fdcwd, first_bytes, at_fdcwd, second_bytes, 0x00000002
+        )
+    else:
+        raise GraphError("Atomic graph activation is unsupported")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise GraphError(
+            f"Atomic graph activation failed: {os.strerror(error_number)}"
+        )
 
 
 def migrate_legacy_graph(target: GraphTarget) -> bool:
@@ -914,6 +987,7 @@ def migrate_legacy_graph(target: GraphTarget) -> bool:
         f".orichum-legacy-graphify-{uuid.uuid4().hex}"
     )
     source_quarantined = False
+    activated = False
     try:
         os.replace(legacy, quarantined)
         source_quarantined = True
@@ -923,7 +997,18 @@ def migrate_legacy_graph(target: GraphTarget) -> bool:
         _write_metadata(target, staged)
         _validate_output(target, staged)
         _activate_staged_output(staged, target.output_dir)
-        shutil.rmtree(quarantined)
+        activated = True
+        try:
+            shutil.rmtree(quarantined)
+        except OSError:
+            try:
+                os.replace(target.output_dir, staged)
+            except OSError as rollback_error:
+                raise GraphError(
+                    "Legacy cleanup failed and activation could not roll back"
+                ) from rollback_error
+            activated = False
+            raise
         source_quarantined = False
     except GraphError:
         raise
@@ -932,7 +1017,11 @@ def migrate_legacy_graph(target: GraphTarget) -> bool:
     finally:
         if staged.exists():
             shutil.rmtree(staged, ignore_errors=True)
-        if source_quarantined and not os.path.lexists(legacy):
+        if (
+            source_quarantined
+            and not activated
+            and not os.path.lexists(legacy)
+        ):
             try:
                 os.replace(quarantined, legacy)
                 source_quarantined = False
