@@ -112,6 +112,46 @@ class GraphManagerTests(unittest.TestCase):
         self.assertEqual(original.state_id, after_movement.state_id)
         self.assertEqual(original.output_dir, after_movement.output_dir)
 
+    def test_dirty_linked_worktrees_have_distinct_stable_targets(self) -> None:
+        first_worktree = self.root / "linked-first"
+        second_worktree = self.root / "linked-second"
+        worktrees = [first_worktree, second_worktree]
+
+        def remove_worktrees() -> None:
+            for repository in worktrees:
+                if repository.exists():
+                    self._git(
+                        self.first_clone,
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(repository),
+                    )
+
+        self.addCleanup(remove_worktrees)
+        self._git(
+            self.first_clone, "worktree", "add", "--detach", str(first_worktree)
+        )
+        self._git(
+            self.first_clone, "worktree", "add", "--detach", str(second_worktree)
+        )
+        for repository in (first_worktree, second_worktree):
+            (repository / "dirty.txt").write_text("changed\n", encoding="utf-8")
+
+        first = resolve_graph_target(first_worktree, self.data_root)
+        second = resolve_graph_target(second_worktree, self.data_root)
+        moved = self.root / "linked-first-moved"
+        self._git(
+            self.first_clone, "worktree", "move", str(first_worktree), str(moved)
+        )
+        worktrees[0] = moved
+        after_movement = resolve_graph_target(moved, self.data_root)
+
+        self.assertNotEqual(first.state_id, second.state_id)
+        self.assertNotEqual(first.output_dir, second.output_dir)
+        self.assertEqual(first.state_id, after_movement.state_id)
+        self.assertEqual(first.output_dir, after_movement.output_dir)
+
     def test_changed_content_changes_dirty_fingerprint(self) -> None:
         tracked = self.first_clone / "tracked.txt"
         tracked.write_text("first change\n", encoding="utf-8")
@@ -175,6 +215,42 @@ class GraphManagerTests(unittest.TestCase):
         data_link.symlink_to(self.data_root, target_is_directory=True)
         with self.assertRaises(GraphManagerError):
             resolve_graph_target(self.first_clone, data_link)
+
+    def test_intermediate_repository_symlink_is_rejected(self) -> None:
+        linked_parent = self.root / "linked-repository-parent"
+        linked_parent.symlink_to(self.root, target_is_directory=True)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(
+                linked_parent / self.first_clone.name, self.data_root
+            )
+
+    def test_intermediate_data_root_symlink_is_rejected(self) -> None:
+        linked_parent = self.root / "linked-data-parent"
+        linked_parent.symlink_to(self.root, target_is_directory=True)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(
+                self.first_clone, linked_parent / self.data_root.name
+            )
+
+    def test_graphs_output_ancestor_symlink_is_rejected(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.data_root / "graphs").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, self.data_root)
+
+    def test_nested_output_ancestor_symlink_is_rejected(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        graphs = self.data_root / "graphs"
+        graphs.mkdir()
+        (graphs / "github.com").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(GraphManagerError):
+            resolve_graph_target(self.first_clone, self.data_root)
 
     def test_repository_symlink_is_rejected_by_identity_and_fingerprint(self) -> None:
         repository_link = self.root / "repository-link"

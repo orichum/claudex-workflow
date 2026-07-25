@@ -39,10 +39,26 @@ class GraphTarget:
     metadata_file: Path
 
 
+def _path_without_symlink(path: Path, label: str) -> Path:
+    path = Path(os.path.abspath(path))
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            observed = os.lstat(current)
+        except FileNotFoundError:
+            return path
+        except OSError as error:
+            raise GraphManagerError(f"{label} path is unavailable") from error
+        if stat.S_ISLNK(observed.st_mode):
+            raise GraphManagerError(f"{label} path is unsafe")
+    return path
+
+
 def _directory_without_symlink(
     path: Path, label: str, *, require_private: bool = False
 ) -> Path:
-    path = Path(path).absolute()
+    path = _path_without_symlink(path, label)
     try:
         observed = os.lstat(path)
     except OSError as error:
@@ -260,7 +276,18 @@ def working_tree_fingerprint(repository: Path) -> str:
 
 
 def _checkout_id(repository: Path) -> str:
-    result = _git(repository, "config", "--local", "--get", "orichum.checkoutIdentity")
+    result = _git(
+        repository, "config", "--local", "extensions.worktreeConfig", "true"
+    )
+    if result.returncode != 0:
+        raise GraphManagerError("Worktree configuration cannot be enabled")
+    result = _git(
+        repository,
+        "config",
+        "--worktree",
+        "--get",
+        "orichum.checkoutIdentity",
+    )
     if result.returncode == 0:
         try:
             return uuid.UUID(result.stdout.strip()).hex
@@ -270,7 +297,7 @@ def _checkout_id(repository: Path) -> str:
     result = _git(
         repository,
         "config",
-        "--local",
+        "--worktree",
         "orichum.checkoutIdentity",
         checkout_id,
     )
@@ -299,6 +326,7 @@ def resolve_graph_target(repository: Path, data_root: Path) -> GraphTarget:
         state_id = revision
         kind = "revision"
         output_dir = root / "revisions" / revision / "graphify-out"
+    _path_without_symlink(output_dir, "Graph output")
     return GraphTarget(
         repository=repository,
         identity=identity,
