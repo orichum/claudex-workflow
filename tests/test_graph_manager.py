@@ -258,6 +258,104 @@ class GraphManagerTests(unittest.TestCase):
 
             self.assertEqual(target.state_id, f"{identity.hex}-{fingerprint}")
 
+    def test_interrupted_worktree_migration_reconciles_state_on_retry(self) -> None:
+        import integrations.common.graph_manager as graph_manager
+
+        linked = self.root / "interrupted-linked"
+        self.addCleanup(
+            lambda: self._git(
+                self.first_clone, "worktree", "remove", "--force", str(linked)
+            )
+            if linked.exists()
+            else None
+        )
+        self._git(
+            self.first_clone,
+            "config",
+            "--local",
+            "extensions.worktreeConfig",
+            "true",
+        )
+        self._git(self.first_clone, "worktree", "add", "--detach", str(linked))
+
+        for repository in (self.first_clone, linked):
+            (repository / "dirty.txt").write_text("changed\n", encoding="utf-8")
+            prior_id = uuid.uuid4()
+            stale_id = uuid.uuid4()
+            self._git(
+                repository,
+                "config",
+                "--worktree",
+                "orichum.checkoutIdentity",
+                str(prior_id),
+            )
+            git_dir = Path(
+                self._git(
+                    repository, "rev-parse", "--absolute-git-dir"
+                ).strip()
+            )
+            state_file = git_dir / "orichum.checkoutIdentity"
+            state_file.write_text(str(stale_id), encoding="ascii")
+            git_call = graph_manager._git
+
+            def fail_config_removal(target, *arguments):
+                if arguments == (
+                    "config",
+                    "--worktree",
+                    "--unset-all",
+                    "orichum.checkoutIdentity",
+                ):
+                    return subprocess.CompletedProcess(
+                        ["git"], returncode=1, stdout="", stderr=""
+                    )
+                return git_call(target, *arguments)
+
+            with mock.patch(
+                "integrations.common.graph_manager._git",
+                side_effect=fail_config_removal,
+            ), self.assertRaises(GraphManagerError):
+                resolve_graph_target(repository, self.data_root)
+
+            self.assertEqual(uuid.UUID(state_file.read_text()), prior_id)
+            self.assertEqual(
+                self._git(
+                    repository,
+                    "config",
+                    "--worktree",
+                    "--get",
+                    "orichum.checkoutIdentity",
+                ).strip(),
+                str(prior_id),
+            )
+            self.assertEqual(
+                list(git_dir.glob(".orichum.checkoutIdentity.*.tmp")),
+                [],
+            )
+
+            target = resolve_graph_target(repository, self.data_root)
+
+            self.assertEqual(target.state_id[:32], prior_id.hex)
+            self.assertEqual(uuid.UUID(state_file.read_text()), prior_id)
+            migrated = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "config",
+                    "--worktree",
+                    "--get",
+                    "orichum.checkoutIdentity",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(migrated.returncode, 0)
+            self.assertEqual(
+                list(git_dir.glob(".orichum.checkoutIdentity.*.tmp")),
+                [],
+            )
+
     def test_checkout_identity_publish_is_synced_before_atomic_replace(self) -> None:
         (self.first_clone / "dirty.txt").write_text("changed\n", encoding="utf-8")
         synced = False

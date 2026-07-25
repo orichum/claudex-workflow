@@ -323,14 +323,16 @@ def _checkout_id(repository: Path) -> str:
             persisted = None
         except OSError as error:
             raise GraphManagerError("Checkout identity cannot be read") from error
+        persisted_id: str | None = None
         if persisted is not None:
             try:
-                return uuid.UUID(persisted).hex
+                persisted_id = uuid.UUID(persisted).hex
             except ValueError as error:
                 raise GraphManagerError("Persisted checkout identity is invalid") from error
         remove_prior_worktree = prior_worktree.returncode == 0
         remove_legacy = (
             not remove_prior_worktree
+            and persisted_id is None
             and legacy.returncode == 0
             and is_main_worktree
         )
@@ -340,48 +342,51 @@ def _checkout_id(repository: Path) -> str:
                 checkout_id = uuid.UUID(configured.stdout.strip()).hex
             except ValueError as error:
                 raise GraphManagerError("Persisted checkout identity is invalid") from error
+        elif persisted_id is not None:
+            return persisted_id
         else:
             checkout_id = uuid.uuid4().hex
-        temporary_path: Path | None = None
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=".orichum.checkoutIdentity.",
-                suffix=".tmp",
-                dir=git_dir,
-            )
-            temporary_path = Path(temporary_name)
+        if checkout_id != persisted_id:
+            temporary_path: Path | None = None
             try:
-                os.fchmod(descriptor, 0o600)
-                with os.fdopen(descriptor, "w", encoding="ascii") as file:
-                    descriptor = -1
-                    file.write(checkout_id)
-                    file.flush()
-                    os.fsync(file.fileno())
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
-            os.replace(temporary_path, state_file)
-            temporary_path = None
-            directory = os.open(
-                git_dir,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-            )
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError as error:
-            raise GraphManagerError("Checkout identity cannot be persisted") from error
-        finally:
-            if temporary_path is not None:
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=".orichum.checkoutIdentity.",
+                    suffix=".tmp",
+                    dir=git_dir,
+                )
+                temporary_path = Path(temporary_name)
                 try:
-                    temporary_path.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    pass
+                    os.fchmod(descriptor, 0o600)
+                    with os.fdopen(descriptor, "w", encoding="ascii") as file:
+                        descriptor = -1
+                        file.write(checkout_id)
+                        file.flush()
+                        os.fsync(file.fileno())
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                os.replace(temporary_path, state_file)
+                temporary_path = None
+                directory = os.open(
+                    git_dir,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                )
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError as error:
+                raise GraphManagerError("Checkout identity cannot be persisted") from error
+            finally:
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        pass
         if remove_prior_worktree:
             result = _git(
                 repository,
