@@ -1,18 +1,10 @@
 name: Native macOS ARM64 acceptance
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
-    paths:
-      - ".github/workflows/macos-arm64-acceptance.yml"
-      - "bin/**"
-      - "config/**"
-      - "controller/**"
-      - "integrations/**"
-      - "lib/**"
-      - "tests/**"
-      - "discover-models.sh"
-      - "doctor.sh"
-      - "install.sh"
   workflow_dispatch:
 
 permissions:
@@ -70,6 +62,7 @@ jobs:
               tests/test_installer.sh \
               tests/test_install_transaction.sh \
               tests/test_live_stack_routes.sh \
+              tests/test_orichum_launcher.sh \
               tests/test_uninstall.sh; do
             if ! bash "$test_script"; then
               printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \

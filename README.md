@@ -293,6 +293,8 @@ delays, and installer port conflicts.
 | [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
 | [Troubleshooting](docs/troubleshooting.md) | Symptoms, diagnostics, and recovery |
 | [CLI reference](docs/cli-reference.md) | The complete command map |
+| [Release readiness](docs/release-readiness.md) | End-to-end acceptance evidence, supported boundaries, and known notices |
+| [Efficiency and performance](docs/efficiency-and-performance.md) | Measured savings, latency, cost, cache, and resource usage |
 
 ## Built with
 

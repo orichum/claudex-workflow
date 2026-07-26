@@ -53,7 +53,7 @@ flowchart LR
 
 LeanCTX is a per-session headless stdio MCP, not a resident service. Orichum
 pins it to the active Git repository, gives it private session-local storage,
-and exposes a fixed ten-tool surface for source context, patches, and
+and exposes a fixed six-tool surface for source context, patches, and
 observational shell output. `ctx_patch` and `ctx_shell` keep normal Claude Code
 approval. `ctx_call`, LeanCTX proxying, graph, memory, global hooks, shell
 interception, and autonomous features are disabled. Native Claude Code tools

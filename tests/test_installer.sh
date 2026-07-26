@@ -148,12 +148,8 @@ if not root.is_dir() or not (data / "config.toml").is_file():
     raise SystemExit(4)
 tools = [
     "ctx_read",
-    "ctx_delta",
     "ctx_search",
-    "ctx_glob",
     "ctx_tree",
-    "ctx_outline",
-    "ctx_explore",
     "ctx_expand",
     "ctx_patch",
     "ctx_shell",

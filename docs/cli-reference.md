@@ -14,6 +14,7 @@ current machine.
 | `orichum context update ROOT ...` | Change context routing |
 | `orichum context populate ROOT` | Explicitly refresh memory and graphs |
 | `orichum context remove ROOT` | Remove a context mapping |
+| `orichum context validate` | Validate all configured project contexts |
 | `orichum models list` | List declared models |
 | `orichum models stacks` | List configured stacks |
 | `orichum models resolve [STACK]` | Resolve effective stack routes |
@@ -23,6 +24,7 @@ current machine.
 | `orichum stack list` | List stacks |
 | `orichum stack show STACK` | Inspect roles, providers, and account policy |
 | `orichum provider login TYPE` | Authenticate a provider through CLIProxyAPI |
+| `orichum provider list` | List configured provider adapters and model families |
 | `orichum provider accounts` | List named accounts |
 | `orichum provider account ...` | Add, rename, reprioritize, enable, disable, sync, or remove |
 | `orichum plugin ...` | List, add, sync, update, or remove optional plugins |
@@ -32,7 +34,7 @@ current machine.
 | `orichum graph identity PATH --clear` | Clear the explicit identity and return to remote-derived identity |
 | `orichum doctor` | Validate the complete local installation |
 | `orichum sessions` | List logical sessions |
-| `orichum session routes ID` | Inspect a session's frozen routes |
+| `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
 | `orichum resume ID` | Resume the same logical session |
 | `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |
 

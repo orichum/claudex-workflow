@@ -582,7 +582,7 @@ if operation == "hook":
         self.assertEqual(len(result.repositories), 2)
         self.assertEqual({row.action for row in result.repositories}, {"created"})
         self.assertEqual(
-            {row.hook_status for row in result.repositories}, {"not managed"}
+            {row.hook_status for row in result.repositories}, {"installed"}
         )
         self.assertFalse((api / "graphify-out").exists())
         self.assertFalse((web / "graphify-out").exists())
@@ -592,6 +592,20 @@ if operation == "hook":
         )
         self.assertEqual(result.palace, self.palace)
         self.assertEqual(result.wing, "acme")
+
+    def test_population_reports_installed_orichum_graph_hooks(self):
+        repository = self.root / "api"
+        self.init_git(repository)
+
+        with mock.patch.object(
+            context_population,
+            "graph_hook_status",
+            return_value="installed",
+            create=True,
+        ):
+            result = self.populate()
+
+        self.assertEqual(result.repositories[0].hook_status, "installed")
 
     def test_population_skips_linked_worktree_for_memory_and_graphify(self):
         primary = self.root / "service"
@@ -795,7 +809,7 @@ if operation == "hook":
             )
             result = context_population.populate_context(self.root, self.palace, "acme")
 
-        self.assertEqual(result.repositories[0].hook_status, "not managed")
+        self.assertEqual(result.repositories[0].hook_status, "installed")
         hook_calls = [
             call for call in self.read_calls()
             if call["tool"] == "graphify" and call["args"][0] == "hook"
@@ -839,7 +853,7 @@ if operation == "hook":
 
         result = self.populate()
 
-        self.assertEqual(result.repositories[0].hook_status, "not managed")
+        self.assertEqual(result.repositories[0].hook_status, "installed")
         self.assertFalse(any(
             call["tool"] == "graphify" and call["args"][0] == "hook"
             for call in self.read_calls()

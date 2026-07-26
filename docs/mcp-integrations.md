@@ -34,17 +34,20 @@ with strict MCP configuration.
 
 LeanCTX receives a project jail at the active Git root and a private
 `run_dir/leanctx` directory containing its deterministic mode-`0600` config and
-session-local data. Orichum exposes a fixed surface for reads, deltas, search,
-globbing, trees, outlines, bounded exploration, lossless expansion, text
-patches, and compressed shell output. The universal `ctx_call`
+session-local data. Orichum exposes a fixed surface for compact reads, source
+search, trees, lossless expansion, text patches, and compressed shell output.
+The universal `ctx_call`
 gateway is disabled, so hidden LeanCTX tools cannot be reached indirectly.
-Claude Code preapproves the eight read-only context tools. `ctx_patch` and
+Claude Code preapproves the four read-only context tools. `ctx_patch` and
 `ctx_shell` keep normal Claude Code approval because they change text or
-execute commands; other MCP permissions are unchanged. Orichum does not invoke
-LeanCTX setup commands or enable its hooks, daemon, proxy, graph, memory,
-providers, or autonomy. If the managed binary is missing, unsafe, or the launch
-is outside a Git repository, LeanCTX is omitted and native Claude Code tools
-remain available.
+execute commands. The exact read-only Graphify surface and wing-bound
+Mempalace reads are also preapproved; Graphify is an immutable session snapshot,
+and the Mempalace hook verifies the project binding before every call.
+Mempalace writes and MCP_DOCKER operations keep normal Claude Code approval.
+Orichum does not invoke LeanCTX setup commands or enable its hooks, daemon,
+proxy, graph, memory, providers, or autonomy. If the managed binary is missing,
+unsafe, or the launch is outside a Git repository, LeanCTX is omitted and
+native Claude Code tools remain available.
 
 Mempalace inputs are rewritten to the verified project wing. For Graphify, the
 matching graph in private central storage is a validated source, not the MCP's

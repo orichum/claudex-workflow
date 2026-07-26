@@ -24,6 +24,7 @@ WING_TOOLS = {
 
 GLOBAL_TOOLS = {
     "mempalace_get_taxonomy",
+    "mempalace_status",
 }
 
 

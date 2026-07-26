@@ -1232,6 +1232,39 @@ with counter.open("r+", encoding="ascii") as state:
                 self.assertEqual(inspect_graph(target).status, "current")
                 shutil.rmtree(target.output_dir)
 
+    def test_graph_validation_allows_empty_source_paths(self):
+        target = self.target()
+        target.output_dir.mkdir(parents=True, exist_ok=True)
+        target.output_dir.chmod(0o700)
+        target.graph_file.write_text(
+            json.dumps({
+                "built_at_commit": target.revision,
+                "nodes": [{
+                    "id": "imported-symbol",
+                    "source_file": "",
+                }],
+                "links": [{
+                    "source": "imported-symbol",
+                    "target": "imported-symbol",
+                    "source_file": "",
+                }],
+            }),
+            encoding="utf-8",
+        )
+        target.metadata_file.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "repository_identity": target.identity.key,
+                "revision": target.revision,
+                "state_id": target.state_id,
+                "kind": target.kind,
+                "built_at_commit": target.revision,
+            }),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(inspect_graph(target).status, "current")
+
     def test_graph_provenance_requires_matching_40_hex_commit(self):
         result = sync_graph(
             self.repository, self.data_root, graphify=self.graphify

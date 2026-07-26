@@ -1,28 +1,24 @@
 # LeanCTX
 
 LeanCTX is Orichum's live source-context layer. It gives the controller compact
-file reads, structural outlines, source discovery, project trees, bounded
-exploration, lossless expansion, approved text patches, and compressed shell
-output without replacing Claude Code's native tools.
+file reads, source search, project trees, lossless expansion, approved text
+patches, and compressed shell output without replacing Claude Code's native
+tools.
 
 ## What Orichum enables
 
 Each physical session gets one headless stdio MCP process with exactly:
 
 - `ctx_read`
-- `ctx_delta`
 - `ctx_search`
-- `ctx_glob`
 - `ctx_tree`
-- `ctx_outline`
-- `ctx_explore`
 - `ctx_expand`
 - `ctx_patch`
 - `ctx_shell`
 
 Orichum pins the process to the active Git repository and stores its config,
 cache, state, and data under that session's private run directory. Concurrent
-sessions therefore do not share LeanCTX state. Orichum preapproves the eight
+sessions therefore do not share LeanCTX state. Orichum preapproves the four
 read-only context tools. `ctx_patch` and `ctx_shell` stay under Claude Code's
 normal tool approval because they change text or execute commands. Index
 construction is capped at two threads per session to reduce contention when
@@ -63,6 +59,6 @@ orichum doctor
 ```
 
 The doctor checks Orichum's managed binary with a real MCP handshake and
-rejects any advertised tool outside the fixed ten-tool contract. It deliberately
+rejects any advertised tool outside the fixed six-tool contract. It deliberately
 does not run LeanCTX's global doctor because Orichum does not use LeanCTX's
 global integration mode.
