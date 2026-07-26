@@ -217,6 +217,15 @@ if select_service_port 'Route proxy' TEST_PORT "$occupied" false false \
 fi
 rg -Fq 'from TEST_PORT is unavailable' "$fixture/override.stderr"
 
+loopback_port_is_listening "$occupied"
+kill "$listener_pid"
+wait "$listener_pid" 2>/dev/null || true
+listener_pid=
+if loopback_port_is_listening "$occupied"; then
+  printf 'stopped listener was confused with residual socket state\n' >&2
+  exit 1
+fi
+
 rg -Fq 'snapshot_path "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'orichum_launcher_mutated=true' "$ROOT/install.sh"
 rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
@@ -424,6 +433,25 @@ if "claudex_proxy_health_is_ready_at" not in runtime_check:
     raise SystemExit("route proxy readiness does not verify health identity")
 if "pid_owns_loopback_listener" in runtime_check:
     raise SystemExit("route proxy readiness still depends on socket metadata")
+
+restart_start = source.index(
+    'if [[ "$claudex_proxy_restart_required" == true ]]'
+)
+restart_end = source.index(
+    "claudex_proxy_transaction_active=false", restart_start
+)
+restart = source[restart_start:restart_end]
+bootstrap = restart.index('launchctl bootstrap')
+if 'port_is_available "$ROUTE_PROXY_LISTEN_PORT"' in restart[:bootstrap]:
+    raise SystemExit(
+        "route proxy restart rejects a bindable socket in TIME_WAIT"
+    )
+if 'loopback_port_is_listening "$ROUTE_PROXY_LISTEN_PORT"' not in restart[:bootstrap]:
+    raise SystemExit(
+        "route proxy restart does not reject a competing listener"
+    )
+if restart.index("wait_for_claudex_proxy", bootstrap) <= bootstrap:
+    raise SystemExit("route proxy restart omits post-start ownership checks")
 PY
 
 printf 'PASS: Orichum installer rollback and port selection\n'

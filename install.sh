@@ -1796,14 +1796,14 @@ if [[ "$model_discovery_succeeded" == true || \
     fi
     activation_port_ready=false
     for _ in {1..150}; do
-      if port_is_available "$ROUTE_PROXY_LISTEN_PORT"; then
+      if ! loopback_port_is_listening "$ROUTE_PROXY_LISTEN_PORT"; then
         activation_port_ready=true
         break
       fi
       sleep 0.1
     done
     [[ "$activation_port_ready" == true ]] || workflow_die \
-      "Orichum route proxy activation port $ROUTE_PROXY_LISTEN_PORT is occupied; prior state will be restored"
+      "Orichum route proxy activation port $ROUTE_PROXY_LISTEN_PORT still has a listener; prior state will be restored"
     if [[ "$platform" == darwin ]]; then
       claudex_proxy_loaded_target_is_expected || workflow_die \
         "Orichum route proxy definition ownership drifted before start"

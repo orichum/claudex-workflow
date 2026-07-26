@@ -146,7 +146,17 @@ root = Path(os.environ["LEAN_CTX_PROJECT_ROOT"])
 data = Path(os.environ["LEAN_CTX_DATA_DIR"])
 if not root.is_dir() or not (data / "config.toml").is_file():
     raise SystemExit(4)
-tools = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand"]
+tools = [
+    "ctx_read",
+    "ctx_delta",
+    "ctx_search",
+    "ctx_glob",
+    "ctx_tree",
+    "ctx_outline",
+    "ctx_explore",
+    "ctx_expand",
+    "ctx_shell",
+]
 extra = os.environ.get("FAKE_LEANCTX_EXTRA")
 if extra:
     tools.append(extra)

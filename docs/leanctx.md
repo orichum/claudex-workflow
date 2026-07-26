@@ -1,36 +1,42 @@
 # LeanCTX
 
 LeanCTX is Orichum's live source-context layer. It gives the controller compact
-file reads, source search, project trees, and lossless expansion without
-replacing Claude Code's native tools.
+file reads, structural outlines, source discovery, project trees, bounded
+exploration, lossless expansion, and compressed shell output without replacing
+Claude Code's native tools.
 
 ## What Orichum enables
 
 Each physical session gets one headless stdio MCP process with exactly:
 
 - `ctx_read`
+- `ctx_delta`
 - `ctx_search`
+- `ctx_glob`
 - `ctx_tree`
+- `ctx_outline`
+- `ctx_explore`
 - `ctx_expand`
+- `ctx_shell`
 
 Orichum pins the process to the active Git repository and stores its config,
 cache, state, and data under that session's private run directory. Concurrent
-sessions therefore do not share LeanCTX state. Orichum preapproves only these
-four tools, so they work in interactive and non-interactive sessions without
-granting broader MCP access. Index construction is capped at two threads per
-session to reduce contention when several sessions index at once.
+sessions therefore do not share LeanCTX state. Orichum preapproves the eight
+read-only context tools. `ctx_shell` stays under Claude Code's normal tool
+approval because it executes commands. Index construction is capped at two
+threads per session to reduce contention when several sessions index at once.
 
 ## What Orichum does not enable
 
 Orichum does not use LeanCTX's setup or wrapping commands, global rules, shell
 hooks, daemon, request proxy, graph, memory, provider connectors, autonomous
-features, editing tools, shell tool, or universal `ctx_call` gateway.
+features, editing tools, or universal `ctx_call` gateway.
 
 Those responsibilities already belong elsewhere:
 
 | Need | Authority |
 |---|---|
-| Current source reads and search | LeanCTX |
+| Current source reads, search, exploration, and compressed observational shell output | LeanCTX |
 | Repository relationships and impact | Graphify |
 | Durable decisions and conventions | Mempalace |
 | Request-path compression | Headroom |
@@ -54,6 +60,6 @@ orichum doctor
 ```
 
 The doctor checks Orichum's managed binary with a real MCP handshake and
-rejects any advertised tool outside the four-tool contract. It deliberately
+rejects any advertised tool outside the fixed nine-tool contract. It deliberately
 does not run LeanCTX's global doctor because Orichum does not use LeanCTX's
 global integration mode.
