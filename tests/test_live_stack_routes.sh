@@ -56,9 +56,9 @@ except (
 ):
     print("SKIP: installed accounts, stack selection, or service state is unavailable")
     raise SystemExit(0)
-port = ports.get("cliproxyPort")
+port = ports.get("routeProxyPort")
 if type(port) is not int or not 1024 <= port <= 65535:
-    print("SKIP: CLIProxyAPI service port is unavailable")
+    print("SKIP: Orichum route proxy service port is unavailable")
     raise SystemExit(0)
 
 try:
@@ -76,7 +76,7 @@ except (
     urllib.error.URLError,
     json.JSONDecodeError,
 ):
-    print("SKIP: live CLIProxyAPI model catalogue is unavailable")
+    print("SKIP: live Orichum route proxy model catalogue is unavailable")
     raise SystemExit(0)
 
 candidates = (
@@ -161,7 +161,10 @@ send(
     },
     {},
 )
-print("PASS: one bounded Anthropic and one bounded Antigravity request")
+print(
+    "PASS: one bounded Anthropic and one bounded Antigravity request "
+    "through the Orichum route proxy"
+)
 PY
   exit
 fi

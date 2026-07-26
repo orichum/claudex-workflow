@@ -171,12 +171,20 @@ jobs:
           install -m 0600 "$RUNNER_TEMP/service-ports.legacy.json" \
             "$ORICHUM_DATA_HOME/service-ports.json"
           legacy_headroom_unit="$HOME/.config/systemd/user/claudex-headroom.service"
-          standalone_headroom="$RUNNER_TEMP/standalone-headroom.service"
+          standalone_root="$RUNNER_TEMP/standalone-headroom"
+          standalone_headroom="$HOME/.config/systemd/user/example-standalone-headroom.service"
           install -d -m 0700 \
-            "$ORICHUM_DATA_HOME/headroom/bin" "$(dirname "$legacy_headroom_unit")"
+            "$ORICHUM_DATA_HOME/headroom/bin" \
+            "$standalone_root/bin" "$standalone_root/config" \
+            "$standalone_root/state" "$(dirname "$legacy_headroom_unit")"
           printf '#!/usr/bin/env bash\nwhile :; do sleep 60; done\n' \
             >"$ORICHUM_DATA_HOME/headroom/bin/headroom"
           chmod 0755 "$ORICHUM_DATA_HOME/headroom/bin/headroom"
+          printf '#!/usr/bin/env bash\nwhile :; do sleep 60; done\n' \
+            >"$standalone_root/bin/headroom"
+          chmod 0755 "$standalone_root/bin/headroom"
+          printf 'foreign-config\n' >"$standalone_root/config/fixture"
+          printf 'foreign-state\n' >"$standalone_root/state/fixture"
           printf '%s\n' \
             '[Unit]' \
             'Description=Claudex Headroom proxy' \
@@ -187,11 +195,24 @@ jobs:
             '[Install]' \
             'WantedBy=default.target' \
             >"$legacy_headroom_unit"
-          cp "$legacy_headroom_unit" "$standalone_headroom"
+          printf '%s\n' \
+            '[Unit]' \
+            'Description=Foreign standalone Headroom fixture' \
+            '[Service]' \
+            "ExecStart=\"$standalone_root/bin/headroom\"" \
+            "Environment=\"HEADROOM_CONFIG_DIR=$standalone_root/config\"" \
+            "Environment=\"HEADROOM_WORKSPACE_DIR=$standalone_root/state\"" \
+            '[Install]' \
+            'WantedBy=default.target' \
+            >"$standalone_headroom"
           standalone_headroom_sha="$(sha256sum "$standalone_headroom")"
+          standalone_runtime_sha="$(sha256sum "$standalone_root/bin/headroom")"
+          standalone_state_sha="$(sha256sum "$standalone_root/state/fixture")"
           systemctl --user daemon-reload
           systemctl --user enable --now claudex-headroom.service
+          systemctl --user enable --now example-standalone-headroom.service
           test "$(systemctl --user is-active claudex-headroom.service)" = active
+          test "$(systemctl --user is-active example-standalone-headroom.service)" = active
           ./install.sh
           jq -e '
             keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
@@ -212,6 +233,12 @@ jobs:
           done
           test ! -e "$ORICHUM_DATA_HOME/headroom"
           test "$(sha256sum "$standalone_headroom")" = "$standalone_headroom_sha"
+          test "$(sha256sum "$standalone_root/bin/headroom")" = \
+            "$standalone_runtime_sha"
+          test "$(sha256sum "$standalone_root/state/fixture")" = \
+            "$standalone_state_sha"
+          test "$(systemctl --user is-enabled example-standalone-headroom.service)" = enabled
+          test "$(systemctl --user is-active example-standalone-headroom.service)" = active
           systemctl --user show orichum-route-proxy.service \
             --property=ExecStart --value |
             rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-route-proxy"
