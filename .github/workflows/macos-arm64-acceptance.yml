@@ -103,40 +103,29 @@ jobs:
           assert sys.version_info[:2] == (3, 14)
           '
           jq -e '
-            keys == [
-              "claudexProxyPort",
-              "cliproxyPort",
-              "headroomPort",
-              "routeProxyPort"
-            ] and
-            ([.[]] | unique | length) == 4
+            keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
+            ([.[]] | unique | length) == 3
           ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.cliproxy" >/dev/null
-          headroom_service="$(
-            launchctl print "gui/$(id -u)/io.orichum.headroom"
-          )"
-          rg -Fq -- '--disable-kompress' <<<"$headroom_service"
           if launchctl print "gui/$(id -u)/io.orichum.route-proxy" \
               >/dev/null 2>&1; then
             printf 'route proxy unexpectedly active without providers\n' >&2
             exit 1
           fi
+          for label in \
+              io.orichum.headroom \
+              com.user.claudex-headroom \
+              com.user.headroom-proxy; do
+            if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+              printf 'Headroom label unexpectedly active: %s\n' "$label" >&2
+              exit 1
+            fi
+            test ! -e "$HOME/Library/LaunchAgents/$label.plist"
+          done
+          test ! -e "$ORICHUM_DATA_HOME/headroom"
           cliproxy_port="$(jq -r .cliproxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
-          headroom_port="$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")"
           curl -fsS "http://127.0.0.1:$cliproxy_port/v1/models" |
             jq -e '.data | type == "array"' >/dev/null
-          headroom_health="$RUNNER_TEMP/headroom-provider-pending.json"
-          headroom_status="$(
-            curl -sS --output "$headroom_health" \
-              --write-out '%{http_code}' \
-              "http://127.0.0.1:$headroom_port/health"
-          )"
-          test "$headroom_status" = 200
-          jq -e '
-            .service == "headroom-proxy" and
-            .status == "unhealthy" and
-            .ready == false
-          ' "$headroom_health" >/dev/null
           trap - ERR
           set +e
           poison_bin="$RUNNER_TEMP/poison-python"
@@ -193,19 +182,82 @@ jobs:
           orichum provider account add \
             "macOS ARM64 Claude" anthropic claude-macos-arm64.json shared \
             --priority primary
+          jq '. + {"headroomPort": 18787}' \
+            "$ORICHUM_DATA_HOME/service-ports.json" \
+            >"$RUNNER_TEMP/service-ports.legacy.json"
+          install -m 0600 "$RUNNER_TEMP/service-ports.legacy.json" \
+            "$ORICHUM_DATA_HOME/service-ports.json"
+          legacy_headroom_plist="$HOME/Library/LaunchAgents/com.user.claudex-headroom.plist"
+          standalone_headroom="$RUNNER_TEMP/standalone-headroom.plist"
+          install -d -m 0700 \
+            "$ORICHUM_DATA_HOME/headroom/bin" "$(dirname "$legacy_headroom_plist")"
+          printf '#!/usr/bin/env bash\nwhile :; do sleep 60; done\n' \
+            >"$ORICHUM_DATA_HOME/headroom/bin/headroom"
+          chmod 0755 "$ORICHUM_DATA_HOME/headroom/bin/headroom"
+          python3 - "$legacy_headroom_plist" "$ORICHUM_DATA_HOME" <<'PY'
+          import plistlib
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1])
+          data_root = sys.argv[2]
+          output.write_bytes(
+              plistlib.dumps(
+                  {
+                      "Label": "com.user.claudex-headroom",
+                      "ProgramArguments": [
+                          f"{data_root}/headroom/bin/headroom",
+                          "proxy",
+                          "--host",
+                          "127.0.0.1",
+                          "--port",
+                          "18787",
+                          "--anthropic-api-url",
+                          "http://127.0.0.1:13457",
+                          "--mode",
+                          "token",
+                          "--no-cache",
+                          "--intercept-tool-results",
+                          "--lossless",
+                          "--code-aware",
+                          "--disable-kompress",
+                      ],
+                      "EnvironmentVariables": {
+                          "HEADROOM_CONFIG_DIR": f"{data_root}/headroom/config",
+                          "HEADROOM_WORKSPACE_DIR": f"{data_root}/headroom/state",
+                      },
+                      "KeepAlive": True,
+                      "RunAtLoad": True,
+                  }
+              )
+          )
+          PY
+          chmod 0644 "$legacy_headroom_plist"
+          cp "$legacy_headroom_plist" "$standalone_headroom"
+          standalone_headroom_sha="$(shasum -a 256 "$standalone_headroom")"
+          launchctl bootstrap "gui/$(id -u)" "$legacy_headroom_plist"
+          launchctl print \
+            "gui/$(id -u)/com.user.claudex-headroom" >/dev/null
           ./install.sh
           jq -e '
-            keys == [
-              "claudexProxyPort",
-              "cliproxyPort",
-              "headroomPort",
-              "routeProxyPort"
-            ] and
-            ([.[]] | unique | length) == 4
+            keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
+            ([.[]] | unique | length) == 3
           ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.cliproxy" >/dev/null
-          launchctl print "gui/$(id -u)/io.orichum.headroom" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.route-proxy" >/dev/null
+          for label in \
+              io.orichum.headroom \
+              com.user.claudex-headroom \
+              com.user.headroom-proxy; do
+            if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+              printf 'Headroom label unexpectedly active: %s\n' "$label" >&2
+              exit 1
+            fi
+            test ! -e "$HOME/Library/LaunchAgents/$label.plist"
+          done
+          test ! -e "$ORICHUM_DATA_HOME/headroom"
+          test "$(shasum -a 256 "$standalone_headroom")" = \
+            "$standalone_headroom_sha"
           launchctl print "gui/$(id -u)/io.orichum.route-proxy" |
             rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-route-proxy"
           route_port="$(jq -r .routeProxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
@@ -220,14 +272,6 @@ jobs:
               ($ids | index("gpt-5.6-terra")) != null and
               ($ids | index("claude-sonnet-5")) != null and
               ($ids | index("claude-opus-4-8")) != null
-            ' >/dev/null
-          headroom_port="$(jq -r .headroomPort "$ORICHUM_DATA_HOME/service-ports.json")"
-          curl -fsS "http://127.0.0.1:$headroom_port/health" |
-            jq -e '
-              .service == "headroom-proxy" and
-              .status == "healthy" and
-              .ready == true and
-              .checks.kompress.enabled == false
             ' >/dev/null
           orichum doctor
 
@@ -538,8 +582,27 @@ jobs:
           )"
           grep -Fq 'Python action:  reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
-          grep -Fq 'Headroom:    reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          grep -Fq \
+            "  Claudex runtime:   $ORICHUM_DATA_HOME/bin/claudex" \
+            "$RUNNER_TEMP/orichum-upgrade.log"
+          grep -Fq \
+            "  CLIProxyAPI:       $ORICHUM_DATA_HOME/bin/cli-proxy-api" \
+            "$RUNNER_TEMP/orichum-upgrade.log"
+          grep -Fq \
+            "  LeanCTX:           $ORICHUM_DATA_HOME/bin/lean-ctx" \
+            "$RUNNER_TEMP/orichum-upgrade.log"
+          for label in \
+              io.orichum.headroom \
+              com.user.claudex-headroom \
+              com.user.headroom-proxy; do
+            if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+              printf 'Headroom label unexpectedly active: %s\n' "$label" >&2
+              exit 1
+            fi
+            test ! -e "$HOME/Library/LaunchAgents/$label.plist"
+          done
+          test ! -e "$ORICHUM_DATA_HOME/headroom"
           graph_project="$RUNNER_TEMP/graph-acceptance"
           orichum graph "$graph_project"
           test ! -e "$graph_project/graphify-out"
@@ -557,7 +620,6 @@ jobs:
           set +e
           for label in \
               io.orichum.cliproxy \
-              io.orichum.headroom \
               io.orichum.route-proxy; do
             launchctl print "gui/$(id -u)/$label"
           done
@@ -571,12 +633,10 @@ jobs:
             jq '{
               preferredClaudexProxyPort: .claudexProxyPort,
               cliproxyPort,
-              headroomPort,
               routeProxyPort
             }' "$ports_file"
             for field_and_path in \
                 'cliproxyPort /v1/models' \
-                'headroomPort /health' \
                 'routeProxyPort /v1/models'; do
               read -r field endpoint <<<"$field_and_path"
               port="$(jq -r --arg field "$field" '.[$field]' "$ports_file")"

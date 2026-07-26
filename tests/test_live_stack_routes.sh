@@ -183,8 +183,11 @@ project_root="$fixture/project"
 nested_project="$project_root/nested/repository"
 palace="$fixture/palace"
 install -d -m 0700 \
-  "$config_root" "$data_root" "$data_root/auth" "$data_root/state" \
+  "$config_root" "$data_root" "$data_root/auth" "$data_root/bin" \
+  "$data_root/state" \
   "$nested_project" "$palace"
+install -m 0755 /usr/bin/true "$data_root/bin/lean-ctx"
+git -C "$project_root" init -q
 for control_file in \
     model-stacks.json providers.json plugins.json runtime.json \
     controller-policy.md; do
@@ -510,6 +513,14 @@ def rendered(binding):
 
 def record_launch(prepared, *_args, **_kwargs):
     logical = prepared.logical
+    mcp = json.loads(prepared.physical.mcp_file.read_text(encoding="utf-8"))
+    servers = mcp.get("mcpServers")
+    if not isinstance(servers, dict) or "leanctx" not in servers:
+        raise SystemExit("session did not materialize the private LeanCTX MCP")
+    if "headroom" in json.dumps(mcp).lower():
+        raise SystemExit("session MCP configuration unexpectedly references Headroom")
+    if (prepared.physical.run_dir / "headroom").exists():
+        raise SystemExit("session unexpectedly materialized a Headroom runtime")
     output.write_text(
         json.dumps(
             {
