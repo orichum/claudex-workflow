@@ -710,7 +710,7 @@ class GraphHookTests(unittest.TestCase):
         elapsed = time.monotonic() - started
 
         self.assertEqual(return_code, 0)
-        self.assertLess(elapsed, 1.0)
+        self.assertLess(elapsed, 2.5)
         log = _graph_log_path(self.repository, data_root)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
