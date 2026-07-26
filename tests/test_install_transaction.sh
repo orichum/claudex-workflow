@@ -191,9 +191,15 @@ fi
 [[ "$(readlink "$stale_bin/graphify-mcp")" == \
    "$stale_legacy_tools/graphifyy/bin/graphify-mcp" ]]
 
-for endpoint_case in legacy-three legacy-four; do
-  endpoint_data="$fixture/$endpoint_case-data"
-  endpoint_snapshot="$fixture/$endpoint_case-snapshot"
+endpoint_normalization_failed=false
+for endpoint_fixture in \
+    production-three-file:legacy-three \
+    production-three-file:legacy-four \
+    legacy-two-file:legacy-three \
+    legacy-two-file:legacy-four; do
+  IFS=: read -r generation_case endpoint_case <<<"$endpoint_fixture"
+  endpoint_data="$fixture/$generation_case-$endpoint_case-data"
+  endpoint_snapshot="$fixture/$generation_case-$endpoint_case-snapshot"
   endpoint_generation="$endpoint_data/model-config/generation.legacy"
   endpoint_generation_snapshot="$endpoint_snapshot/prior-model-generation"
   install -d -m 0700 \
@@ -212,28 +218,94 @@ for endpoint_case in legacy-three legacy-four; do
   esac
   cat >"$endpoint_generation/models.json" <<'JSON'
 {
-  "controller": "gpt-5.6-sol",
+  "object": "list",
+  "data": [
+    {"id": "oc-r-0000000000000001/gpt-5.6-sol", "object": "model"},
+    {"id": "oc-r-0000000000000001/gpt-5.6-terra", "object": "model"},
+    {"id": "oc-r-0000000000000002/claude-sonnet-5", "object": "model"},
+    {"id": "oc-r-0000000000000002/claude-opus-4-8", "object": "model"}
+  ]
+}
+JSON
+  if [[ "$generation_case" == production-three-file ]]; then
+    cat >"$endpoint_generation/effective-models.json" <<'JSON'
+{
+  "schemaVersion": 1,
+  "stack": "balanced",
+  "controller": "oc-r-0000000000000001/gpt-5.6-sol",
   "agents": {
-    "repository-explorer": "gpt-5.6-terra",
-    "repository-verifier": "claude-sonnet-5",
-    "correctness-critic": "claude-sonnet-5",
-    "architecture-advisor": "claude-opus-4-8"
+    "repository-explorer": "oc-r-0000000000000001/gpt-5.6-terra",
+    "repository-verifier": "oc-r-0000000000000001/gpt-5.6-terra",
+    "correctness-critic": "oc-r-0000000000000002/claude-sonnet-5",
+    "architecture-advisor": "oc-r-0000000000000002/claude-opus-4-8",
+    "implementation-worker": "oc-r-0000000000000001/gpt-5.6-sol"
   }
 }
 JSON
+    expected_default_model=oc-r-0000000000000001/gpt-5.6-sol
+    expected_fast_alias=oc-r-0000000000000001/gpt-5.6-terra
+    expected_balanced_alias=oc-r-0000000000000001/gpt-5.6-terra
+    expected_powerful_alias=oc-r-0000000000000001/gpt-5.6-sol
+  else
+    expected_default_model=legacy-controller-model
+    expected_fast_alias=legacy-fast-alias
+    expected_balanced_alias=legacy-balanced-alias
+    expected_powerful_alias=legacy-powerful-alias
+  fi
   cat >"$endpoint_generation/claudex.toml" <<'TOML'
+claude_binary = "/usr/bin/true"
 proxy_port = 13456
-default_model = "gpt-5.6-sol"
+proxy_host = "127.0.0.1"
+log_level = "info"
+hyperlinks = "auto"
+
+[model_aliases]
+fast = "legacy-fast-alias"
+balanced = "legacy-balanced-alias"
+powerful = "legacy-powerful-alias"
+
+[[profiles]]
+name = "gpt"
+provider_type = "DirectAnthropic"
 base_url = "http://127.0.0.1:8787"
+api_key = "claudex-passthrough"
+default_model = "legacy-controller-model"
+enabled = true
+priority = 100
+
+[profiles.models]
+haiku = "legacy-fast-model"
+sonnet = "legacy-sonnet-model"
+opus = "legacy-opus-model"
+
+[profiles.custom_headers]
 X-Headroom-Base-Url = "http://127.0.0.1:13457"
+X-Orichum-Session-ID = "unbound"
+
+[router]
+enabled = false
+
+[context.compression]
+enabled = false
+
+[context.sharing]
+enabled = false
+
+[context.rag]
+enabled = false
 TOML
   ln -s generation.legacy "$endpoint_data/model-config/current"
   snapshot_path \
     "$endpoint_data/service-ports.json" "$endpoint_snapshot" service-ports
   cp -pPR "$endpoint_generation" "$endpoint_generation_snapshot"
-  normalize_headroom_free_endpoint_snapshot \
-    "$endpoint_snapshot/service-ports.data" \
-    "$endpoint_generation_snapshot" 8317 13456 13457
+  if ! normalize_headroom_free_endpoint_snapshot \
+      "$endpoint_snapshot/service-ports.data" \
+      "$endpoint_generation_snapshot" 8317 13456 13457; then
+    printf '%s %s rollback snapshot could not be normalized\n' \
+      "$generation_case" "$endpoint_case" >&2
+    endpoint_normalization_failed=true
+    continue
+  fi
 
   inject_failure_after_endpoint_cleanup() {
     rm -rf -- "$endpoint_data/headroom" "$endpoint_generation"
@@ -241,8 +313,8 @@ TOML
     return 74
   }
   if inject_failure_after_endpoint_cleanup; then
-    printf '%s endpoint failure injection unexpectedly succeeded\n' \
-      "$endpoint_case" >&2
+    printf '%s %s endpoint failure injection unexpectedly succeeded\n' \
+      "$generation_case" "$endpoint_case" >&2
     exit 1
   fi
   restore_snapshot \
@@ -258,14 +330,18 @@ TOML
   restored_claudex="$endpoint_data/model-config/current/claudex.toml"
   rg -Fxq 'base_url = "http://127.0.0.1:13457"' "$restored_claudex"
   if rg -qi 'headroom|X-Headroom-Base-Url' "$restored_claudex"; then
-    printf '%s rollback restored a Headroom endpoint\n' \
-      "$endpoint_case" >&2
+    printf '%s %s rollback restored a Headroom endpoint\n' \
+      "$generation_case" "$endpoint_case" >&2
     exit 1
   fi
   [[ "$(claudex_config_default_model "$restored_claudex")" == \
-     gpt-5.6-sol ]]
+     "$expected_default_model" ]]
+  rg -Fxq "fast = \"$expected_fast_alias\"" "$restored_claudex"
+  rg -Fxq "balanced = \"$expected_balanced_alias\"" "$restored_claudex"
+  rg -Fxq "powerful = \"$expected_powerful_alias\"" "$restored_claudex"
   [[ ! -e "$endpoint_data/headroom" && ! -L "$endpoint_data/headroom" ]]
 done
+[[ "$endpoint_normalization_failed" == false ]]
 
 external_graph_root="$fixture/external-graph-root"
 unsafe_graph_data="$fixture/unsafe-graph-data"

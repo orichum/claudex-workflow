@@ -3345,6 +3345,85 @@ render_discovered_claudex_config() {
     "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port"
 }
 
+normalize_legacy_claudex_template() {
+  local input_file="$1"
+  local output_file="$2"
+  local route_proxy_port="$3"
+  valid_service_port "$route_proxy_port" || return 1
+  [[ -f "$input_file" && ! -L "$input_file" ]] || return 1
+  workflow_python - "$input_file" "$output_file" "$route_proxy_port" <<'PY'
+import copy
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+route_url = f"http://127.0.0.1:{int(sys.argv[3])}"
+text = source.read_text(encoding="utf-8")
+document = tomllib.loads(text)
+
+aliases = document.get("model_aliases")
+profiles = document.get("profiles")
+if (
+    not isinstance(aliases, dict)
+    or any(
+        not isinstance(aliases.get(name), str) or not aliases[name]
+        for name in ("fast", "balanced", "powerful")
+    )
+    or not isinstance(profiles, list)
+    or len(profiles) != 1
+):
+    raise SystemExit(1)
+profile = profiles[0]
+headers = profile.get("custom_headers")
+legacy_header = "X-Headroom-Base-Url"
+loopback_url = re.compile(r"http://127[.]0[.]0[.]1:([0-9]+)")
+base_url = profile.get("base_url")
+header_url = headers.get(legacy_header) if isinstance(headers, dict) else None
+if (
+    profile.get("name") != "gpt"
+    or profile.get("provider_type") != "DirectAnthropic"
+    or not isinstance(base_url, str)
+    or not isinstance(header_url, str)
+    or header_url != route_url
+):
+    raise SystemExit(1)
+base_match = loopback_url.fullmatch(base_url)
+if base_match is None or not 1 <= int(base_match.group(1)) <= 65535:
+    raise SystemExit(1)
+
+base_pattern = re.compile(
+    r'(?m)^(?P<prefix>[ \t]*base_url[ \t]*=[ \t]*)'
+    r'"http://127[.]0[.]0[.]1:[0-9]+"'
+    r'(?P<suffix>[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$))'
+)
+header_pattern = re.compile(
+    r'(?m)^[ \t]*X-Headroom-Base-Url[ \t]*=[ \t]*'
+    r'"http://127[.]0[.]0[.]1:[0-9]+"'
+    r'[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)'
+)
+normalized, base_count = base_pattern.subn(
+    lambda match: (
+        f'{match.group("prefix")}"{route_url}"{match.group("suffix")}'
+    ),
+    text,
+)
+normalized, header_count = header_pattern.subn("", normalized)
+if base_count != 1 or header_count != 1 or "headroom" in normalized.lower():
+    raise SystemExit(1)
+
+expected = copy.deepcopy(document)
+expected_profile = expected["profiles"][0]
+expected_profile["base_url"] = route_url
+del expected_profile["custom_headers"][legacy_header]
+if tomllib.loads(normalized) != expected:
+    raise SystemExit(1)
+destination.write_text(normalized, encoding="utf-8")
+PY
+}
+
 normalize_headroom_free_endpoint_snapshot() {
   local ports_snapshot="$1"
   local model_snapshot="$2"
@@ -3391,10 +3470,25 @@ normalize_headroom_free_endpoint_snapshot() {
         rm -f -- "$ports_temporary"
         return 1
       }
-    if ! render_discovered_claudex_config \
-        "$model_snapshot/models.json" "$config_temporary" \
-        "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port" || \
-       ! chmod 0600 "$config_temporary"; then
+    if [[ -e "$model_snapshot/effective-models.json" || \
+          -L "$model_snapshot/effective-models.json" ]]; then
+      [[ -f "$model_snapshot/effective-models.json" && \
+         ! -L "$model_snapshot/effective-models.json" ]] && \
+        render_discovered_claudex_config \
+          "$model_snapshot/effective-models.json" "$config_temporary" \
+          "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port" || {
+            rm -f -- "$ports_temporary" "$config_temporary"
+            return 1
+          }
+    else
+      normalize_legacy_claudex_template \
+        "$model_snapshot/claudex.toml" "$config_temporary" \
+        "$route_proxy_port" || {
+          rm -f -- "$ports_temporary" "$config_temporary"
+          return 1
+        }
+    fi
+    if ! chmod 0600 "$config_temporary"; then
       rm -f -- "$ports_temporary" "$config_temporary"
       return 1
     fi
