@@ -110,6 +110,10 @@ class GraphManagerTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+        self._git(
+            destination, "config", "user.email", "tests@example.invalid"
+        )
+        self._git(destination, "config", "user.name", "Graph tests")
 
     def test_ssh_and_https_remotes_share_identity(self) -> None:
         self.assertEqual(
@@ -883,6 +887,24 @@ with counter.open("r+", encoding="ascii") as state:
         second_clone = self.root / "second-clone"
         subprocess.run(
             ["git", "clone", "-q", str(self.repository), str(second_clone)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(second_clone),
+                "config", "user.email", "tests@example.invalid",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(second_clone),
+                "config", "user.name", "Graph tests",
+            ],
             check=True,
             capture_output=True,
             text=True,
