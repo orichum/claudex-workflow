@@ -25,7 +25,7 @@ class MemoryHookTests(unittest.TestCase):
         self.project = self.fixture / "xebia" / "repo"
         self.palace = self.fixture / "palaces" / "xebia"
         for directory, mode in (
-            (self.workflow / "runtime", 0o755),
+            (self.workflow / "runtime", 0o700),
             (self.project, 0o755),
             (self.palace, 0o700),
         ):
@@ -58,14 +58,18 @@ class MemoryHookTests(unittest.TestCase):
     def invoke(self, payload, *, digest=None):
         environment = os.environ.copy()
         environment.update({
-            "CLAUDEX_WORKFLOW_ROOT": str(self.workflow),
+            "CLAUDEX_WORKFLOW_ROOT": str(REPOSITORY_ROOT),
+            "CLAUDEX_DATA_DIR": str(self.workflow / "runtime"),
             "CLAUDEX_RUN_DIR": str(self.session.run_dir),
             "CLAUDEX_RUN_ID": self.session.run_id,
             "CLAUDEX_CONTEXT_FILE": str(self.session.context_file),
             "CLAUDEX_CONTEXT_SHA256": digest or self.session.context_sha256,
         })
         return subprocess.run(
-            [sys.executable, str(REPOSITORY_ROOT / "controller/plugin/scripts/route-mempalace-input.py")],
+            [
+                sys.executable,
+                str(self.session.plugin_dir / "scripts/route-mempalace-input.py"),
+            ],
             input=json.dumps(payload), text=True, capture_output=True,
             env=environment, cwd=REPOSITORY_ROOT, check=False,
         )

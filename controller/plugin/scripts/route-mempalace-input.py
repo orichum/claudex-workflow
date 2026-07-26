@@ -7,12 +7,6 @@ import os
 import sys
 from pathlib import Path
 
-WORKFLOW_SOURCE = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(WORKFLOW_SOURCE))
-
-from integrations.common.session_config import SessionError, verify_context_binding
-
-
 WING_TOOLS = {
     "mempalace_list_rooms",
     "mempalace_list_tunnels",
@@ -48,6 +42,16 @@ def deny() -> int:
 
 def main() -> int:
     try:
+        workflow_root = Path(os.environ["CLAUDEX_WORKFLOW_ROOT"])
+        sys.path.insert(0, str(workflow_root))
+        from integrations.common.session_config import (
+            SessionError,
+            verify_context_binding,
+        )
+    except (KeyError, ImportError, OSError, ValueError):
+        return deny()
+
+    try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             return deny()
@@ -56,7 +60,6 @@ def main() -> int:
         if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
             return deny()
 
-        workflow_root = Path(os.environ["CLAUDEX_WORKFLOW_ROOT"])
         run_dir = Path(os.environ["CLAUDEX_RUN_DIR"])
         run_id = os.environ["CLAUDEX_RUN_ID"]
         context_file = Path(os.environ["CLAUDEX_CONTEXT_FILE"])
