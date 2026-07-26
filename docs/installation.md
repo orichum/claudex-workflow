@@ -77,3 +77,37 @@ project's environment. Upgrade staging is transactional: an unsuccessful
 upgrade restores the prior managed binaries and service state. Orichum installs
 LeanCTX directly from its verified release asset; it never runs LeanCTX
 `wrap`, `setup`, `onboard`, `init`, or proxy commands.
+
+## Uninstall
+
+Run uninstall from the Orichum checkout:
+
+```bash
+./install.sh --uninstall
+```
+
+This stops and removes only verified Orichum-owned services, removes the
+`orichum` launcher, and deletes replaceable managed runtime files. It preserves:
+
+- provider credentials and named accounts;
+- model and project configuration;
+- Claude and Orichum session state;
+- central Graphify graphs;
+- Mempalace palaces.
+
+That preserved state is reused if you run `./install.sh` again.
+
+To also permanently delete Orichum's data and configuration roots:
+
+```bash
+./install.sh --uninstall --purge
+```
+
+Purge removes saved Orichum credentials, sessions, project configuration, and
+central Graphify data. It does not delete the repository checkout or external
+Mempalace palaces.
+
+Neither mode uninstalls standalone Claude Code, CLIProxyAPI, Claudex, LeanCTX,
+Mempalace, Graphify, uv, or Headroom installations. If a service definition or
+launcher with an Orichum name is not verifiably owned by this setup, uninstall
+stops before changing anything.

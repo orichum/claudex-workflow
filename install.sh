@@ -6,6 +6,34 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 
+case "$#" in
+  0) ;;
+  1)
+    [[ "$1" == --uninstall ]] || {
+      printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
+      exit 2
+    }
+    # shellcheck source=lib/uninstall.sh
+    source "$WORKFLOW_ROOT/lib/uninstall.sh"
+    orichum_uninstall false
+    exit
+    ;;
+  2)
+    [[ "$1" == --uninstall && "$2" == --purge ]] || {
+      printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
+      exit 2
+    }
+    # shellcheck source=lib/uninstall.sh
+    source "$WORKFLOW_ROOT/lib/uninstall.sh"
+    orichum_uninstall true
+    exit
+    ;;
+  *)
+    printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
+    exit 2
+    ;;
+esac
+
 # BEGIN installed control-plane transaction
 stage_installed_control_plane() {
   local python_runtime="$1"
@@ -1135,6 +1163,7 @@ fi
 install -d -m 0700 "$installer_temp/mempalace-probe"
 if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
   "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+  --timeout 30 \
   --require-tool mempalace_get_taxonomy \
   --require-tool mempalace_search \
   --require-tool mempalace_checkpoint \

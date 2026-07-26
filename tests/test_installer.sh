@@ -907,6 +907,22 @@ rg -Fq 'root.glob("*.py")' "$ROOT/install.sh"
 rg -Fq 'export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"' \
   "$ROOT/install.sh"
 
+python3 - "$ROOT/install.sh" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(
+    r'integrations/common/mcp_probe\.py"(?P<arguments>.*?)'
+    r'-- "\$mempalace_mcp"',
+    source,
+    flags=re.DOTALL,
+)
+if match is None or "--timeout 30" not in match.group("arguments"):
+    raise SystemExit("Mempalace MCP probe lacks its cold-start timeout")
+PY
+
 ports_root="$fixture/ports"
 write_service_ports "$ports_root" 18317 13456 13457
 [[ "$(read_service_ports "$ports_root")" == \
