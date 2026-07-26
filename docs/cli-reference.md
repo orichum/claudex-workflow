@@ -26,7 +26,6 @@ current machine.
 | `orichum provider accounts` | List named accounts |
 | `orichum provider account ...` | Add, rename, reprioritize, enable, disable, sync, or remove |
 | `orichum plugin ...` | List, add, sync, update, or remove optional plugins |
-| `orichum headroom status` | Inspect Headroom |
 | `orichum graph [PATH]` | Build or refresh central Graphify data for repositories below `PATH` (default: `.`) |
 | `orichum graph status [PATH]` | Read graph, working-tree, hook, output, and Graphify version status without changing state |
 | `orichum graph identity PATH --set ID` | Set an explicit repository identity such as `github.com/xebia/X-ACE-UI` |

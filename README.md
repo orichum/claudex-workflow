@@ -25,9 +25,9 @@ orichum
 - Selects the correct GitHub identity, MCP_DOCKER profile, Mempalace memory,
   and Graphify code graph from the project directory.
 - Keeps concurrent and resumed sessions isolated.
-- Automatically routes source and observational shell context through LeanCTX,
-  relationships through Graphify, durable decisions through Mempalace, and the
-  complete request through Headroom—without tool profiles or manual selection.
+- Routes source context through LeanCTX, repository relationships through
+  Graphify, and durable decisions through Mempalace—without tool profiles or
+  manual selection.
 
 You do not need to understand the routing architecture before using Orichum.
 Start with one provider and one project; add the other capabilities only when
@@ -203,8 +203,8 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
   answers structural repository questions. Both are used on demand. See
   [Memory and code graph](docs/memory-and-code-graph.md).
 - **Live source context:** LeanCTX gives the controller compact reads, search,
-  trees, and lossless expansion while preserving native-tool fallback. See
-  [LeanCTX](docs/leanctx.md).
+  trees, lossless expansion, and approved text patches while preserving
+  native-tool fallback. See [LeanCTX](docs/leanctx.md).
 - **Plugins:** declare and synchronize optional Claude Code plugins through
   Orichum. See [Plugins](docs/plugins.md).
 - **MCP_DOCKER:** attach a project-specific Docker MCP Toolkit profile for Jira
@@ -212,20 +212,16 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
 - **Specialist agents:** let the controller delegate bounded exploration,
   review, architecture, or implementation work while keeping one writer. See
   [Subagents](docs/subagents.md).
-- **Prompt optimization:** inspect the shared Headroom service and measured
-  savings. See [Headroom](docs/headroom.md).
 
 ## How a request flows
 
 ```mermaid
 flowchart LR
-    U["You"] --> O["Orichum"]
-    O --> C["Claude Code"]
-    C --> X["Claudex"]
-    X --> H["Headroom"]
-    H --> R["Orichum routing"]
-    R --> P["CLIProxyAPI"]
-    P --> M["Selected account and model"]
+    C["Claude Code"] --> X["Per-session Claudex translator"]
+    X --> R["Shared Orichum route proxy<br/>tool deferral + account failover"]
+    R --> P["Shared CLIProxyAPI"]
+    P --> A["Selected named account"]
+    A --> M["Provider model"]
 ```
 
 The directory where you run `orichum` selects the project context. Orichum
@@ -235,7 +231,8 @@ session-specific state remains private.
 
 Inside the session, current source context comes from LeanCTX, repository
 relationships come from Graphify, and durable project history comes from
-Mempalace. Headroom remains on the separate model-request path.
+Mempalace. The route proxy automatically retains the preferred LeanCTX tools
+and defers unrelated tool schemas when supported; you do not select a profile.
 
 Read [Architecture](docs/architecture.md) for service ownership, security
 boundaries, session isolation, and the complete request path.
@@ -279,7 +276,6 @@ delays, and installer port conflicts.
 | [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
 | [LeanCTX](docs/leanctx.md) | Compact current-source reads, isolation, fallbacks, and exact-read rules |
 | [Memory and code graph](docs/memory-and-code-graph.md) | Mempalace, Graphify, hooks, worktrees, and retrieval |
-| [Headroom](docs/headroom.md) | Compression behavior, service placement, and savings |
 | [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
 | [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
 | [Troubleshooting](docs/troubleshooting.md) | Symptoms, diagnostics, and recovery |
@@ -298,8 +294,6 @@ delays, and installer port conflicts.
   the selected model.
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — provides
   provider authentication and model access.
-- [Headroom](https://github.com/chopratejas/headroom) — applies lossless prompt
-  optimization.
 - [LeanCTX](https://github.com/yvgude/lean-ctx) — provides compact live file,
   tree, and search context.
 - [Mempalace](https://github.com/MemPalace/mempalace) — provides durable

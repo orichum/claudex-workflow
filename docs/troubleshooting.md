@@ -37,7 +37,6 @@ Linux and WSL logs:
 
 ```bash
 journalctl --user -u orichum-cliproxy.service
-journalctl --user -u orichum-headroom.service
 journalctl --user -u orichum-route-proxy.service
 ```
 
@@ -61,9 +60,14 @@ required Docker profile or palace and that `orichum doctor` finds the MCP
 binaries.
 
 LeanCTX is included only inside a Git repository. `orichum doctor` verifies the
-managed binary and confirms that it advertises exactly Orichum's nine allowed
+managed binary and confirms that it advertises exactly Orichum's ten allowed
 tools. If the check fails, rerun `./install.sh`; Orichum does not depend on a
 global LeanCTX setup or shell hook.
+
+## Legacy Headroom migration
+
+The installer removes only an Orichum-owned legacy Headroom service. A
+standalone Headroom installation is outside Orichum and remains untouched.
 
 For Graphify, inspect the exact repository state:
 
