@@ -105,6 +105,32 @@ class ToolDeferralTests(unittest.TestCase):
         ]
         self.assertEqual(resident[-1]["cache_control"], {"type": "ephemeral"})
 
+    def test_multiple_deferred_cache_controls_are_byte_preserving(self) -> None:
+        tools = [client_tool("Bash"), *client_tools(11)]
+        tools[1]["cache_control"] = {"type": "ephemeral"}
+        tools[2]["cache_control"] = {"type": "ephemeral"}
+        body = request("gpt-5.6-sol", tools)
+        result = transform_request(body)
+        self.assertFalse(result.transformed)
+        self.assertIs(result.body, body)
+
+    def test_marked_resident_cache_control_is_byte_preserving(self) -> None:
+        tools = [client_tool("Bash"), *client_tools(11)]
+        tools[0]["cache_control"] = {"type": "ephemeral"}
+        tools[-1]["cache_control"] = {"type": "ephemeral"}
+        body = request("gpt-5.6-sol", tools)
+        result = transform_request(body)
+        self.assertFalse(result.transformed)
+        self.assertIs(result.body, body)
+
+    def test_invalid_cache_control_is_byte_preserving(self) -> None:
+        tools = [client_tool("Bash"), *client_tools(11)]
+        tools[-1]["cache_control"] = None
+        body = request("gpt-5.6-sol", tools)
+        result = transform_request(body)
+        self.assertFalse(result.transformed)
+        self.assertIs(result.body, body)
+
     def test_transform_is_idempotent(self) -> None:
         first = transform_request(
             request(

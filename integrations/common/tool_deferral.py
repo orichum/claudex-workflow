@@ -61,7 +61,25 @@ def _eligible_client_tool(tool: object) -> bool:
     return not isinstance(tool.get("type"), str)
 
 
-def _preserve_cache_breakpoint(tools: list[object]) -> None:
+def _preserve_cache_breakpoint(tools: list[object]) -> bool:
+    if any(
+        isinstance(tool, dict)
+        and "cache_control" in tool
+        and not isinstance(tool["cache_control"], dict)
+        for tool in tools
+    ):
+        return False
+    sources = [
+        tool
+        for tool in tools
+        if isinstance(tool, dict)
+        and tool.get("defer_loading") is True
+        and "cache_control" in tool
+    ]
+    if not sources:
+        return True
+    if len(sources) != 1:
+        return False
     resident = next(
         (
             tool
@@ -71,13 +89,10 @@ def _preserve_cache_breakpoint(tools: list[object]) -> None:
         ),
         None,
     )
-    if resident is None:
-        return
-    for tool in tools:
-        if isinstance(tool, dict) and tool.get("defer_loading") is True:
-            cache_control = tool.pop("cache_control", None)
-            if cache_control is not None:
-                resident["cache_control"] = cache_control
+    if resident is None or "cache_control" in resident:
+        return False
+    resident["cache_control"] = sources[0].pop("cache_control")
+    return True
 
 
 def transform_request(body: bytes) -> TransformResult:
@@ -111,7 +126,8 @@ def transform_request(body: bytes) -> TransformResult:
         for tool in transformed
     ):
         return TransformResult(body, False)
-    _preserve_cache_breakpoint(transformed)
+    if not _preserve_cache_breakpoint(transformed):
+        return TransformResult(body, False)
     transformed.append({"type": TOOL_SEARCH_TYPE, "name": TOOL_SEARCH_NAME})
     document["tools"] = transformed
     return TransformResult(
