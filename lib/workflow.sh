@@ -3109,6 +3109,7 @@ PY
     --exact-tool ctx_outline \
     --exact-tool ctx_explore \
     --exact-tool ctx_expand \
+    --exact-tool ctx_patch \
     --exact-tool ctx_shell \
     -- env \
     LEAN_CTX_ALLOW_REROOT=false \

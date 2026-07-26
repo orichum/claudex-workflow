@@ -1000,6 +1000,10 @@ class OrichumCliTests(unittest.TestCase):
             )),
         )
         self.assertNotIn(
+            "mcp__leanctx__ctx_patch",
+            command[allowed_index + 1].split(","),
+        )
+        self.assertNotIn(
             "mcp__leanctx__ctx_shell",
             command[allowed_index + 1].split(","),
         )

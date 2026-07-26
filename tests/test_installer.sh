@@ -155,11 +155,15 @@ tools = [
     "ctx_outline",
     "ctx_explore",
     "ctx_expand",
+    "ctx_patch",
     "ctx_shell",
 ]
 extra = os.environ.get("FAKE_LEANCTX_EXTRA")
 if extra:
     tools.append(extra)
+omitted = os.environ.get("FAKE_LEANCTX_OMIT")
+if omitted:
+    tools.remove(omitted)
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -196,6 +200,14 @@ if FAKE_LEANCTX_EXTRA=ctx_call probe_leanctx_capabilities \
 fi
 rg -Fq 'unexpected MCP tool is available: ctx_call' \
   "$fixture/leanctx-extra.stderr"
+if FAKE_LEANCTX_OMIT=ctx_patch probe_leanctx_capabilities \
+    "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    >"$fixture/leanctx-missing.stdout" 2>"$fixture/leanctx-missing.stderr"; then
+  printf 'LeanCTX capability probe accepted missing ctx_patch\n' >&2
+  exit 1
+fi
+rg -Fq 'required MCP tool is unavailable: ctx_patch' \
+  "$fixture/leanctx-missing.stderr"
 
 graph_data="$fixture/graph-data"
 install -d -m 0700 "$graph_data"
