@@ -431,7 +431,7 @@ jobs:
           if not same_file(opened, final) or not same_file(final, after):
               fail("LeanCTX session config changed during read")
           sys.path.insert(0, os.environ["CLAUDEX_WORKFLOW_ROOT"])
-          from integrations.common.leanctx_contract import config_bytes
+          from integrations.common.leanctx_contract import TOOLS, config_bytes
           if not hmac.compare_digest(observed_config, config_bytes()):
               fail("LeanCTX session config does not match its contract")
           probe = [
@@ -442,7 +442,7 @@ jobs:
                   / "integrations/common/mcp_probe.py"
               ),
           ]
-          for tool in ("ctx_read", "ctx_search", "ctx_tree", "ctx_expand"):
+          for tool in TOOLS:
               probe.extend(["--exact-tool", tool])
           probe.extend(["--", leanctx_command])
           probe_environment = os.environ.copy()
