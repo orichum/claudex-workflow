@@ -778,6 +778,59 @@ class SessionConfigTests(unittest.TestCase):
                 )
             )
 
+    def test_verify_streams_large_graph_snapshot_in_bounded_chunks(self) -> None:
+        repository = self.init_repository()
+        self.create_central_graph(
+            repository,
+            graph_document={
+                "nodes": [
+                    {
+                        "id": "large",
+                        "source_file": "tracked.txt",
+                        "payload": "x" * (4 * 1024 * 1024),
+                    }
+                ]
+            },
+        )
+        session = self.create()
+        real_read_owned_file = session_config._read_owned_file
+        real_os_read = session_config.os.read
+        read_sizes: list[int] = []
+
+        def reject_graph_accumulation(parent, file_name, expected_mode=0o600):
+            if file_name == "graph.json":
+                raise AssertionError("graph snapshot must be streamed")
+            return real_read_owned_file(parent, file_name, expected_mode)
+
+        def guard_read_size(descriptor, size):
+            read_sizes.append(size)
+            if size > 64 * 1024:
+                raise AssertionError("graph snapshot read is unbounded")
+            return real_os_read(descriptor, size)
+
+        with (
+            mock.patch.object(
+                session_config,
+                "_read_owned_file",
+                side_effect=reject_graph_accumulation,
+            ),
+            mock.patch.object(
+                session_config.os,
+                "read",
+                side_effect=guard_read_size,
+            ),
+        ):
+            verified = verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+        self.assertEqual(verified, session)
+        self.assertTrue(read_sizes)
+        self.assertLessEqual(max(read_sizes), 64 * 1024)
+
     def test_verify_rejects_symlinked_graph_snapshot(self) -> None:
         repository = self.init_repository()
         graph = self.create_central_graph(repository)

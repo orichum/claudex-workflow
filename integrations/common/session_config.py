@@ -421,8 +421,7 @@ def _verified_snapshot_graph(
     snapshot = Path(graph["graphFile"])
     if snapshot != run_dir / "graph.json":
         raise SessionError("session graph snapshot path is invalid")
-    snapshot_bytes = _read_owned_file(run_dir, snapshot.name, 0o600)
-    observed = hashlib.sha256(snapshot_bytes).hexdigest()
+    observed = _sha256_owned_file(run_dir, snapshot.name, 0o600)
     if not hmac.compare_digest(observed, graph["sha256"]):
         raise SessionError("session graph snapshot digest mismatch")
     return snapshot
@@ -612,6 +611,74 @@ def _read_owned_file(
         ):
             raise SessionError("session directory changed during file read")
         return b"".join(blocks)
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def _sha256_owned_file(
+    parent: Path, file_name: str, expected_mode: int = 0o600
+) -> str:
+    """Stream one fixed private child through a stable no-follow descriptor."""
+    if Path(file_name).name != file_name or file_name in {"", ".", ".."}:
+        raise SessionError("invalid session file name")
+    parent = require_private_direct_child(
+        Path(parent).parent, parent, expected_mode=0o700
+    )
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise SessionError("no-follow file access is unavailable")
+    directory_fd = os.open(parent, directory_flags | no_follow)
+    file_fd: Optional[int] = None
+    try:
+        parent_before = os.fstat(directory_fd)
+        if not _same_stable_state(parent_before, _stable_lstat(parent)):
+            raise SessionError("session directory changed before file read")
+        try:
+            path_before = os.stat(
+                file_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+            file_fd = os.open(
+                file_name, os.O_RDONLY | no_follow, dir_fd=directory_fd
+            )
+        except OSError as error:
+            raise SessionError("session file could not be opened safely") from error
+        descriptor_before = os.fstat(file_fd)
+        _validate_file_stat(path_before, expected_mode)
+        _validate_file_stat(descriptor_before, expected_mode)
+        if not _same_stable_state(path_before, descriptor_before):
+            raise SessionError("session file changed before reading")
+
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(file_fd, 64 * 1024)
+            if not block:
+                break
+            digest.update(block)
+
+        descriptor_after = os.fstat(file_fd)
+        try:
+            path_after = os.stat(
+                file_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+        except OSError as error:
+            raise SessionError("session file changed during reading") from error
+        _validate_file_stat(descriptor_after, expected_mode)
+        _validate_file_stat(path_after, expected_mode)
+        if not _same_stable_state(descriptor_before, descriptor_after):
+            raise SessionError("session file descriptor changed during reading")
+        if not _same_stable_state(descriptor_after, path_after):
+            raise SessionError("session file path changed during reading")
+        parent_after = os.fstat(directory_fd)
+        if not _same_stable_state(
+            parent_before, parent_after
+        ) or not _same_stable_state(
+            parent_after, _stable_lstat(parent)
+        ):
+            raise SessionError("session directory changed during file read")
+        return digest.hexdigest()
     finally:
         if file_fd is not None:
             os.close(file_fd)
