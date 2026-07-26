@@ -15,7 +15,7 @@ ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
 export ORICHUM_PYTHON
 ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
 export ORICHUM_PYTHON_VALIDATED
-export PATH="$WORKFLOW_DATA_ROOT/headroom/bin:$PATH"
+export PATH="$WORKFLOW_DATA_ROOT/tools/bin:$WORKFLOW_DATA_ROOT/bin:$PATH"
 python_entrypoint=(
   "$ORICHUM_PYTHON" -I -B -c
   'import sys; sys.path.insert(0, sys.argv.pop(1)); import runpy; runpy.run_module("integrations.common.orichum_cli", run_name="__main__")'

@@ -21,18 +21,18 @@ flowchart LR
 
     subgraph Runtime["Runtime request path"]
         C --> X["Per-session Claudex translator"]
-        X --> H["Shared Headroom"]
-        H --> R["Shared route proxy"]
+        X --> R["Shared Orichum route proxy\ntool deferral + account failover"]
         STATE -. "frozen primary and fallback" .-> R
         R --> P["Shared CLIProxyAPI"]
-        P --> A["Selected provider credential"]
+        P --> A["Selected named account"]
         A --> M["Provider model"]
     end
 ```
 
-CLIProxyAPI, Headroom, and the route proxy are resident services bound to
-`127.0.0.1`. Each physical session owns one Claudex translator, private run
-directory, MCP file, and materialized controller plugin.
+The request path has three services: one per-session Claudex translator, the
+shared Orichum route proxy, and shared CLIProxyAPI. All are bound to
+`127.0.0.1`. Each physical session owns its translator, private run directory,
+MCP file, and materialized controller plugin.
 
 Orichum gives the private MCP file and controller plugin to Claude Code when it
 starts. The MCP file exposes only tools relevant to the resolved project. The
@@ -53,11 +53,11 @@ flowchart LR
 
 LeanCTX is a per-session headless stdio MCP, not a resident service. Orichum
 pins it to the active Git repository, gives it private session-local storage,
-and exposes a fixed nine-tool surface for source context and observational
-shell output. `ctx_shell` keeps normal Claude Code approval. `ctx_call`,
-LeanCTX proxying, graph, memory, global hooks, shell interception, and
-autonomous features are disabled. Native Claude Code tools remain available as
-the failure path and for exact verification.
+and exposes a fixed ten-tool surface for source context, patches, and
+observational shell output. `ctx_patch` and `ctx_shell` keep normal Claude Code
+approval. `ctx_call`, LeanCTX proxying, graph, memory, global hooks, shell
+interception, and autonomous features are disabled. Native Claude Code tools
+remain available as the fallback and for exact verification.
 
 ## Launch sequence
 
@@ -80,14 +80,34 @@ handoff.
    translator.
 2. Claudex translates the Claude Code request for the session's selected model
    family.
-3. Shared Headroom applies lossless structural and code-aware prompt
-   optimization.
-4. The shared route proxy reads the immutable session binding and selects its
+3. The shared route proxy reads the immutable session binding and selects its
    frozen primary route or, when safe, its one compatible fallback.
+4. For supported requests, the route proxy keeps the preferred LeanCTX
+   primitives resident and marks unrelated client tool schemas for deferred
+   loading. It adds tool search automatically; users do not choose a tool
+   profile.
 5. Shared CLIProxyAPI uses the selected provider credential to authenticate and
    forward the request to the provider model. The credential is routing and
    authentication data, not another running service.
 6. The model response returns through the same components to Claude Code.
+
+## Deterministic tool routing
+
+| Request or tool | Route |
+|---|---|
+| `ctx_read` anchored context | `ctx_patch` |
+| `ctx_shell` | Observational commands |
+| Native `Bash` | State changes |
+| Native `Read` / `Edit` / `Write` | Fallback only |
+| Graphify | Relationships |
+| Mempalace | Durable history |
+| MCP_DOCKER | Matching live project services |
+
+The controller uses an anchored `ctx_read` before a LeanCTX `ctx_patch` so text
+changes are tied to current source context. `ctx_shell` is for observation;
+state-changing shell work stays in native `Bash` and follows its normal
+approval path. Native file tools remain available when LeanCTX is absent,
+unsafe, or unsuitable.
 
 ## Repository graph lifecycle
 

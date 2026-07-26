@@ -12,8 +12,12 @@ Route tools directly without calling another model to choose:
 
 - Use LeanCTX for current reads, deltas, file discovery, source search, trees,
   outlines, and bounded source exploration.
-- Use `ctx_shell` for verbose observational commands when its MCP is present.
-  Use native Bash for writes and state-changing commands.
+- Use `ctx_read(mode="anchored")` followed by `ctx_patch` for supported text
+  edits and creates.
+- Use native Edit or Write only when LeanCTX is unavailable or the file is
+  binary or unsupported.
+- Use native Bash for Git, package, service, deployment, and other state
+  changes; `ctx_shell` remains observational.
 - Use Graphify for repository relationships and impact when a valid graph is
   present.
 - Recall concise project decisions from Mempalace only when durable history

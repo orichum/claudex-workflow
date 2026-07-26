@@ -56,9 +56,9 @@ except (
 ):
     print("SKIP: installed accounts, stack selection, or service state is unavailable")
     raise SystemExit(0)
-port = ports.get("cliproxyPort")
+port = ports.get("routeProxyPort")
 if type(port) is not int or not 1024 <= port <= 65535:
-    print("SKIP: CLIProxyAPI service port is unavailable")
+    print("SKIP: Orichum route proxy service port is unavailable")
     raise SystemExit(0)
 
 try:
@@ -76,7 +76,7 @@ except (
     urllib.error.URLError,
     json.JSONDecodeError,
 ):
-    print("SKIP: live CLIProxyAPI model catalogue is unavailable")
+    print("SKIP: live Orichum route proxy model catalogue is unavailable")
     raise SystemExit(0)
 
 candidates = (
@@ -149,6 +149,27 @@ send(
         "model": anthropic[1],
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "Reply with one word."}],
+        "tools": [
+            {
+                "name": "Bash",
+                "description": "Run a shell command.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            *[
+                {
+                    "name": f"live_compatibility_tool_{index}",
+                    "description": "A compatibility test tool.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                }
+                for index in range(11)
+            ],
+        ],
     },
     {"anthropic-version": "2023-06-01"},
 )
@@ -161,7 +182,10 @@ send(
     },
     {},
 )
-print("PASS: one bounded Anthropic and one bounded Antigravity request")
+print(
+    "PASS: one bounded Anthropic and one bounded Antigravity request "
+    "through the Orichum route proxy"
+)
 PY
   exit
 fi
@@ -183,8 +207,11 @@ project_root="$fixture/project"
 nested_project="$project_root/nested/repository"
 palace="$fixture/palace"
 install -d -m 0700 \
-  "$config_root" "$data_root" "$data_root/auth" "$data_root/state" \
+  "$config_root" "$data_root" "$data_root/auth" "$data_root/bin" \
+  "$data_root/state" \
   "$nested_project" "$palace"
+install -m 0755 /usr/bin/true "$data_root/bin/lean-ctx"
+git -C "$project_root" init -q
 for control_file in \
     model-stacks.json providers.json plugins.json runtime.json \
     controller-policy.md; do
@@ -397,7 +424,7 @@ with urllib.request.urlopen(
         raise SystemExit(1)
 PY
 printf \
-  '{"claudexProxyPort":13456,"cliproxyPort":%s,"headroomPort":18787,"routeProxyPort":13457}\n' \
+  '{"claudexProxyPort":13456,"cliproxyPort":%s,"routeProxyPort":13457}\n' \
   "$cliproxy_port" >"$data_root/service-ports.json"
 chmod 0600 "$data_root/service-ports.json"
 
@@ -510,6 +537,14 @@ def rendered(binding):
 
 def record_launch(prepared, *_args, **_kwargs):
     logical = prepared.logical
+    mcp = json.loads(prepared.physical.mcp_file.read_text(encoding="utf-8"))
+    servers = mcp.get("mcpServers")
+    if not isinstance(servers, dict) or "leanctx" not in servers:
+        raise SystemExit("session did not materialize the private LeanCTX MCP")
+    if "headroom" in json.dumps(mcp).lower():
+        raise SystemExit("session MCP configuration unexpectedly references Headroom")
+    if (prepared.physical.run_dir / "headroom").exists():
+        raise SystemExit("session unexpectedly materialized a Headroom runtime")
     output.write_text(
         json.dumps(
             {

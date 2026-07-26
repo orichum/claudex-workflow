@@ -25,10 +25,10 @@ Every run is an idempotent upgrade and reconciliation pass. It:
 
 1. validates the focused configuration and controller plugin;
 2. installs the newest available CPython 3.14 patch privately;
-3. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, Headroom, Mempalace,
-   and Graphify;
+3. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, Mempalace, and
+   Graphify;
 4. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
-5. installs or reconciles the three resident loopback services;
+5. installs or reconciles the shared loopback services;
 6. preserves valid configuration and authentication;
 7. runs `orichum doctor` and reports the final locations and ports.
 
@@ -54,15 +54,14 @@ relocate these roots. Values must be absolute.
 
 ## Services
 
-The resident services are CLIProxyAPI, Headroom, and the Orichum route proxy.
-Each active physical session also owns a small Claudex translation proxy that
-ends with that session.
+The shared resident services are CLIProxyAPI and the Orichum route proxy. Each
+active physical session also owns its Claudex translation proxy. Together,
+these are the three services on a request path.
 
 On Linux and WSL:
 
 ```bash
 journalctl --user -u orichum-cliproxy.service
-journalctl --user -u orichum-headroom.service
 journalctl --user -u orichum-route-proxy.service
 ```
 

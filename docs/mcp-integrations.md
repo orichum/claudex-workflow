@@ -5,7 +5,7 @@ Only services relevant to the resolved project are included.
 
 | MCP | Loaded when | Purpose |
 |---|---|---|
-| LeanCTX | Launch is inside a Git repository and Orichum's managed binary is valid | Compact source context and observational shell output |
+| LeanCTX | Launch is inside a Git repository and Orichum's managed binary is valid | Compact source context, anchored text patches, and observational shell output |
 | MCP_DOCKER | Context has a Docker profile and Docker is available | Project-specific Jira and other live-service tools |
 | Mempalace | Context palace exists and passes ownership checks | Durable project recall and bounded memory writes |
 | Graphify | A current central graph exactly matches the repository state | On-demand code-structure query before broad raw search |
@@ -35,15 +35,16 @@ with strict MCP configuration.
 LeanCTX receives a project jail at the active Git root and a private
 `run_dir/leanctx` directory containing its deterministic mode-`0600` config and
 session-local data. Orichum exposes a fixed surface for reads, deltas, search,
-globbing, trees, outlines, bounded exploration, lossless expansion, and
-compressed shell output. The universal `ctx_call`
+globbing, trees, outlines, bounded exploration, lossless expansion, text
+patches, and compressed shell output. The universal `ctx_call`
 gateway is disabled, so hidden LeanCTX tools cannot be reached indirectly.
-Claude Code preapproves the eight read-only context tools. `ctx_shell` keeps
-normal Claude Code approval because it executes commands; other MCP permissions
-are unchanged. Orichum does not invoke LeanCTX setup commands or enable its
-hooks, daemon, proxy, graph, memory, providers, autonomy, or editing tools. If
-the managed binary is missing, unsafe, or the launch is outside a Git
-repository, LeanCTX is omitted and native Claude Code tools remain available.
+Claude Code preapproves the eight read-only context tools. `ctx_patch` and
+`ctx_shell` keep normal Claude Code approval because they change text or
+execute commands; other MCP permissions are unchanged. Orichum does not invoke
+LeanCTX setup commands or enable its hooks, daemon, proxy, graph, memory,
+providers, or autonomy. If the managed binary is missing, unsafe, or the launch
+is outside a Git repository, LeanCTX is omitted and native Claude Code tools
+remain available.
 
 Mempalace inputs are rewritten to the verified project wing. For Graphify, the
 matching graph in private central storage is a validated source, not the MCP's

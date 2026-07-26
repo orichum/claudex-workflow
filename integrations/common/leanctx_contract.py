@@ -13,11 +13,11 @@ AUTO_APPROVED_TOOLS = (
     "ctx_explore",
     "ctx_expand",
 )
-TOOLS = (*AUTO_APPROVED_TOOLS, "ctx_shell")
+TOOLS = (*AUTO_APPROVED_TOOLS, "ctx_patch", "ctx_shell")
 
 _CONFIG = """compression_level = "lite"
 minimal_overhead = true
-tools_enabled = ["ctx_read", "ctx_delta", "ctx_search", "ctx_glob", "ctx_tree", "ctx_outline", "ctx_explore", "ctx_expand", "ctx_shell"]
+tools_enabled = ["ctx_read", "ctx_delta", "ctx_search", "ctx_glob", "ctx_tree", "ctx_outline", "ctx_explore", "ctx_expand", "ctx_patch", "ctx_shell"]
 disabled_tools = ["ctx_call"]
 auto_capture = false
 buddy_enabled = false
@@ -25,7 +25,7 @@ enable_wakeup_ctx = false
 journal_enabled = false
 max_index_threads = 2
 no_degrade = true
-prefer_native_editor = true
+prefer_native_editor = false
 proxy_enabled = false
 rules_injection = "off"
 shadow_mode = false

@@ -31,6 +31,14 @@ from integrations.common.route_proxy import (
 from integrations.common.route_selection import Route
 
 
+def client_tool(name: str) -> dict:
+    return {
+        "name": name,
+        "description": name,
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+
 class StaticRouteIndex:
     def __init__(self, routes: dict[str, str]):
         self.routes = routes
@@ -44,6 +52,7 @@ class StaticRouteIndex:
 class RecordingUpstream:
     def __init__(self, responses: list[tuple[int, bytes]]):
         self.responses = list(responses)
+        self.documents: list[dict[str, object]] = []
         self.models: list[str | None] = []
         self.paths: list[str] = []
         self.session_headers: list[str | None] = []
@@ -59,6 +68,7 @@ class RecordingUpstream:
                 owner.paths.append(self.path)
                 length = int(self.headers["Content-Length"])
                 document = json.loads(self.rfile.read(length))
+                owner.documents.append(document)
                 owner.models.append(document.get("model"))
                 owner.session_headers.append(
                     self.headers.get("X-Orichum-Session-ID")
@@ -161,10 +171,20 @@ class ProxyHarness:
     def post(
         self, model: str, path: str = "/v1/messages"
     ) -> tuple[int, bytes]:
+        return self.post_document(
+            {"model": model, "messages": []},
+            path,
+        )
+
+    def post_document(
+        self,
+        document: dict[str, object],
+        path: str = "/v1/messages",
+    ) -> tuple[int, bytes]:
         connection = http.client.HTTPConnection(
             "127.0.0.1", self.port, timeout=3
         )
-        body = json.dumps({"model": model, "messages": []}).encode()
+        body = json.dumps(document).encode()
         connection.request(
             "POST",
             path,
@@ -516,6 +536,184 @@ class RouteProxyTests(unittest.TestCase):
         self.assertEqual((status, body), (200, b"primary"))
         self.assertEqual(upstream.models, [self.primary])
         self.assertEqual(upstream.session_headers, [None])
+
+    def test_verified_request_defers_tools_before_forwarding(self) -> None:
+        tools = [
+            client_tool("Bash"),
+            *[
+                client_tool(f"mcp__docker__tool_{index}")
+                for index in range(11)
+            ],
+        ]
+        with RecordingUpstream([(200, b"ok")]) as upstream:
+            with ProxyHarness(upstream.port, {}) as proxy:
+                status, _ = proxy.post_document(
+                    {"model": self.primary, "messages": [], "tools": tools}
+                )
+        self.assertEqual(status, 200)
+        forwarded = upstream.documents[0]
+        self.assertEqual(
+            forwarded["tools"][-1]["type"],
+            "tool_search_tool_regex_20251119",
+        )
+
+    def test_unknown_model_request_is_forwarded_unchanged(self) -> None:
+        document = {
+            "model": "oc-r-0000000000000001/future-model",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        with RecordingUpstream([(200, b"ok")]) as upstream:
+            with ProxyHarness(upstream.port, {}) as proxy:
+                status, _ = proxy.post_document(document)
+        self.assertEqual(status, 200)
+        self.assertEqual(upstream.documents, [document])
+
+    def test_400_from_transformed_request_retries_original_once(self) -> None:
+        document = {
+            "model": self.primary,
+            "messages": [],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        with RecordingUpstream(
+            [(400, b"unsupported"), (200, b"ok")]
+        ) as upstream:
+            with ProxyHarness(upstream.port, {}) as proxy:
+                status, body = proxy.post_document(document)
+        self.assertEqual((status, body), (200, b"ok"))
+        self.assertEqual(len(upstream.documents), 2)
+        self.assertIn("defer_loading", upstream.documents[0]["tools"][1])
+        self.assertEqual(upstream.documents[1], document)
+
+    def test_422_from_transformed_request_retries_original_once(self) -> None:
+        document = {
+            "model": self.primary,
+            "messages": [],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        with RecordingUpstream(
+            [(422, b"unsupported"), (200, b"ok")]
+        ) as upstream:
+            with ProxyHarness(upstream.port, {}) as proxy:
+                status, body = proxy.post_document(document)
+        self.assertEqual((status, body), (200, b"ok"))
+        self.assertEqual(upstream.documents[1], document)
+
+    def test_untransformed_400_is_returned_without_retry(self) -> None:
+        document = {
+            "model": self.primary,
+            "messages": [],
+            "tools": [client_tool("Bash")],
+        }
+        with RecordingUpstream([(400, b"invalid")]) as upstream:
+            with ProxyHarness(upstream.port, {}) as proxy:
+                status, body = proxy.post_document(document)
+        self.assertEqual((status, body), (400, b"invalid"))
+        self.assertEqual(upstream.documents, [document])
+
+    def test_429_does_not_use_tool_compatibility_retry(self) -> None:
+        document = {
+            "model": self.primary,
+            "messages": [],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        with RecordingUpstream([(429, b"quota")]) as upstream:
+            with ProxyHarness(upstream.port, {}) as proxy:
+                status, _ = proxy.post_document(document)
+        self.assertEqual(status, 429)
+        self.assertEqual(len(upstream.documents), 1)
+
+    def test_cooldown_selected_fallback_uses_its_logical_model(self) -> None:
+        primary = "oc-r-0000000000000001/future-model"
+        fallback = "oc-r-0000000000000002/gpt-5.6-sol"
+        document = {
+            "model": primary,
+            "messages": [],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        cooldowns = Cooldowns(60)
+        cooldowns.trip(primary)
+        with RecordingUpstream([(200, b"ok")]) as upstream:
+            with ProxyHarness(
+                upstream.port,
+                {primary: fallback},
+                cooldowns=cooldowns,
+            ) as proxy:
+                status, _ = proxy.post_document(document)
+        self.assertEqual(status, 200)
+        self.assertEqual(upstream.models, [fallback])
+        self.assertEqual(
+            upstream.documents[0]["tools"][-1]["type"],
+            "tool_search_tool_regex_20251119",
+        )
+
+    def test_account_failover_changes_only_model(self) -> None:
+        document = {
+            "model": self.primary,
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        with RecordingUpstream(
+            [(429, b"limited"), (200, b"fallback")]
+        ) as upstream:
+            with ProxyHarness(
+                upstream.port, {self.primary: self.fallback}
+            ) as proxy:
+                status, _ = proxy.post_document(document)
+        self.assertEqual(status, 200)
+        primary_document, fallback_document = upstream.documents
+        self.assertEqual(primary_document["model"], self.primary)
+        self.assertEqual(fallback_document["model"], self.fallback)
+        self.assertEqual(
+            {**primary_document, "model": self.fallback},
+            fallback_document,
+        )
+
+    def test_400_compatibility_retry_does_not_trip_cooldown(self) -> None:
+        document = {
+            "model": self.primary,
+            "messages": [],
+            "tools": [
+                client_tool("Bash"),
+                *[client_tool(f"tool_{index}") for index in range(11)],
+            ],
+        }
+        with RecordingUpstream(
+            [
+                (400, b"unsupported"),
+                (200, b"original"),
+                (200, b"next"),
+            ]
+        ) as upstream:
+            with ProxyHarness(
+                upstream.port, {self.primary: self.fallback}
+            ) as proxy:
+                first = proxy.post_document(document)
+                second = proxy.post_document(document)
+        self.assertEqual(first, (200, b"original"))
+        self.assertEqual(second, (200, b"next"))
+        self.assertEqual(
+            upstream.models,
+            [self.primary, self.primary, self.primary],
+        )
 
     def test_retryable_status_uses_one_fallback_and_preserves_result(self) -> None:
         with RecordingUpstream(

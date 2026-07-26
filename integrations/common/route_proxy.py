@@ -18,6 +18,7 @@ from typing import Callable, Mapping
 
 from .model_routing import ROLES
 from .orichum_sessions import LogicalSessionError
+from .tool_deferral import transform_request
 
 
 RETRYABLE_STATUSES = frozenset({401, 403, 408, 429, 500, 502, 503, 504})
@@ -312,6 +313,16 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             connection.close()
             raise
 
+    def _candidate_upstream(
+        self, original: bytes
+    ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+        candidate = transform_request(original)
+        connection, response = self._upstream(candidate.body)
+        if candidate.transformed and response.status in {400, 422}:
+            connection.close()
+            return self._upstream(original)
+        return connection, response
+
     def _open_upstream_socket(self) -> socket.socket:
         config: ProxyConfig = self.server.proxy_config
         connected = socket.create_connection(
@@ -467,11 +478,11 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                 and cooldowns.active(primary)
             ):
                 fallback_body = _replace_model(body, primary, fallback)
-                connection, response = self._upstream(fallback_body)
+                connection, response = self._candidate_upstream(fallback_body)
                 self._send_response(connection, response)
                 return
 
-            connection, response = self._upstream(body)
+            connection, response = self._candidate_upstream(body)
             if (
                 primary is not None
                 and fallback is not None
@@ -480,7 +491,7 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                 connection.close()
                 cooldowns.trip(primary)
                 fallback_body = _replace_model(body, primary, fallback)
-                connection, response = self._upstream(fallback_body)
+                connection, response = self._candidate_upstream(fallback_body)
             elif primary is not None and response.status < 400:
                 cooldowns.clear(primary)
             self._send_response(connection, response)

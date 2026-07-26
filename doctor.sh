@@ -41,7 +41,7 @@ fi
 
 if "$WORKFLOW_ROOT/bin/orichum-runtime-ready" "$data_root" \
     >/dev/null 2>&1; then
-  ok 'CLIProxyAPI, route proxy, and Headroom are owned and ready'
+  ok 'CLIProxyAPI and route proxy are owned and ready'
 elif [[ "$provider_login_pending" == true ]]; then
   fail 'provider login is pending; register an account, then re-run install.sh'
 else
@@ -51,13 +51,13 @@ fi
 claudex_config="$data_root/model-config/current/claudex.toml"
 ports_valid=false
 if IFS=$'\t' read -r \
-    _ _ claudex_port route_port \
+    _ claudex_port route_port \
     < <(read_service_ports "$data_root") && \
    [[ "$(rg -c '^proxy_port = [0-9]+$' "$claudex_config" \
        2>/dev/null || true)" == 1 ]] && \
    rg -Fxq "proxy_port = $claudex_port" "$claudex_config" && \
    rg -Fxq \
-     "X-Headroom-Base-Url = \"http://127.0.0.1:$route_port\"" \
+     "base_url = \"http://127.0.0.1:$route_port\"" \
      "$claudex_config"; then
   ports_valid=true
 fi
