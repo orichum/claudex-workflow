@@ -264,10 +264,20 @@ for required_contract in \
     'orichum graph status "$graph_project"' \
     'test ! -e "$graph_project/graphify-out"' \
     'CLAUDEX_MCP_CONFIG' \
+    'mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])' \
+    'sessions = data_home / "state" / "sessions"' \
+    'resolved_data_home / "state" / "sessions" / run_dir.name' \
+    'snapshot = run_dir / "graph.json"' \
+    'graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"' \
+    'central.relative_to(central_root)' \
+    'if not central.is_file():' \
+    'chunk = os.read(graph_fd, 1024 * 1024)' \
+    'hmac.compare_digest(digest.hexdigest(), expected_digest)' \
+    'stat.S_IMODE(before.st_mode) != 0o600' \
     'integrations/common/mcp_probe.py' \
     '--require-tool query_graph' \
     '--require-tool graph_stats' \
-    'graphify_command="$(jq -er' \
+    'graphify_command="$(' \
     'run-graph-session-fixture' \
     'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
@@ -321,10 +331,20 @@ for required_contract in \
     'orichum graph status "$graph_project"' \
     'test ! -e "$graph_project/graphify-out"' \
     'CLAUDEX_MCP_CONFIG' \
+    'mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])' \
+    'sessions = data_home / "state" / "sessions"' \
+    'resolved_data_home / "state" / "sessions" / run_dir.name' \
+    'snapshot = run_dir / "graph.json"' \
+    'graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"' \
+    'central.relative_to(central_root)' \
+    'if not central.is_file():' \
+    'chunk = os.read(graph_fd, 1024 * 1024)' \
+    'hmac.compare_digest(digest.hexdigest(), expected_digest)' \
+    'stat.S_IMODE(before.st_mode) != 0o600' \
     'integrations/common/mcp_probe.py' \
     '--require-tool query_graph' \
     '--require-tool graph_stats' \
-    'graphify_command="$(jq -er' \
+    'graphify_command="$(' \
     'run-graph-session-fixture' \
     'Verify idempotent upgrade' \
     'Clean up launch agents'; do
