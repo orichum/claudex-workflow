@@ -43,6 +43,32 @@ class StaticRouteIndex:
     def __init__(self, routes: dict[str, str]):
         self.routes = routes
 
+    @staticmethod
+    def _route(model: str, suffix: str) -> Route:
+        return Route(
+            account_id=f"oc-a-{suffix}",
+            provider="openai",
+            family="gpt",
+            logical_model=model.rsplit("/", 1)[-1],
+            upstream_model=model,
+            claudex_profile=f"ocp-{suffix}",
+            priority=100,
+            pool="shared",
+        )
+
+    def routes_for(
+        self, _session_id: str | None, primary_model: str
+    ) -> tuple[Route, Route | None] | None:
+        fallback = self.routes.get(primary_model)
+        return (
+            self._route(primary_model, "0000000000000001"),
+            (
+                self._route(fallback, "0000000000000002")
+                if fallback is not None
+                else None
+            ),
+        )
+
     def fallback_for(
         self, _session_id: str | None, primary_model: str
     ) -> str | None:
@@ -726,6 +752,28 @@ class RouteProxyTests(unittest.TestCase):
 
         self.assertEqual((status, body), (200, b"fallback"))
         self.assertEqual(upstream.models, [self.primary, self.fallback])
+
+    def test_status_endpoint_reports_the_active_fallback_account(self) -> None:
+        with RecordingUpstream(
+            [(429, b"limited"), (200, b"fallback")]
+        ) as upstream:
+            with ProxyHarness(
+                upstream.port, {self.primary: self.fallback}
+            ) as proxy:
+                self.assertEqual(
+                    proxy.post(self.primary),
+                    (200, b"fallback"),
+                )
+                status, body = proxy.get(
+                    "/status?session_id=oc-s-0000000000000001"
+                )
+
+        self.assertEqual(status, 200)
+        document = json.loads(body)
+        self.assertEqual(document["accountId"], "oc-a-0000000000000002")
+        self.assertEqual(document["routeState"], "fallback")
+        self.assertEqual(document["reason"], "retry")
+        self.assertEqual(document["lastHttpStatus"], 200)
 
     def test_cooldown_skips_known_exhausted_primary(self) -> None:
         clock = [100.0]

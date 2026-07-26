@@ -10,5 +10,13 @@
   },
   "worktree": {
     "baseRef": "head"
+  },
+  "companyAnnouncements": [
+    "ORICHUM · Unified model control plane · Powered by Claude Code"
+  ],
+  "statusLine": {
+    "type": "command",
+    "command": "\"$CLAUDEX_WORKFLOW_ROOT/bin/orichum-statusline\"",
+    "padding": 0
   }
 }

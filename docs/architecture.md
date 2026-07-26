@@ -91,6 +91,11 @@ handoff.
    authentication data, not another running service.
 6. The model response returns through the same components to Claude Code.
 
+After selecting a route, the proxy retains one bounded, public snapshot per
+logical session. The isolated Claude Code status line reads that loopback
+snapshot to display the active named account and failover state; credentials
+and private routing fields are not exposed.
+
 ## Deterministic tool routing
 
 | Request or tool | Route |

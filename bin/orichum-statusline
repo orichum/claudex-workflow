@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_source="${BASH_SOURCE[0]}"
+while [[ -L "$launcher_source" ]]; do
+  launcher_dir="$(cd -P "$(dirname "$launcher_source")" && pwd)"
+  launcher_source="$(readlink "$launcher_source")"
+  [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
+done
+workflow_root="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$workflow_root/lib/workflow.sh"
+data_root="$(workflow_data_dir)"
+orichum_python="$(resolve_orichum_python "$data_root")"
+
+exec "$orichum_python" -I -B -c \
+  'import sys; sys.path.insert(0, sys.argv.pop(1)); from integrations.common.orichum_status import main; raise SystemExit(main())' \
+  "$workflow_root"
