@@ -262,6 +262,44 @@ class SessionConfigTests(unittest.TestCase):
         with self.assertRaises(SessionError):
             action()
 
+    def test_component_creation_accepts_valid_concurrent_mkdir_winner(
+        self,
+    ) -> None:
+        parent = self.fixture / "race-parent"
+        parent.mkdir(mode=0o700)
+        child = parent / "state"
+        real_lstat = session_config.os.lstat
+        real_mkdir = session_config.os.mkdir
+        first_lookup = True
+
+        def miss_once(path):
+            nonlocal first_lookup
+            if Path(path) == child and first_lookup:
+                first_lookup = False
+                raise FileNotFoundError
+            return real_lstat(path)
+
+        def concurrent_winner(path, mode):
+            real_mkdir(path, mode)
+            raise FileExistsError
+
+        with (
+            mock.patch.object(
+                session_config.os, "lstat", side_effect=miss_once
+            ),
+            mock.patch.object(
+                session_config.os,
+                "mkdir",
+                side_effect=concurrent_winner,
+            ),
+        ):
+            resolved = session_config.require_owned_component(
+                parent, "state", private=True, create=True
+            )
+
+        self.assertEqual(resolved, child)
+        self.assertEqual(stat.S_IMODE(child.stat().st_mode), 0o700)
+
     def test_create_session_writes_private_project_mcp_state(self) -> None:
         session = self.create()
 

@@ -162,9 +162,17 @@ def require_owned_component(
             raise SessionError("required session component is missing")
         try:
             os.mkdir(child, 0o700)
-            _fsync_directory(parent)
+        except FileExistsError:
+            pass
         except OSError as error:
             raise SessionError("session component could not be created") from error
+        else:
+            try:
+                _fsync_directory(parent)
+            except OSError as error:
+                raise SessionError(
+                    "session component could not be created"
+                ) from error
     except OSError as error:
         raise SessionError("session component is unavailable") from error
     return _require_directory(
