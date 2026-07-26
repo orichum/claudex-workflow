@@ -61,7 +61,8 @@ jobs:
               tests/test_plugins.sh \
               tests/test_installer.sh \
               tests/test_install_transaction.sh \
-              tests/test_live_stack_routes.sh; do
+              tests/test_live_stack_routes.sh \
+              tests/test_uninstall.sh; do
             if ! bash "$test_script"; then
               printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
                 "$test_script"
@@ -591,6 +592,28 @@ jobs:
           "$RUNNER_TEMP/run-graph-session-fixture" \
             "$graph_project" "$RUNNER_TEMP/graph-session.upgrade"
           orichum doctor
+
+      - name: Verify uninstall lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'preserve\n' >"$ORICHUM_DATA_HOME/auth/uninstall-sentinel"
+          printf 'preserve\n' >"$ORICHUM_CONFIG_HOME/uninstall-sentinel"
+          ./install.sh --uninstall
+          test "$(systemctl --user is-active orichum-cliproxy.service 2>/dev/null || true)" != active
+          test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" != active
+          test ! -e "$HOME/.config/systemd/user/orichum-cliproxy.service"
+          test ! -e "$HOME/.config/systemd/user/orichum-route-proxy.service"
+          test ! -e "$USER_BIN_DIR/orichum"
+          test ! -e "$ORICHUM_DATA_HOME/bin"
+          test ! -e "$ORICHUM_DATA_HOME/python"
+          test ! -e "$ORICHUM_DATA_HOME/tools"
+          test -f "$ORICHUM_DATA_HOME/auth/uninstall-sentinel"
+          test -f "$ORICHUM_CONFIG_HOME/uninstall-sentinel"
+          ./install.sh --uninstall --purge
+          test ! -e "$ORICHUM_DATA_HOME"
+          test ! -e "$ORICHUM_CONFIG_HOME"
+          test -d "$GITHUB_WORKSPACE"
 
       - name: Print bounded diagnostics
         if: failure()

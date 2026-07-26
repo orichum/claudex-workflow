@@ -47,7 +47,17 @@ cd orichum
 The installer also handles upgrades. It installs or updates Orichum's
 dependencies, reconciles the services it owns, and finishes by running the
 doctor check. See [Installation and upgrades](docs/installation.md) for
-prerequisites, locations, services, and port handling.
+prerequisites, locations, services, port handling, and uninstall options.
+
+To remove the Orichum runtime while keeping accounts, sessions, project
+configuration, graphs, and Mempalace palaces for a later reinstall:
+
+```bash
+./install.sh --uninstall
+```
+
+Use `./install.sh --uninstall --purge` only when you also want to permanently
+remove Orichum's saved configuration and data.
 
 ## Your first Orichum session
 
