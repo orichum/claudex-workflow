@@ -96,6 +96,97 @@ fi
 rg -Fq 'outside private Python root' "$fixture/escaped-python.stderr"
 ln -sfn "$python_bin/python3.14" "$python_data/bin/orichum-python"
 
+[[ "$(leanctx_release_suffix darwin aarch64)" == \
+   '-aarch64-apple-darwin.tar.gz' ]]
+[[ "$(leanctx_release_suffix darwin x86_64)" == \
+   '-x86_64-apple-darwin.tar.gz' ]]
+[[ "$(leanctx_release_suffix systemd aarch64)" == \
+   '-aarch64-unknown-linux-gnu.tar.gz' ]]
+[[ "$(leanctx_release_suffix systemd x86_64)" == \
+   '-x86_64-unknown-linux-gnu.tar.gz' ]]
+if leanctx_release_suffix systemd unsupported \
+    >"$fixture/leanctx-arch.stdout" 2>"$fixture/leanctx-arch.stderr"; then
+  printf 'unsupported LeanCTX architecture was accepted\n' >&2
+  exit 1
+fi
+
+managed_bin="$fixture/managed-bin"
+install -d -m 0700 "$managed_bin"
+printf '#!/bin/sh\nexit 0\n' >"$managed_bin/tool"
+chmod 0755 "$managed_bin/tool"
+managed_executable_is_safe "$managed_bin/tool"
+chmod 0777 "$managed_bin/tool"
+if managed_executable_is_safe "$managed_bin/tool"; then
+  printf 'unsafe managed executable permissions were accepted\n' >&2
+  exit 1
+fi
+chmod 0755 "$managed_bin/tool"
+ln -s "$managed_bin/tool" "$managed_bin/tool-link"
+if managed_executable_is_safe "$managed_bin/tool-link"; then
+  printf 'managed executable symlink was accepted\n' >&2
+  exit 1
+fi
+
+leanctx_probe="$fixture/lean-ctx"
+cat >"$leanctx_probe" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+required = {
+    "LEAN_CTX_HEADLESS": "1",
+    "LEAN_CTX_AUTONOMY": "false",
+    "LEAN_CTX_FULL_TOOLS": "0",
+}
+if any(os.environ.get(key) != value for key, value in required.items()):
+    raise SystemExit(3)
+root = Path(os.environ["LEAN_CTX_PROJECT_ROOT"])
+data = Path(os.environ["LEAN_CTX_DATA_DIR"])
+if not root.is_dir() or not (data / "config.toml").is_file():
+    raise SystemExit(4)
+tools = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand"]
+extra = os.environ.get("FAKE_LEANCTX_EXTRA")
+if extra:
+    tools.append(extra)
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fake-leanctx", "version": "1"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [
+                {"name": name, "inputSchema": {"type": "object"}}
+                for name in tools
+            ]
+        }
+    else:
+        continue
+    print(
+        json.dumps(
+            {"jsonrpc": "2.0", "id": request["id"], "result": result}
+        ),
+        flush=True,
+    )
+PY
+chmod 0755 "$leanctx_probe"
+probe_leanctx_capabilities \
+  "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture"
+if FAKE_LEANCTX_EXTRA=ctx_call probe_leanctx_capabilities \
+    "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    >"$fixture/leanctx-extra.stdout" 2>"$fixture/leanctx-extra.stderr"; then
+  printf 'LeanCTX capability probe accepted ctx_call\n' >&2
+  exit 1
+fi
+rg -Fq 'unexpected MCP tool is available: ctx_call' \
+  "$fixture/leanctx-extra.stderr"
+
 graph_data="$fixture/graph-data"
 install -d -m 0700 "$graph_data"
 graph_root="$(ensure_private_graph_root "$graph_data")"

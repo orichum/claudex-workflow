@@ -84,6 +84,11 @@ jobs:
           ./install.sh
           managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
           test -x "$managed_python"
+          test -x "$ORICHUM_DATA_HOME/bin/lean-ctx"
+          source ./lib/workflow.sh
+          probe_leanctx_capabilities \
+            "$ORICHUM_DATA_HOME/bin/lean-ctx" "$managed_python" \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
           "$managed_python" -I -B -c '
           import platform, sys
           assert platform.python_implementation() == "CPython"
@@ -297,6 +302,8 @@ jobs:
           import os
           from pathlib import Path
           import stat
+          import subprocess
+          import sys
 
           def fail(message):
               raise SystemExit(message)
@@ -375,9 +382,13 @@ jobs:
           context = load_private_json(context_file)
           try:
               graphify = mcp["mcpServers"]["graphify"]
+              leanctx = mcp["mcpServers"]["leanctx"]
               graph = context["graph"]
               graphify_command = graphify["command"]
               graphify_args = graphify["args"]
+              leanctx_command = leanctx["command"]
+              leanctx_args = leanctx["args"]
+              leanctx_env = leanctx["env"]
               context_snapshot = Path(graph["graphFile"])
               central = Path(graph["centralGraphFile"]).resolve(strict=True)
               expected_digest = graph["sha256"]
@@ -392,6 +403,59 @@ jobs:
               or not isinstance(expected_digest, str)
           ):
               fail("physical graph session binding is inconsistent")
+          leanctx_dir = run_dir / "leanctx"
+          expected_leanctx_env = {
+              "LEAN_CTX_ALLOW_REROOT": "false",
+              "LEAN_CTX_AUTONOMY": "false",
+              "LEAN_CTX_BYPASS_HINTS": "off",
+              "LEAN_CTX_CACHE_DIR": str(leanctx_dir),
+              "LEAN_CTX_CONFIG_DIR": str(leanctx_dir),
+              "LEAN_CTX_DATA_DIR": str(leanctx_dir),
+              "LEAN_CTX_FULL_TOOLS": "0",
+              "LEAN_CTX_HEADLESS": "1",
+              "LEAN_CTX_MINIMAL": "1",
+              "LEAN_CTX_PROJECT_ROOT": str(Path.cwd().resolve(strict=True)),
+              "LEAN_CTX_STATE_DIR": str(leanctx_dir),
+          }
+          if (
+              leanctx_command != str(data_home / "bin" / "lean-ctx")
+              or leanctx_args != []
+              or leanctx_env != expected_leanctx_env
+          ):
+              fail("physical LeanCTX session binding is inconsistent")
+          descriptor, opened = open_private_file(leanctx_dir / "config.toml")
+          with os.fdopen(descriptor, "rb") as stream:
+              observed_config = stream.read()
+              final = os.fstat(stream.fileno())
+          after = os.stat(leanctx_dir / "config.toml", follow_symlinks=False)
+          if not same_file(opened, final) or not same_file(final, after):
+              fail("LeanCTX session config changed during read")
+          sys.path.insert(0, os.environ["CLAUDEX_WORKFLOW_ROOT"])
+          from integrations.common.leanctx_contract import config_bytes
+          if not hmac.compare_digest(observed_config, config_bytes()):
+              fail("LeanCTX session config does not match its contract")
+          probe = [
+              os.environ["ORICHUM_PYTHON"],
+              "-B",
+              str(
+                  Path(os.environ["CLAUDEX_WORKFLOW_ROOT"])
+                  / "integrations/common/mcp_probe.py"
+              ),
+          ]
+          for tool in ("ctx_read", "ctx_search", "ctx_tree", "ctx_expand"):
+              probe.extend(["--exact-tool", tool])
+          probe.extend(["--", leanctx_command])
+          probe_environment = os.environ.copy()
+          probe_environment.update(leanctx_env)
+          completed = subprocess.run(
+              probe,
+              env=probe_environment,
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          if completed.returncode != 0:
+              fail(f"physical LeanCTX MCP probe failed: {completed.stderr}")
           central_root = (data_home / "graphs").resolve(strict=True)
           if not central.is_file():
               fail("central graph provenance is not a file")

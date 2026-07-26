@@ -9,10 +9,12 @@ flowchart LR
         U["User"] --> O
         O --> STATE["Immutable session state"]
         O --> MCP["Private project MCP file"]
+        O --> LCFG["Private LeanCTX config"]
         O --> PLUGIN["Private controller plugin"]
         O --> C["Claude Code"]
 
         MCP --> C
+        LCFG -. "session-jailed live context" .-> C
         PLUGIN --> C
         STATE -. "resume and route binding" .-> O
     end
@@ -37,13 +39,33 @@ starts. The MCP file exposes only tools relevant to the resolved project. The
 controller plugin supplies the controller policy, audited specialist roles,
 workflows, and safety hooks.
 
+## Context path
+
+```mermaid
+flowchart LR
+    C["Claude Code controller"] --> L["LeanCTX\ncurrent reads, search, tree"]
+    C --> G["Graphify\nrelationships and impact"]
+    C --> M["Mempalace\ndurable decisions"]
+    L --> S["Exact repository source"]
+    G --> GS["Immutable session graph"]
+    M --> MP["Project palace and wing"]
+```
+
+LeanCTX is a per-session headless stdio MCP, not a resident service. Orichum
+pins it to the active Git repository, gives it private session-local storage,
+and exposes only `ctx_read`, `ctx_search`, `ctx_tree`, and `ctx_expand`.
+`ctx_call`, LeanCTX proxying, graph, memory, global hooks, shell interception,
+and autonomous features are disabled. Native Claude Code reads and searches
+remain available as the failure path and for exact verification.
+
 ## Launch sequence
 
 1. Resolve the longest matching project context.
 2. Validate the focused configuration and project resources.
 3. Discover live provider/model routes and select eligible accounts.
 4. Freeze the logical session route and integrity digests.
-5. Materialize the controller plugin and minimal MCP configuration.
+5. Materialize the controller plugin, minimal MCP configuration, and private
+   LeanCTX contract when the launch is inside a Git repository.
 6. Start and health-check the session's Claudex translator.
 7. Launch Claude Code with the strict MCP file and controller policy.
 
@@ -101,7 +123,9 @@ commands do not invoke Mempalace.
 - Session files and account registries use private ownership and modes.
 - Context and model files are digest-bound to the physical run.
 - GitHub configuration is copied into per-session account-specific state.
-- MCP_DOCKER, Mempalace, and Graphify are included only when relevant.
+- LeanCTX, MCP_DOCKER, Mempalace, and Graphify are included only when relevant.
+- LeanCTX state and config are private to one physical session and never become
+  a global hook, daemon, graph, memory store, or request proxy.
 - Graphify output is central and private; repository-local output is legacy
   migration input, not active state.
 - The controller is the sole writer; audited specialists are read-only.

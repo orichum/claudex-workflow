@@ -25,9 +25,9 @@ Every run is an idempotent upgrade and reconciliation pass. It:
 
 1. validates the focused configuration and controller plugin;
 2. installs the newest available CPython 3.14 patch privately;
-3. installs or upgrades CLIProxyAPI, Claudex, Headroom, Mempalace, and
-   Graphify;
-4. probes required CLIProxyAPI and MCP behavior;
+3. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, Headroom, Mempalace,
+   and Graphify;
+4. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
 5. installs or reconciles the three resident loopback services;
 6. preserves valid configuration and authentication;
 7. runs `orichum doctor` and reports the final locations and ports.
@@ -44,6 +44,7 @@ next available port.
 | Command | `~/.local/bin/orichum` |
 | Editable configuration | `~/.config/orichum/` |
 | Binaries, auth, logs, and service state | `~/.local/share/orichum/` |
+| Managed LeanCTX binary | `~/.local/share/orichum/bin/lean-ctx` |
 | Managed Python versions | `~/.local/share/orichum/python/` |
 | Stable private Python | `~/.local/share/orichum/bin/orichum-python` |
 | Logical session state | `~/.local/share/orichum/state/` |
@@ -74,4 +75,6 @@ orichum config paths
 
 The installer never changes the system Python, shell profiles, or another
 project's environment. Upgrade staging is transactional: an unsuccessful
-upgrade restores the prior managed service state.
+upgrade restores the prior managed binaries and service state. Orichum installs
+LeanCTX directly from its verified release asset; it never runs LeanCTX
+`wrap`, `setup`, `onboard`, `init`, or proxy commands.

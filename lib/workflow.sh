@@ -71,6 +71,19 @@ path_uid() {
   esac
 }
 
+managed_executable_is_safe() {
+  local executable="$1"
+  local parent
+  [[ "$executable" == /* && -f "$executable" && ! -L "$executable" && \
+     -x "$executable" ]] || return 1
+  parent="$(dirname "$executable")"
+  [[ -d "$parent" && ! -L "$parent" ]] || return 1
+  [[ "$(path_uid "$executable")" == "$(id -u)" && \
+     "$(path_uid "$parent")" == "$(id -u)" && \
+     "$(path_mode "$executable")" == 755 && \
+     "$(path_mode "$parent")" == 700 ]]
+}
+
 validate_orichum_python() {
   local data_root="$1"
   local interpreter="$2"
@@ -656,6 +669,7 @@ print_install_summary() {
   local python_version="${20}"
   local python_realpath="${21}"
   local python_action="${22}"
+  local leanctx_binary="${23}"
 
   printf '%s\n' \
     '' \
@@ -666,6 +680,7 @@ print_install_summary() {
     "  Claudex runtime:   $claudex_binary" \
     "  CLIProxyAPI:       $cliproxy_binary" \
     "  Headroom:          $headroom_binary" \
+    "  LeanCTX:           $leanctx_binary" \
     "  MemPalace MCP:     $mempalace_binary" \
     "  Graphify MCP:      $graphify_binary" \
     '' \
@@ -3000,6 +3015,94 @@ fetch_latest_github_release() {
   fi
 }
 
+leanctx_release_suffix() {
+  local platform="$1"
+  local architecture="$2"
+  case "$platform:$architecture" in
+    darwin:aarch64|darwin:x86_64)
+      printf -- '-%s-apple-darwin.tar.gz\n' "$architecture"
+      ;;
+    systemd:aarch64|systemd:x86_64)
+      printf -- '-%s-unknown-linux-gnu.tar.gz\n' "$architecture"
+      ;;
+    *)
+      workflow_die \
+        "unsupported LeanCTX platform: $platform/$architecture"
+      return 1
+      ;;
+  esac
+}
+
+probe_leanctx_capabilities() {
+  local leanctx_binary="$1"
+  local python_runtime="$2"
+  local workflow_root="$3"
+  local temporary_parent="$4"
+  local probe_root project_root data_dir
+  [[ "$leanctx_binary" == /* && -x "$leanctx_binary" ]] || {
+    workflow_die "LeanCTX capability probe requires an executable binary"
+    return 1
+  }
+  [[ "$python_runtime" == /* && -x "$python_runtime" ]] || {
+    workflow_die "LeanCTX capability probe requires a Python runtime"
+    return 1
+  }
+  [[ -f "$workflow_root/integrations/common/mcp_probe.py" ]] || {
+    workflow_die "LeanCTX MCP probe is unavailable"
+    return 1
+  }
+  probe_root="$(mktemp -d "$temporary_parent/leanctx-capability.XXXXXX")" || \
+    return 1
+  chmod 0700 "$probe_root"
+  project_root="$probe_root/project"
+  data_dir="$probe_root/data"
+  install -d -m 0700 "$project_root" "$data_dir"
+  PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
+    "$workflow_root" "$data_dir/config.toml" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.leanctx_contract import config_bytes
+
+target = Path(sys.argv[2])
+descriptor = os.open(
+    target,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+)
+try:
+    payload = config_bytes()
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(descriptor, payload[offset:])
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+  PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -B \
+    "$workflow_root/integrations/common/mcp_probe.py" \
+    --exact-tool ctx_read \
+    --exact-tool ctx_search \
+    --exact-tool ctx_tree \
+    --exact-tool ctx_expand \
+    -- env \
+    LEAN_CTX_ALLOW_REROOT=false \
+    LEAN_CTX_AUTONOMY=false \
+    LEAN_CTX_BYPASS_HINTS=off \
+    LEAN_CTX_CACHE_DIR="$data_dir" \
+    LEAN_CTX_CONFIG_DIR="$data_dir" \
+    LEAN_CTX_DATA_DIR="$data_dir" \
+    LEAN_CTX_FULL_TOOLS=0 \
+    LEAN_CTX_HEADLESS=1 \
+    LEAN_CTX_MINIMAL=1 \
+    LEAN_CTX_PROJECT_ROOT="$project_root" \
+    LEAN_CTX_STATE_DIR="$data_dir" \
+    "$leanctx_binary"
+}
+
 stage_latest_github_binary() {
   local repository="$1"
   local prefix="$2"
@@ -3029,7 +3132,8 @@ stage_latest_github_binary() {
     return 1
   fi
 
-  if [[ -x "$destination" ]] && binary_reports_semver "$destination" "$version"; then
+  if managed_executable_is_safe "$destination" && \
+     binary_reports_semver "$destination" "$version"; then
     jq -cn --arg version "$version" --arg tag "$tag" \
       '{version: $version, tag: $tag, changed: false, staged_path: null}'
     return 0

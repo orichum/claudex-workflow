@@ -60,6 +60,11 @@ MCPs are intentionally conditional. Check that the project context has the
 required Docker profile or palace and that `orichum doctor` finds the MCP
 binaries.
 
+LeanCTX is included only inside a Git repository. `orichum doctor` verifies the
+managed binary and confirms that it advertises exactly Orichum's four allowed
+tools. If the check fails, rerun `./install.sh`; Orichum does not depend on a
+global LeanCTX setup or shell hook.
+
 For Graphify, inspect the exact repository state:
 
 ```bash

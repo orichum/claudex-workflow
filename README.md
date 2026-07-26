@@ -25,7 +25,8 @@ orichum
 - Selects the correct GitHub identity, MCP_DOCKER profile, Mempalace memory,
   and Graphify code graph from the project directory.
 - Keeps concurrent and resumed sessions isolated.
-- Uses Headroom to reduce prompt overhead without changing your source code.
+- Uses LeanCTX for compact current-source context and Headroom for request-path
+  optimization without changing your source code.
 
 You do not need to understand the routing architecture before using Orichum.
 Start with one provider and one project; add the other capabilities only when
@@ -200,6 +201,9 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
 - **Memory and code graphs:** Mempalace recalls durable decisions; Graphify
   answers structural repository questions. Both are used on demand. See
   [Memory and code graph](docs/memory-and-code-graph.md).
+- **Live source context:** LeanCTX gives the controller compact reads, search,
+  trees, and lossless expansion while preserving native-tool fallback. See
+  [LeanCTX](docs/leanctx.md).
 - **Plugins:** declare and synchronize optional Claude Code plugins through
   Orichum. See [Plugins](docs/plugins.md).
 - **MCP_DOCKER:** attach a project-specific Docker MCP Toolkit profile for Jira
@@ -227,6 +231,10 @@ The directory where you run `orichum` selects the project context. Orichum
 then creates an isolated session with fixed model and account routes, relevant
 MCPs, and its controller policy. Resident services are shared where safe;
 session-specific state remains private.
+
+Inside the session, current source context comes from LeanCTX, repository
+relationships come from Graphify, and durable project history comes from
+Mempalace. Headroom remains on the separate model-request path.
 
 Read [Architecture](docs/architecture.md) for service ownership, security
 boundaries, session isolation, and the complete request path.
@@ -268,6 +276,7 @@ delays, and installer port conflicts.
 | [Subagents](docs/subagents.md) | Automatic delegation, specialist roles, and the sole-writer policy |
 | [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
 | [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
+| [LeanCTX](docs/leanctx.md) | Compact current-source reads, isolation, fallbacks, and exact-read rules |
 | [Memory and code graph](docs/memory-and-code-graph.md) | Mempalace, Graphify, hooks, worktrees, and retrieval |
 | [Headroom](docs/headroom.md) | Compression behavior, service placement, and savings |
 | [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
@@ -290,6 +299,8 @@ delays, and installer port conflicts.
   provider authentication and model access.
 - [Headroom](https://github.com/chopratejas/headroom) — applies lossless prompt
   optimization.
+- [LeanCTX](https://github.com/yvgude/lean-ctx) — provides compact live file,
+  tree, and search context.
 - [Mempalace](https://github.com/MemPalace/mempalace) — provides durable
   project memory.
 - [Graphify](https://github.com/Graphify-Labs/graphify) — provides repository

@@ -214,6 +214,16 @@ class SessionConfigTests(unittest.TestCase):
         )
         return repository.resolve(strict=True)
 
+    def install_leanctx(self, data_root: Path | None = None) -> Path:
+        data_root = self.runtime if data_root is None else data_root
+        binary_dir = data_root / "bin"
+        binary_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        binary_dir.chmod(0o700)
+        binary = binary_dir / "lean-ctx"
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+        return binary.resolve(strict=True)
+
     def create_central_graph(
         self,
         repository: Path,
@@ -751,6 +761,106 @@ class SessionConfigTests(unittest.TestCase):
                 "command": "/opt/tools/graphify-mcp",
                 "args": ["--graph", str(snapshot)],
             },
+        )
+
+    def test_git_session_gets_private_bounded_leanctx_mcp(self) -> None:
+        repository = self.init_repository()
+        binary = self.install_leanctx()
+
+        session = self.create()
+        servers = json.loads(session.mcp_file.read_text())["mcpServers"]
+        leanctx_dir = session.run_dir / "leanctx"
+        config = leanctx_dir / "config.toml"
+
+        self.assertIn("leanctx", servers)
+        self.assertEqual(
+            servers["leanctx"],
+            {
+                "command": str(binary),
+                "args": [],
+                "env": {
+                    "LEAN_CTX_ALLOW_REROOT": "false",
+                    "LEAN_CTX_AUTONOMY": "false",
+                    "LEAN_CTX_BYPASS_HINTS": "off",
+                    "LEAN_CTX_CACHE_DIR": str(leanctx_dir),
+                    "LEAN_CTX_CONFIG_DIR": str(leanctx_dir),
+                    "LEAN_CTX_DATA_DIR": str(leanctx_dir),
+                    "LEAN_CTX_FULL_TOOLS": "0",
+                    "LEAN_CTX_HEADLESS": "1",
+                    "LEAN_CTX_MINIMAL": "1",
+                    "LEAN_CTX_PROJECT_ROOT": str(repository),
+                    "LEAN_CTX_STATE_DIR": str(leanctx_dir),
+                },
+            },
+        )
+        self.assertEqual(stat.S_IMODE(leanctx_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+        self.assertEqual(
+            config.read_text(encoding="utf-8"),
+            """compression_level = "lite"
+minimal_overhead = true
+tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand"]
+disabled_tools = ["ctx_call"]
+auto_capture = false
+buddy_enabled = false
+enable_wakeup_ctx = false
+journal_enabled = false
+max_index_threads = 2
+no_degrade = true
+prefer_native_editor = true
+proxy_enabled = false
+rules_injection = "off"
+shadow_mode = false
+shell_activation = "off"
+shell_hook_disabled = true
+update_check_disabled = true
+""",
+        )
+
+    def test_leanctx_config_tampering_invalidates_the_session(self) -> None:
+        self.init_repository()
+        self.install_leanctx()
+        session = self.create()
+        config = session.run_dir / "leanctx" / "config.toml"
+        if not config.is_file():
+            self.fail("LeanCTX config was not materialized")
+        config.write_text("tools_enabled = []\n", encoding="utf-8")
+        config.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            SessionError, "LeanCTX configuration does not match"
+        ):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+    def test_two_sessions_do_not_share_leanctx_state(self) -> None:
+        self.init_repository()
+        self.install_leanctx()
+
+        first = self.create()
+        second = self.create()
+        first_servers = json.loads(first.mcp_file.read_text())["mcpServers"]
+        second_servers = json.loads(second.mcp_file.read_text())["mcpServers"]
+        self.assertIn("leanctx", first_servers)
+        self.assertIn("leanctx", second_servers)
+        first_server = first_servers["leanctx"]
+        second_server = second_servers["leanctx"]
+
+        self.assertNotEqual(
+            first_server["env"]["LEAN_CTX_DATA_DIR"],
+            second_server["env"]["LEAN_CTX_DATA_DIR"],
+        )
+        self.assertEqual(
+            Path(first_server["env"]["LEAN_CTX_DATA_DIR"]).parent,
+            first.run_dir,
+        )
+        self.assertEqual(
+            Path(second_server["env"]["LEAN_CTX_DATA_DIR"]).parent,
+            second.run_dir,
         )
 
     def test_existing_session_snapshot_survives_central_replacement(self) -> None:

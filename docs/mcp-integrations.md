@@ -5,6 +5,7 @@ Only services relevant to the resolved project are included.
 
 | MCP | Loaded when | Purpose |
 |---|---|---|
+| LeanCTX | Launch is inside a Git repository and Orichum's managed binary is valid | Compact current-source reads, search, trees, and lossless expansion |
 | MCP_DOCKER | Context has a Docker profile and Docker is available | Project-specific Jira and other live-service tools |
 | Mempalace | Context palace exists and passes ownership checks | Durable project recall and bounded memory writes |
 | Graphify | A current central graph exactly matches the repository state | On-demand code-structure query before broad raw search |
@@ -29,11 +30,25 @@ tool approval and the live service's own authorization still apply.
 ## Isolation
 
 The generated MCP file belongs to one verified session context and is launched
-with strict MCP configuration. Mempalace inputs are rewritten to the verified
-project wing. For Graphify, the matching graph in private central storage is a
-validated source, not the MCP's live target. Each physical session copies its
-bytes into private `run_dir/graph.json` with mode `0600`, records the digest in
-immutable context, and points `mcp.json` at that snapshot.
+with strict MCP configuration.
+
+LeanCTX receives a project jail at the active Git root and a private
+`run_dir/leanctx` directory containing its deterministic mode-`0600` config and
+session-local data. Orichum exposes exactly four tools: `ctx_read`,
+`ctx_search`, `ctx_tree`, and `ctx_expand`. The universal `ctx_call` gateway is
+disabled, so hidden LeanCTX tools cannot be reached indirectly. Claude Code
+preapproves those exact four read-only tools; other MCP permissions are
+unchanged. Orichum does
+not invoke LeanCTX setup commands or enable its hooks, daemon, proxy, graph,
+memory, providers, autonomy, editing, or shell tools. If the managed binary is
+missing, unsafe, or the launch is outside a Git repository, LeanCTX is omitted
+and native Claude Code tools remain available.
+
+Mempalace inputs are rewritten to the verified project wing. For Graphify, the
+matching graph in private central storage is a validated source, not the MCP's
+live target. Each physical session copies its bytes into private
+`run_dir/graph.json` with mode `0600`, records the digest in immutable context,
+and points `mcp.json` at that snapshot.
 
 Session startup does not build or refresh a graph. Materialization retries once
 against the latest stable validated binding. If it obtains a stable match, the
@@ -45,5 +60,5 @@ immutable snapshot even if the central graph is later replaced. Queries are
 still on demand after Graphify is loaded; no graph payload is injected into
 every prompt.
 
-This avoids cross-project profile, memory, and graph leakage while allowing
-multiple projects, clones, worktrees, and sessions on one machine.
+This avoids cross-project context, profile, memory, and graph leakage while
+allowing multiple projects, clones, worktrees, and sessions on one machine.

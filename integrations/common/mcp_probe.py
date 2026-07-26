@@ -103,7 +103,12 @@ class McpClient:
                 self.process.wait(timeout=2)
 
 
-def probe(command: list[str], required_tools: list[str], timeout: float) -> None:
+def probe(
+    command: list[str],
+    required_tools: list[str],
+    exact_tools: list[str],
+    timeout: float,
+) -> None:
     client = McpClient(command, timeout)
     try:
         initialized = client.request("initialize", {
@@ -114,17 +119,45 @@ def probe(command: list[str], required_tools: list[str], timeout: float) -> None
         if not isinstance(initialized.get("serverInfo"), dict):
             raise ProbeError("MCP initialize response omitted serverInfo")
         client.notify("notifications/initialized", {})
-        listed = client.request("tools/list", {})
-        tools = listed.get("tools")
-        if not isinstance(tools, list):
-            raise ProbeError("MCP tools/list response omitted tools")
-        names = {
-            item.get("name") for item in tools
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
-        }
+        names: set[str] = set()
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            parameters = {} if cursor is None else {"cursor": cursor}
+            listed = client.request("tools/list", parameters)
+            tools = listed.get("tools")
+            if not isinstance(tools, list):
+                raise ProbeError("MCP tools/list response omitted tools")
+            names.update(
+                item["name"]
+                for item in tools
+                if isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+            )
+            next_cursor = listed.get("nextCursor")
+            if next_cursor is None:
+                break
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise ProbeError("MCP tools/list returned an invalid cursor")
+            if next_cursor in seen_cursors:
+                raise ProbeError("MCP tools/list repeated a cursor")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
         for required in required_tools:
             if required not in names:
                 raise ProbeError(f"required MCP tool is unavailable: {required}")
+        if exact_tools:
+            exact = set(exact_tools)
+            missing = sorted(exact - names)
+            if missing:
+                raise ProbeError(
+                    f"required MCP tool is unavailable: {missing[0]}"
+                )
+            unexpected = sorted(names - exact)
+            if unexpected:
+                raise ProbeError(
+                    f"unexpected MCP tool is available: {unexpected[0]}"
+                )
     finally:
         client.close()
 
@@ -133,6 +166,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--require-tool", action="append", default=[])
+    parser.add_argument("--exact-tool", action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     command = arguments.command
@@ -141,7 +175,12 @@ def main() -> int:
     if not command or arguments.timeout <= 0:
         parser.error("a command and positive timeout are required")
     try:
-        probe(command, arguments.require_tool, arguments.timeout)
+        probe(
+            command,
+            arguments.require_tool,
+            arguments.exact_tool,
+            arguments.timeout,
+        )
     except ProbeError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
