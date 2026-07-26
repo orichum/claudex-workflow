@@ -849,6 +849,10 @@ class OrichumCliTests(unittest.TestCase):
             "-r00000000-0000-4000-8000-000000000000",
             "--from-pr=123",
             "--safe-mode",
+            "--allowedTools=mcp__other__*",
+            "--allowed-tools",
+            "--disallowedTools=mcp__leanctx__ctx_read",
+            "--disallowed-tools",
         )
         for argument in blocked:
             with self.subTest(argument=argument):
@@ -893,6 +897,101 @@ class OrichumCliTests(unittest.TestCase):
         )
         self.assertTrue(launch.call_args.kwargs["resume"])
         self.assertEqual(launch.call_args.kwargs["arguments"], ["continue"])
+
+    def test_session_launch_preapproves_only_bounded_leanctx_tools(self) -> None:
+        data = self.root / "data"
+        config_home = self.root / "config"
+        state = data / "state"
+        run_dir = state / "sessions" / "run.test"
+        plugin = run_dir / "plugin"
+        for directory in (data / "bin", data / "model-config" / "current",
+                          config_home, state, run_dir, plugin):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        claudex = data / "bin" / "claudex"
+        shared_config = data / "model-config" / "current" / "claudex.toml"
+        policy = config_home / "controller-policy.md"
+        for path in (claudex, shared_config, policy):
+            path.write_text("test\n", encoding="utf-8")
+            path.chmod(0o700 if path == claudex else 0o600)
+        physical = SimpleNamespace(
+            run_dir=run_dir,
+            mcp_file=run_dir / "mcp.json",
+            effective_models_file=run_dir / "effective-models.json",
+            plugin_dir=plugin,
+            controller_model="gpt-5.6-sol",
+        )
+        prepared = SimpleNamespace(
+            logical=SimpleNamespace(
+                id="oc-s-0000000000000001",
+                claude_session_id="00000000-0000-4000-8000-000000000001",
+            ),
+            physical=physical,
+        )
+        paths = {
+            "data": data,
+            "config": config_home,
+            "state": state,
+        }
+        resolved = SimpleNamespace(documents={"runtime": {"controller": {
+            "effort": "high",
+            "maxToolUseConcurrency": 3,
+            "maxSubagentsPerSession": 24,
+        }}})
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "_runtime_service_ports",
+                return_value={
+                    "cliproxyPort": 8317,
+                    "headroomPort": 8787,
+                    "claudexProxyPort": 13457,
+                    "routeProxyPort": 13456,
+                },
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_reserve_session_claudex_port",
+                return_value=13458,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_materialize_session_claudex_config",
+                return_value=run_dir / "claudex.toml",
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_github_config_for_session",
+                return_value=None,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_session_environment",
+                return_value={"ORICHUM_SESSION_ID": prepared.logical.id},
+            ),
+            mock.patch.object(orichum_cli.os, "execvpe") as execute,
+        ):
+            orichum_cli._launch_session(
+                prepared,
+                paths,
+                resolved,
+                resume=False,
+                arguments=("-p", "read with LeanCTX"),
+            )
+
+        command = execute.call_args.args[1]
+        self.assertIn("--allowedTools", command)
+        allowed_index = command.index("--allowedTools")
+        self.assertEqual(
+            command[allowed_index + 1],
+            ",".join((
+                "mcp__leanctx__ctx_read",
+                "mcp__leanctx__ctx_search",
+                "mcp__leanctx__ctx_tree",
+                "mcp__leanctx__ctx_expand",
+            )),
+        )
+        self.assertNotIn("mcp__leanctx__*", command)
+        self.assertNotIn("--dangerously-skip-permissions", command)
 
     def test_sessions_empty_table_is_redacted(self) -> None:
         (self.root / "data" / "state").mkdir(parents=True, mode=0o700)

@@ -4,6 +4,10 @@ Headroom sits in the request path between each session's Claudex translator and
 the Orichum route proxy. It reduces repeated prompt material before the request
 reaches the selected provider.
 
+LeanCTX operates on a different path: it supplies compact current-source
+context through a per-session MCP. Orichum does not enable the LeanCTX request
+proxy, so Headroom remains the only wire/request compressor.
+
 Orichum enables lossless structural and AST-aware code compression. Kompress
 ML, cache, Headroom memory, effort routing, and output shaping are disabled.
 Those features either duplicate Orichum responsibilities or can change

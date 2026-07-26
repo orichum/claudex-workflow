@@ -216,6 +216,9 @@ case "$(uname -m)" in
     ;;
   *) workflow_die "unsupported CPU architecture: $(uname -m)" ;;
 esac
+leanctx_release_asset_suffix="$(
+  leanctx_release_suffix "$platform" "$claudex_arch"
+)"
 
 if [[ "$platform" == darwin ]]; then
   for command_name in launchctl plutil lsof; do
@@ -268,6 +271,7 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/headroom/config" \
   "$WORKFLOW_DATA_ROOT/headroom/state" \
   "$WORKFLOW_DATA_ROOT/headroom/tools"
+chmod 0700 "$WORKFLOW_DATA_ROOT/bin"
 
 installer_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-install.XXXXXX")"
 register_cleanup_path "$installer_temp"
@@ -423,8 +427,22 @@ claudex_state="$(stage_latest_github_binary \
   StringKe/claudex 'claudex-v' "-${claudex_arch}-${claudex_os}.tar.gz" \
   claudex "$WORKFLOW_DATA_ROOT/bin/claudex" "$installer_temp/claudex")"
 claudex_version="$(jq -r '.version' <<<"$claudex_state")"
+leanctx_state="$(stage_latest_github_binary \
+  yvgude/lean-ctx 'lean-ctx-' "$leanctx_release_asset_suffix" \
+  lean-ctx "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$installer_temp/leanctx")"
+leanctx_version="$(jq -r '.version' <<<"$leanctx_state")"
 cliproxy_binary_changed="$(jq -r '.changed' <<<"$cliproxy_state")"
 claudex_binary_changed="$(jq -r '.changed' <<<"$claudex_state")"
+leanctx_binary_changed="$(jq -r '.changed' <<<"$leanctx_state")"
+if [[ "$leanctx_binary_changed" == true ]]; then
+  leanctx_candidate="$(jq -r '.staged_path' <<<"$leanctx_state")"
+else
+  leanctx_candidate="$WORKFLOW_DATA_ROOT/bin/lean-ctx"
+fi
+probe_leanctx_capabilities \
+  "$leanctx_candidate" "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+  "$installer_temp" || \
+  workflow_die "LeanCTX failed the bounded headless MCP capability probe"
 headroom_models_file="$WORKFLOW_DATA_ROOT/headroom/config/models.json"
 
 desired_cliproxy_config="$installer_temp/cliproxy.yaml"
@@ -1001,6 +1019,7 @@ endpoint_lock_owned=false
 endpoint_lock_token=
 snapshot_path "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$snapshot_dir" cliproxy-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/bin/claudex" "$snapshot_dir" claudex-binary
+snapshot_path "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$snapshot_dir" leanctx-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/cliproxy.yaml" "$snapshot_dir" cliproxy-config
 snapshot_path "$service_file" "$snapshot_dir" cliproxy-service
 snapshot_path "$headroom_service_file" "$snapshot_dir" headroom-service
@@ -1025,6 +1044,10 @@ claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
 orichum_launcher_mutated=false
 private_tools_transaction_active=false
+leanctx_transaction_active=false
+if [[ "$leanctx_binary_changed" == true ]]; then
+  leanctx_transaction_active=true
+fi
 legacy_headroom_stopped=false
 headroom_health_is_ready() {
   local expected_version="$1"
@@ -1218,6 +1241,13 @@ rollback_install_transaction() {
     private_tool_state_matches \
       "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
       "$snapshot_dir/private-tools" || rollback_ready=false
+  fi
+
+  if [[ "${leanctx_transaction_active:-false}" == true ]]; then
+    restore_snapshot "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
+      "$snapshot_dir" leanctx-binary || rollback_ready=false
+    snapshot_path_matches "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
+      "$snapshot_dir" leanctx-binary || rollback_ready=false
   fi
 
   if [[ "$cliproxy_transaction_active" == true ]]; then
@@ -1644,6 +1674,10 @@ if [[ "$claudex_binary_changed" == true ]]; then
   activate_staged_file "$(jq -r '.staged_path' <<<"$claudex_state")" \
     "$WORKFLOW_DATA_ROOT/bin/claudex" 0755
 fi
+if [[ "$leanctx_binary_changed" == true ]]; then
+  activate_staged_file "$(jq -r '.staged_path' <<<"$leanctx_state")" \
+    "$WORKFLOW_DATA_ROOT/bin/lean-ctx" 0755
+fi
 if [[ "$cliproxy_config_changed" == changed ]]; then
   activate_staged_file "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/cliproxy.yaml" 0600
 fi
@@ -1857,8 +1891,8 @@ if [[ "$headroom_restart_required" == true ]]; then
     headroom_action=installed
   fi
 fi
-printf 'Installed Orichum with Claudex %s and CLIProxyAPI %s for %s.\n' \
-  "$claudex_version" "$cliproxy_version" "$platform"
+printf 'Installed Orichum with Claudex %s, CLIProxyAPI %s, and LeanCTX %s for %s.\n' \
+  "$claudex_version" "$cliproxy_version" "$leanctx_version" "$platform"
 print_install_summary \
   "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$USER_BIN_DIR" \
   "$WORKFLOW_DATA_ROOT/bin/claudex" \
@@ -1870,7 +1904,8 @@ print_install_summary \
   "$ROUTE_PROXY_LISTEN_PORT" \
   "$claudex_proxy_action" \
   "$ORICHUM_PYTHON" "$orichum_python_version" \
-  "$orichum_python_candidate" "$orichum_python_action"
+  "$orichum_python_candidate" "$orichum_python_action" \
+  "$WORKFLOW_DATA_ROOT/bin/lean-ctx"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"
@@ -1890,6 +1925,7 @@ claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=false
 private_tools_transaction_active=false
+leanctx_transaction_active=false
 python_transaction_active=false
 config_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false

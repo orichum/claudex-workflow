@@ -35,6 +35,7 @@ from .cliproxy_management import (
     patch_auth_fields,
 )
 from .github_identity import GithubIdentityError, ensure_github_identity
+from .leanctx_contract import TOOLS as LEANCTX_TOOLS
 from .orichum_config import (
     ConfigError,
     ResolvedConfig,
@@ -1208,6 +1209,10 @@ _OWNED_CLAUDE_OPTIONS = (
     "--mcp-config",
     "--strict-mcp-config",
     "--permission-mode",
+    "--allowedTools",
+    "--allowed-tools",
+    "--disallowedTools",
+    "--disallowed-tools",
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
     "--session-id",
@@ -1712,6 +1717,8 @@ def _launch_session(
         "--mcp-config",
         str(physical.mcp_file),
         "--strict-mcp-config",
+        "--allowedTools",
+        ",".join(f"mcp__leanctx__{tool}" for tool in LEANCTX_TOOLS),
         "--effort",
         runtime["effort"],
         "--append-system-prompt-file",

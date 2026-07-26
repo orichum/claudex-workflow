@@ -40,10 +40,18 @@ for line in sys.stdin:
             "serverInfo": {"name": "fake", "version": "1"},
         }
     elif method == "tools/list":
-        result = {"tools": [
-            {"name": "query_graph", "inputSchema": {"type": "object"}},
-            {"name": "graph_stats", "inputSchema": {"type": "object"}},
-        ]}
+        cursor = request.get("params", {}).get("cursor")
+        if os.environ.get("FAKE_MCP_PAGINATED") == "1" and cursor == "page-2":
+            result = {"tools": [
+                {"name": "ctx_call", "inputSchema": {"type": "object"}},
+            ]}
+        else:
+            result = {"tools": [
+                {"name": "query_graph", "inputSchema": {"type": "object"}},
+                {"name": "graph_stats", "inputSchema": {"type": "object"}},
+            ]}
+            if os.environ.get("FAKE_MCP_PAGINATED") == "1":
+                result["nextCursor"] = "page-2"
     else:
         continue
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
@@ -51,13 +59,23 @@ for line in sys.stdin:
             encoding="utf-8",
         )
 
-    def run_probe(self, *required: str, broken: bool = False) -> subprocess.CompletedProcess:
+    def run_probe(
+        self,
+        *required: str,
+        exact: tuple[str, ...] = (),
+        broken: bool = False,
+        paginated: bool = False,
+    ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         if broken:
             environment["FAKE_MCP_BROKEN"] = "1"
+        if paginated:
+            environment["FAKE_MCP_PAGINATED"] = "1"
         command = [sys.executable, str(PROBE)]
         for tool in required:
             command.extend(["--require-tool", tool])
+        for tool in exact:
+            command.extend(["--exact-tool", tool])
         command.extend(["--", sys.executable, str(self.server)])
         return subprocess.run(
             command, env=environment, text=True, capture_output=True, check=False,
@@ -73,6 +91,31 @@ for line in sys.stdin:
         completed = self.run_probe("missing_tool")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("required MCP tool is unavailable: missing_tool", completed.stderr)
+
+    def test_accepts_an_exact_tool_surface(self):
+        completed = self.run_probe(
+            exact=("query_graph", "graph_stats"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_rejects_an_unexpected_advertised_tool(self):
+        completed = self.run_probe(exact=("query_graph",))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "unexpected MCP tool is available: graph_stats",
+            completed.stderr,
+        )
+
+    def test_exact_surface_checks_every_tools_page(self):
+        completed = self.run_probe(
+            exact=("query_graph", "graph_stats"),
+            paginated=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "unexpected MCP tool is available: ctx_call",
+            completed.stderr,
+        )
 
     def test_rejects_an_entrypoint_whose_help_works_but_runtime_fails(self):
         help_check = subprocess.run(

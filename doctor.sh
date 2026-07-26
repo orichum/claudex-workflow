@@ -7,6 +7,8 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 data_root="$(workflow_data_dir)"
 config_root="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
 failures=0
+doctor_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-doctor.XXXXXX")"
+trap 'rm -rf -- "$doctor_temp"' EXIT
 
 ok() { printf 'OK   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; failures=$((failures + 1)); }
@@ -73,6 +75,17 @@ if [[ -x "$data_root/bin/claudex" ]] && \
   ok "Claudex runtime is executable ($data_root/bin/claudex)"
 else
   fail "Claudex runtime is unavailable ($data_root/bin/claudex)"
+fi
+
+leanctx_binary="$data_root/bin/lean-ctx"
+if managed_executable_is_safe "$leanctx_binary" && \
+   "$leanctx_binary" --version >/dev/null 2>&1 && \
+   probe_leanctx_capabilities \
+     "$leanctx_binary" "$orichum_python" "$WORKFLOW_ROOT" \
+     "$doctor_temp" >/dev/null 2>&1; then
+  ok "LeanCTX exposes the bounded headless MCP surface ($leanctx_binary)"
+else
+  fail "LeanCTX is unavailable or exposes tools outside Orichum policy"
 fi
 
 if command -v claude >/dev/null 2>&1; then

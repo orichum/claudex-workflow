@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Optional
 
 from integrations.common.graph_manager import GraphBinding, resolve_available_graph
+from integrations.common.leanctx_contract import (
+    config_bytes as leanctx_config_bytes,
+    mcp_server as leanctx_mcp_server,
+)
 from integrations.common.model_routing import (
     EffectiveStack,
     ROLES,
@@ -436,7 +440,9 @@ def _verified_snapshot_graph(
 
 
 def _session_mcp_payload(
-    context: dict[str, object], run_dir: Optional[Path] = None
+    context: dict[str, object],
+    run_dir: Optional[Path] = None,
+    data_root: Optional[Path] = None,
 ) -> dict[str, object]:
     """Expose only installed, project-relevant MCP servers for this session."""
     servers: dict[str, object] = {}
@@ -476,11 +482,23 @@ def _session_mcp_payload(
             "args": ["--graph", str(graph)],
         }
 
+    if run_dir is not None and data_root is not None:
+        binary = _leanctx_binary(data_root)
+        repository = context.get("repoRootReal")
+        if binary is not None and isinstance(repository, str) and repository:
+            servers["leanctx"] = leanctx_mcp_server(
+                binary,
+                Path(repository),
+                run_dir / "leanctx",
+            )
+
     return {"mcpServers": servers}
 
 
-def atomic_json(path: Path, payload: dict, mode: int = 0o600) -> bytes:
-    """Write canonical JSON through an exclusive no-follow same-directory file."""
+def atomic_private_bytes(
+    path: Path, data: bytes, mode: int = 0o600
+) -> bytes:
+    """Write private bytes through an exclusive no-follow temporary file."""
     if mode != 0o600:
         raise SessionError("session files must use mode 0600")
     path = _absolute_lexical(path)
@@ -498,7 +516,6 @@ def atomic_json(path: Path, payload: dict, mode: int = 0o600) -> bytes:
     else:
         raise SessionError("session file already exists")
 
-    data = _canonical_json_bytes(payload)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
@@ -546,6 +563,79 @@ def atomic_json(path: Path, payload: dict, mode: int = 0o600) -> bytes:
                 pass
         os.close(directory_fd)
     return data
+
+
+def atomic_json(path: Path, payload: dict, mode: int = 0o600) -> bytes:
+    """Write canonical JSON through a private atomic file."""
+    return atomic_private_bytes(path, _canonical_json_bytes(payload), mode)
+
+
+def _leanctx_binary(data_root: Path) -> Path | None:
+    try:
+        binary_dir = _require_directory(
+            data_root / "bin",
+            parent=data_root,
+            expected_mode=0o700,
+        )
+        return _require_owned_file(
+            binary_dir,
+            binary_dir / "lean-ctx",
+            0o755,
+        )
+    except SessionError:
+        return None
+
+
+def _materialize_leanctx(
+    context: dict[str, object],
+    data_root: Path,
+    run_dir: Path,
+) -> None:
+    repository = context.get("repoRootReal")
+    if (
+        _leanctx_binary(data_root) is None
+        or not isinstance(repository, str)
+        or not repository
+    ):
+        return
+    directory = require_owned_component(
+        run_dir,
+        "leanctx",
+        private=True,
+        create=True,
+    )
+    atomic_private_bytes(
+        directory / "config.toml",
+        leanctx_config_bytes(),
+        0o600,
+    )
+
+
+def _verify_leanctx(
+    context: dict[str, object],
+    data_root: Path,
+    run_dir: Path,
+) -> None:
+    repository = context.get("repoRootReal")
+    if (
+        _leanctx_binary(data_root) is None
+        or not isinstance(repository, str)
+        or not repository
+    ):
+        return
+    try:
+        directory = require_private_direct_child(
+            run_dir,
+            run_dir / "leanctx",
+            expected_mode=0o700,
+        )
+        observed = _read_owned_file(directory, "config.toml", 0o600)
+    except SessionError as error:
+        raise SessionError(
+            "LeanCTX configuration is unavailable or unsafe"
+        ) from error
+    if not hmac.compare_digest(observed, leanctx_config_bytes()):
+        raise SessionError("LeanCTX configuration does not match its contract")
 
 
 def _validate_file_stat(observed: os.stat_result, expected_mode: int) -> None:
@@ -877,11 +967,12 @@ def _materialize_session_once(
         materialize_runtime_plugin(
             plugin_source, run_dir / "plugin", effective
         )
+        _materialize_leanctx(physical_context, data_root, run_dir)
 
         mcp_file = run_dir / "mcp.json"
         atomic_json(
             mcp_file,
-            _session_mcp_payload(physical_context, run_dir),
+            _session_mcp_payload(physical_context, run_dir, data_root),
             0o600,
         )
         session = verify_session(
@@ -1257,10 +1348,16 @@ def verify_session(
         run_dir.name,
         data_root,
     )
+    verified_data_root = binding.run_dir.parents[2]
+    _verify_leanctx(binding.context, verified_data_root, binding.run_dir)
     mcp_file = binding.run_dir / "mcp.json"
     mcp_bytes = _read_owned_file(binding.run_dir, "mcp.json", 0o600)
     if mcp_bytes != _canonical_json_bytes(
-        _session_mcp_payload(binding.context, binding.run_dir)
+        _session_mcp_payload(
+            binding.context,
+            binding.run_dir,
+            verified_data_root,
+        )
     ):
         raise _SessionMcpMismatch(
             "session MCP configuration does not match its context"

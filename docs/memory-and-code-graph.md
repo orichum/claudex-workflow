@@ -1,7 +1,9 @@
 # Memory and code graph
 
-Mempalace and Graphify solve different problems:
+LeanCTX, Mempalace, and Graphify solve different problems:
 
+- LeanCTX retrieves compact current source and shell-independent search
+  context for the live session.
 - Mempalace recalls durable project decisions and conventions.
 - Graphify describes current repository structure and relationships.
 
@@ -85,6 +87,9 @@ repository-local Graphify output.
 
 ## During a session
 
+- LeanCTX handles current file reads, source search, tree views, and expansion
+  from its private per-session cache. It is never the durable memory or
+  repository relationship authority.
 - The controller recalls Mempalace only when prior decisions or durable
   conventions matter.
 - A hook binds every Mempalace call to the verified project wing.
@@ -93,8 +98,9 @@ repository-local Graphify output.
 - Broad graph or memory payloads are not injected automatically into every
   prompt.
 
-This on-demand design keeps the tools useful without paying their schema and
-retrieval cost on unrelated tasks.
+This on-demand design keeps the tools useful without injecting source, graph,
+or memory payloads into every prompt. LeanCTX's advertised surface is fixed at
+four tools; Graphify and Mempalace remain conditional on project state.
 
 Session startup never builds, updates, migrates, or prunes graphs. It accepts a
 central graph only when that graph is current and stable for the exact
