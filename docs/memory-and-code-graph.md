@@ -100,7 +100,7 @@ repository-local Graphify output.
 
 This on-demand design keeps the tools useful without injecting source, graph,
 or memory payloads into every prompt. LeanCTX's advertised surface is fixed at
-nine tools; Graphify and Mempalace remain conditional on project state.
+ten tools; Graphify and Mempalace remain conditional on project state.
 
 Session startup never builds, updates, migrates, or prunes graphs. It accepts a
 central graph only when that graph is current and stable for the exact

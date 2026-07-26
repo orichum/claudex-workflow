@@ -51,6 +51,18 @@ def _is_deferred(tool: object) -> bool:
     return isinstance(tool, dict) and tool.get("defer_loading") is True
 
 
+def _well_formed_tool(tool: object) -> bool:
+    if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+        return False
+    if "type" in tool:
+        if not isinstance(tool["type"], str):
+            return False
+        return "input_schema" not in tool or isinstance(
+            tool["input_schema"], dict
+        )
+    return isinstance(tool.get("input_schema"), dict)
+
+
 def _eligible_client_tool(tool: object) -> bool:
     if not isinstance(tool, dict):
         return False
@@ -106,6 +118,8 @@ def transform_request(body: bytes) -> TransformResult:
         return TransformResult(body, False)
     tools = document.get("tools")
     if not isinstance(tools, list) or len(tools) < MINIMUM_TOOLS:
+        return TransformResult(body, False)
+    if not all(_well_formed_tool(tool) for tool in tools):
         return TransformResult(body, False)
     if any(_is_tool_search(tool) or _is_deferred(tool) for tool in tools):
         return TransformResult(body, False)

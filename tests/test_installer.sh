@@ -922,6 +922,14 @@ printf '{"claudexProxyPort":13459,"cliproxyPort":18319,"headroomPort":18789,"rou
   >"$(service_ports_file "$ports_root")"
 [[ "$(read_service_ports "$ports_root")" == \
    $'18319\t13459\t13458' ]]
+printf '{"cliproxyPort":18320,"headroomPort":18790}\n' \
+  >"$(service_ports_file "$ports_root")"
+[[ "$(read_service_ports "$ports_root")" == \
+   $'18320\t13456\t13457' ]]
+printf '{"claudexProxyPort":13460,"cliproxyPort":18321,"headroomPort":18791}\n' \
+  >"$(service_ports_file "$ports_root")"
+[[ "$(read_service_ports "$ports_root")" == \
+   $'18321\t13456\t13460' ]]
 if write_service_ports "$ports_root" 18317 18317 13457; then
   printf 'duplicate ports were accepted\n' >&2
   exit 1

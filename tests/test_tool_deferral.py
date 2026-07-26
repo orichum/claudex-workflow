@@ -20,7 +20,7 @@ def client_tools(count: int, prefix: str = "tool_") -> list[dict]:
     return [client_tool(f"{prefix}{index}") for index in range(count)]
 
 
-def request(model: str, tools: list[dict]) -> bytes:
+def request(model: str, tools: list[object]) -> bytes:
     return json.dumps(
         {"model": model, "messages": [], "tools": tools},
         separators=(",", ":"),
@@ -56,6 +56,34 @@ class ToolDeferralTests(unittest.TestCase):
         result = transform_request(body)
         self.assertFalse(result.transformed)
         self.assertIs(result.body, body)
+
+    def test_malformed_tool_entry_is_byte_preserving(self) -> None:
+        malformed_entries = (
+            "scalar",
+            [],
+            None,
+            {"input_schema": {"type": "object"}},
+            {"name": 7, "input_schema": {"type": "object"}},
+            {"name": "missing_schema"},
+            {"name": "invalid_schema", "input_schema": []},
+            {
+                "name": "invalid_type",
+                "type": 7,
+                "input_schema": {"type": "object"},
+            },
+            {"type": "web_search_20250305"},
+        )
+        for malformed in malformed_entries:
+            with self.subTest(malformed=malformed):
+                tools: list[object] = [
+                    client_tool("Bash"),
+                    *client_tools(11),
+                ]
+                tools[1] = malformed
+                body = request("gpt-5.6-sol", tools)
+                result = transform_request(body)
+                self.assertFalse(result.transformed)
+                self.assertIs(result.body, body)
 
     def test_specialized_client_tools_are_deferred(self) -> None:
         tools = [

@@ -191,6 +191,23 @@ fi
 [[ "$(readlink "$stale_bin/graphify-mcp")" == \
    "$stale_legacy_tools/graphifyy/bin/graphify-mcp" ]]
 
+unsafe_preflight_data="$fixture/unsafe-preflight-data"
+unsafe_preflight_external="$fixture/unsafe-preflight-external"
+install -d -m 0700 \
+  "$unsafe_preflight_data" "$unsafe_preflight_external"
+printf 'external-unchanged\n' >"$unsafe_preflight_external/owner-marker"
+ln -s "$unsafe_preflight_external" "$unsafe_preflight_data/tools"
+declare -F preflight_private_tool_layout >/dev/null
+if preflight_private_tool_layout "$unsafe_preflight_data" \
+    2>"$fixture/unsafe-preflight.stderr"; then
+  printf 'symlinked private tools root passed early preflight\n' >&2
+  exit 1
+fi
+rg -Fq 'private tools root is unsafe' "$fixture/unsafe-preflight.stderr"
+[[ "$(<"$unsafe_preflight_external/owner-marker")" == external-unchanged ]]
+[[ ! -e "$unsafe_preflight_external/bin" ]]
+[[ ! -e "$unsafe_preflight_external/uv" ]]
+
 endpoint_normalization_failed=false
 for endpoint_fixture in \
     production-three-file:legacy-three \

@@ -149,6 +149,27 @@ send(
         "model": anthropic[1],
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "Reply with one word."}],
+        "tools": [
+            {
+                "name": "Bash",
+                "description": "Run a shell command.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            *[
+                {
+                    "name": f"live_compatibility_tool_{index}",
+                    "description": "A compatibility test tool.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                }
+                for index in range(11)
+            ],
+        ],
     },
     {"anthropic-version": "2023-06-01"},
 )

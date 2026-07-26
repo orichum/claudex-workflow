@@ -219,6 +219,8 @@ fi
 preflight_owned_headroom_installation \
   "$platform" "$WORKFLOW_DATA_ROOT" || \
   workflow_die "legacy Orichum Headroom installation is unsafe"
+preflight_private_tool_layout "$WORKFLOW_DATA_ROOT" || \
+  workflow_die "private Orichum tools root is unsafe"
 
 install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state" "$ORICHUM_CONFIG_ROOT"

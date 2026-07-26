@@ -431,7 +431,31 @@ read_service_ports() {
         $candidate
       );
     select(type == "object") |
-    if keys == ["cliproxyPort", "headroomPort", "routeProxyPort"] then
+    if keys == ["cliproxyPort", "headroomPort"] then
+      . as $legacy |
+      ($legacy + {routeProxyPort:
+        next_port([
+          $legacy.cliproxyPort,
+          $legacy.headroomPort,
+          13456
+        ])}) |
+      . + {claudexProxyPort:
+        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])} |
+      del(.headroomPort)
+    elif keys == [
+      "claudexProxyPort",
+      "cliproxyPort",
+      "headroomPort"
+    ] then
+      {
+        routeProxyPort: .claudexProxyPort,
+        cliproxyPort,
+        headroomPort
+      } |
+      . + {claudexProxyPort:
+        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])} |
+      del(.headroomPort)
+    elif keys == ["cliproxyPort", "headroomPort", "routeProxyPort"] then
       . as $legacy |
       {
         claudexProxyPort: next_port([
@@ -2025,6 +2049,25 @@ run_rollback_if_active() {
   local rollback_handler="$2"
   [[ "$transaction_active" == true ]] || return 0
   "$rollback_handler"
+}
+
+preflight_private_tool_layout() {
+  local data_root="$1"
+  local component
+  local current_uid
+  [[ "$data_root" == /* && "$data_root" != / ]] || return 1
+  current_uid="$(id -u)"
+  for component in \
+      "$data_root" "$data_root/tools" \
+      "$data_root/tools/bin" "$data_root/tools/uv"; do
+    if [[ -e "$component" || -L "$component" ]]; then
+      [[ -d "$component" && ! -L "$component" ]] && \
+        [[ "$(path_uid "$component")" == "$current_uid" ]] || {
+          workflow_die "private tools root is unsafe"
+          return 1
+        }
+    fi
+  done
 }
 
 private_tool_layout_is_owned() {
