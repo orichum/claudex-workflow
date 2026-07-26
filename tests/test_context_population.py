@@ -19,6 +19,7 @@ from integrations.common.context_population import (
     discover_git_worktrees,
 )
 from integrations.common import context_population
+from integrations.common.graph_hooks import graph_hook_status
 
 
 class ContextPopulationDiscoveryTests(unittest.TestCase):
@@ -356,12 +357,15 @@ class ContextPopulationExecutionTests(unittest.TestCase):
         self.fake_package_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name).resolve()
         self.palace = self.root / "palace"
+        self.data_root = self.root / "orichum-data"
+        self.data_root.mkdir(mode=0o700)
         self.calls_path = self.root / "calls.jsonl"
         self.original_path = os.environ.get("PATH", "")
         self.environ = {
             "PATH": f"{self.tool_directory.name}{os.pathsep}{self.original_path}",
             "CONTEXT_POPULATION_CALL_LOG": str(self.calls_path),
             "PYTHONPATH": self.fake_package_directory.name,
+            "ORICHUM_DATA_HOME": str(self.data_root),
         }
         fake_mempalace = Path(self.fake_package_directory.name) / "mempalace"
         fake_mempalace.mkdir()
@@ -383,6 +387,7 @@ class ContextPopulationExecutionTests(unittest.TestCase):
             """#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -422,14 +427,30 @@ if operation in {"extract", "update"}:
         print("found 0 code")
         print("graph is empty", file=sys.stderr)
         raise SystemExit(1)
-    graph = repository / "graphify-out" / "graph.json"
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    graph = Path(os.environ["GRAPHIFY_OUT"]) / "graph.json"
     graph.parent.mkdir(exist_ok=True)
     if repository.name == "invalid":
         graph.write_text("not json", encoding="utf-8")
     elif repository.name == "empty-nodes":
-        graph.write_text(json.dumps({"nodes": []}), encoding="utf-8")
+        graph.write_text(
+            json.dumps({"built_at_commit": commit, "nodes": [], "links": []}),
+            encoding="utf-8",
+        )
     else:
-        graph.write_text(json.dumps({"nodes": [{"id": "node"}]}), encoding="utf-8")
+        graph.write_text(
+            json.dumps({
+                "built_at_commit": commit,
+                "nodes": [{"id": "node"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
     raise SystemExit(0)
 
 if operation == "hook":
@@ -448,6 +469,25 @@ if operation == "hook":
         path.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["git", "init", "-q", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        fixture = path / ".context-population-fixture"
+        fixture.write_text("fixture\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(path), "add", fixture.name],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(path),
+                "-c", "user.name=Claudex Tests",
+                "-c", "user.email=claudex-tests@example.invalid",
+                "commit", "-qm", "fixture",
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -514,20 +554,42 @@ if operation == "hook":
         self.assertEqual(
             [call for call in calls if call["tool"] == "graphify"],
             [
-                {"tool": "graphify", "args": ["extract", str(api), "--code-only"], "cwd": str(Path.cwd())},
-                {"tool": "graphify", "args": ["hook", "install"], "cwd": str(api)},
-                {"tool": "graphify", "args": ["hook", "status"], "cwd": str(api)},
-                {"tool": "graphify", "args": ["extract", str(web), "--code-only"], "cwd": str(Path.cwd())},
-                {"tool": "graphify", "args": ["hook", "install"], "cwd": str(web)},
-                {"tool": "graphify", "args": ["hook", "status"], "cwd": str(web)},
+                {
+                    "tool": "graphify",
+                    "args": ["extract", str(api), "--code-only"],
+                    "cwd": str(api),
+                },
+                {
+                    "tool": "graphify",
+                    "args": ["extract", str(web), "--code-only"],
+                    "cwd": str(web),
+                },
             ],
+        )
+        self.assertLess(
+            max(
+                index for index, call in enumerate(calls)
+                if call["tool"] == "mempalace"
+            ),
+            min(
+                index for index, call in enumerate(calls)
+                if call["tool"] == "graphify"
+            ),
         )
         self.assertEqual(
             tuple(row.repository for row in result.repositories), (api, web)
         )
         self.assertEqual(len(result.repositories), 2)
         self.assertEqual({row.action for row in result.repositories}, {"created"})
-        self.assertEqual({row.hook_status for row in result.repositories}, {"installed"})
+        self.assertEqual(
+            {row.hook_status for row in result.repositories}, {"not managed"}
+        )
+        self.assertFalse((api / "graphify-out").exists())
+        self.assertFalse((web / "graphify-out").exists())
+        self.assertEqual(
+            len(tuple((self.data_root / "graphs").rglob("graph.json"))),
+            2,
+        )
         self.assertEqual(result.palace, self.palace)
         self.assertEqual(result.wing, "acme")
 
@@ -592,10 +654,21 @@ if operation == "hook":
     def test_mempalace_mine_excludes_graphify_output_without_editing_repository(self):
         repository = self.root / "service"
         self.init_git(repository)
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         generated = repository / "graphify-out"
         generated.mkdir()
         (generated / "graph.json").write_text(
-            json.dumps({"nodes": [{"id": "generated"}]}), encoding="utf-8"
+            json.dumps({
+                "built_at_commit": revision,
+                "nodes": [{"id": "generated"}],
+                "links": [],
+            }),
+            encoding="utf-8",
         )
         source = repository / "service.py"
         source.write_text("print('source')\n", encoding="utf-8")
@@ -676,22 +749,40 @@ if operation == "hook":
 
         self.assertEqual(self.read_calls(), [])
 
-    def test_existing_graph_is_updated(self):
+    def test_existing_repository_local_graph_is_migrated(self):
         repository = self.root / "api"
         self.init_git(repository)
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         graph = repository / "graphify-out" / "graph.json"
         graph.parent.mkdir()
-        graph.write_text(json.dumps({"nodes": [{"id": "old"}]}), encoding="utf-8")
+        graph.write_text(
+            json.dumps({
+                "built_at_commit": revision,
+                "nodes": [{"id": "old"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
 
         result = self.populate()
 
-        self.assertEqual(result.repositories[0].action, "updated")
-        self.assertIn(
-            ["update", str(repository)],
-            [call["args"] for call in self.read_calls() if call["tool"] == "graphify"],
+        self.assertEqual(result.repositories[0].action, "migrated")
+        self.assertFalse((repository / "graphify-out").exists())
+        self.assertNotIn(
+            "update",
+            [
+                call["args"][0]
+                for call in self.read_calls()
+                if call["tool"] == "graphify"
+            ],
         )
 
-    def test_relative_tool_path_is_canonical_before_hook_cwd_changes(self):
+    def test_relative_tool_path_is_canonical_for_central_sync(self):
         repository = self.root / "api"
         self.init_git(repository)
         relative_tools = os.path.relpath(self.tool_directory.name, Path.cwd())
@@ -704,95 +795,12 @@ if operation == "hook":
             )
             result = context_population.populate_context(self.root, self.palace, "acme")
 
-        self.assertEqual(result.repositories[0].hook_status, "installed")
+        self.assertEqual(result.repositories[0].hook_status, "not managed")
         hook_calls = [
             call for call in self.read_calls()
             if call["tool"] == "graphify" and call["args"][0] == "hook"
         ]
-        self.assertEqual([call["cwd"] for call in hook_calls], [str(repository), str(repository)])
-
-    def test_rejects_escaping_existing_graph_before_graphify_update(self):
-        repository = self.root / "api"
-        outside = self.root / "outside"
-        self.init_git(repository)
-        outside.mkdir()
-        (outside / "graph.json").write_text(
-            json.dumps({"nodes": [{"id": "outside"}]}), encoding="utf-8"
-        )
-        (repository / "graphify-out").symlink_to(outside, target_is_directory=True)
-
-        with self.assertRaisesRegex(PopulationError, "Graphify graph validation"):
-            self.populate()
-
-        self.assertNotIn(
-            ["update", str(repository)],
-            [call["args"] for call in self.read_calls() if call["tool"] == "graphify"],
-        )
-
-    def test_rejects_existing_fifo_graph_before_graphify_update(self):
-        repository = self.root / "api"
-        self.init_git(repository)
-        graph = repository / "graphify-out" / "graph.json"
-        graph.parent.mkdir()
-        os.mkfifo(graph)
-
-        progress = []
-        with mock.patch.object(
-            context_population,
-            "_require_success",
-            side_effect=AssertionError("Graphify must not run"),
-        ) as require_success, self.assertRaisesRegex(
-            PopulationError, "Graphify graph validation"
-        ):
-            context_population._populate_repository(
-                repository, "/fake/graphify", progress=progress.append
-            )
-
-        require_success.assert_not_called()
-        self.assertEqual(
-            progress,
-            ["[graphify 1/1] validating existing graph for api"],
-        )
-
-    def test_graph_parser_rejects_a_fifo_without_blocking(self):
-        repository = self.root / "api"
-        repository.mkdir()
-        graph = repository / "graphify-out" / "graph.json"
-        graph.parent.mkdir()
-        os.mkfifo(graph)
-
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "from pathlib import Path; "
-                    "from integrations.common.context_population import _validate_graph; "
-                    f"_validate_graph(Path({str(repository)!r}), Path({str(graph)!r}))"
-                ),
-            ],
-            cwd=REPO_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("Graphify graph validation failed", completed.stderr)
-
-    def test_graph_parser_rechecks_the_open_descriptor_file_type(self):
-        repository = self.root / "api"
-        graph = repository / "graphify-out" / "graph.json"
-
-        with mock.patch.object(
-            context_population,
-            "_require_regular_graph",
-            return_value=Path(os.devnull),
-        ), self.assertRaisesRegex(
-            PopulationError, "Graphify graph validation"
-        ):
-            context_population._validate_graph(repository, graph)
+        self.assertEqual(hook_calls, [])
 
     def test_empty_code_repository_is_not_applicable(self):
         repository = self.root / "empty"
@@ -813,7 +821,7 @@ if operation == "hook":
             ),),
         )
         self.assertIn(
-            "[graphify 1/1] no supported code; skipped — 00:03",
+            "[graphify 1/1] not-applicable empty",
             progress,
         )
 
@@ -822,20 +830,20 @@ if operation == "hook":
             with self.subTest(name=name):
                 repository = self.root / name
                 self.init_git(repository)
-                with self.assertRaisesRegex(PopulationError, "Graphify graph validation"):
+                with self.assertRaisesRegex(PopulationError, "Graphify graph is invalid"):
                     self.populate()
                 shutil.rmtree(repository)
 
-    def test_hook_install_and_status_failures_are_rejected(self):
+    def test_population_defers_upstream_graphify_hooks(self):
         self.init_git(self.root / "api")
-        for variable, value, message in (
-            ("CONTEXT_POPULATION_HOOK_INSTALL_FAIL", "1", "Graphify hook install"),
-            ("CONTEXT_POPULATION_HOOK_NOT_INSTALLED", "1", "Graphify hook status"),
-        ):
-            with self.subTest(variable=variable):
-                with mock.patch.dict(os.environ, {**self.environ, variable: value}, clear=False), \
-                     self.assertRaisesRegex(PopulationError, message):
-                    context_population.populate_context(self.root, self.palace, "acme")
+
+        result = self.populate()
+
+        self.assertEqual(result.repositories[0].hook_status, "not managed")
+        self.assertFalse(any(
+            call["tool"] == "graphify" and call["args"][0] == "hook"
+            for call in self.read_calls()
+        ))
 
     def test_missing_tools_are_rejected_but_graphify_is_not_needed_without_repositories(self):
         original_which = context_population.shutil.which
@@ -873,7 +881,9 @@ if operation == "hook":
             os.environ,
             {**self.environ, "CONTEXT_POPULATION_GRAPHIFY_FAILURE": "api"},
             clear=False,
-        ), self.assertRaisesRegex(PopulationError, "Graphify extract.*api") as caught:
+        ), self.assertRaisesRegex(
+            PopulationError, "Graphify failed with exit code 1"
+        ) as caught:
             context_population.populate_context(self.root, self.palace, "acme")
 
         message = str(caught.exception)
@@ -894,7 +904,9 @@ if operation == "hook":
             clear=False,
         ), self.assertRaises(PopulationError):
             context_population.populate_context(self.root, self.palace, "acme")
-        self.assertTrue((first / "graphify-out" / "graph.json").is_file())
+        first_graphs = tuple((self.data_root / "graphs").rglob("graph.json"))
+        self.assertEqual(len(first_graphs), 1)
+        self.assertFalse((first / "graphify-out").exists())
 
         result = self.populate()
 
@@ -928,41 +940,13 @@ if operation == "hook":
                 self.root, self.palace, "acme", progress=progress.append
             )
 
-        self.assertEqual(
-            progress,
-            [
-                f"[discover] scanning {self.root}",
-                "[discover] found 2 repositories",
-                "[discover] 1/2 first — Graphify applicability check pending",
-                "[discover] 2/2 second — Graphify applicability check pending",
-                (
-                    f"[mempalace 1/2] mining {first} into {self.palace}; "
-                    "wing acme"
-                ),
-                "[mempalace 1/2] mining — 00:10 elapsed",
-                "[mempalace 1/2] mine complete — 00:10",
-                (
-                    f"[mempalace 2/2] mining {second} into {self.palace}; "
-                    "wing acme"
-                ),
-                "[mempalace 2/2] mining — 00:10 elapsed",
-                "[mempalace 2/2] mine complete — 00:10",
-                "[mempalace] verifying store",
-                "[mempalace] verification — 00:10 elapsed",
-                "[mempalace] store verified",
-                "[graphify 1/2] creating first",
-                "[graphify 1/2] create — 00:10 elapsed",
-                "[graphify 1/2] create complete — 00:10",
-                "[graphify 1/2] validating graph",
-                "[graphify 1/2] graph validated",
-                "[graphify 1/2] installing Git hooks",
-                "[graphify 1/2] installing Git hooks — 00:10 elapsed",
-                "[graphify 1/2] verifying Git hooks",
-                "[graphify 1/2] verifying Git hooks — 00:10 elapsed",
-                "[graphify 1/2] hooks installed and verified",
-                "[graphify 2/2] creating second",
-                "[graphify 2/2] create — 00:10 elapsed",
-            ],
+        self.assertEqual(progress[-2:], [
+            "[graphify 1/2] created first",
+            "[graphify 2/2] created second",
+        ])
+        self.assertLess(
+            progress.index("[mempalace] store verified"),
+            progress.index("[graphify 1/2] created first"),
         )
 
     def test_default_monitor_reports_every_success_stage_without_raw_output(self):
@@ -978,28 +962,9 @@ if operation == "hook":
             )
 
         self.assertEqual(result.repositories[0].action, "created")
-        self.assertEqual(
-            progress,
-            [
-                f"[discover] scanning {self.root}",
-                "[discover] found 1 repository",
-                "[discover] 1/1 api — Graphify applicability check pending",
-                (
-                    f"[mempalace] mining {repository} into {self.palace}; "
-                    "wing acme"
-                ),
-                "[mempalace] mine complete — 00:00",
-                "[mempalace] verifying store",
-                "[mempalace] store verified",
-                "[graphify 1/1] creating api",
-                "[graphify 1/1] create complete — 00:00",
-                "[graphify 1/1] validating graph",
-                "[graphify 1/1] graph validated",
-                "[graphify 1/1] installing Git hooks",
-                "[graphify 1/1] verifying Git hooks",
-                "[graphify 1/1] hooks installed and verified",
-            ],
-        )
+        self.assertIn("[discover] 1/1 api — Graphify sync pending", progress)
+        self.assertIn("[graphify 1/1] created api", progress)
+        self.assertEqual(progress[-1], "[graphify 1/1] created api")
         joined = "\n".join(progress)
         self.assertNotIn("raw mempalace success output", joined)
         self.assertNotIn("raw graphify success output", joined)
@@ -1035,6 +1000,17 @@ if operation == "hook":
         escaped_wing = r"wing\nforged\u001b[31m\u0085\u2028"
         self.assertIn(escaped_name, joined)
         self.assertIn(escaped_wing, joined)
+        hook_events = [
+            event for event in progress if "hook not managed" in event
+        ]
+        self.assertEqual(len(hook_events), 1)
+        self.assertLessEqual(len(hook_events[0]), 1024)
+        self.assertNotEqual(graph_hook_status(repository), "installed")
+        self.assertFalse((repository / ".git/hooks/post-commit").exists())
+        self.assertFalse((repository / ".git/hooks/post-checkout").exists())
+        self.assertTrue(tuple(self.data_root.rglob("graph.json")))
+        self.assertEqual(result.repositories[0].action, "created")
+        self.assertEqual(result.repositories[0].hook_status, "not managed")
 
         rendered = context_population.render_population_result(result)
         self.assertNotIn("\n[graphify forged]", rendered)

@@ -35,6 +35,11 @@ printf '#!/usr/bin/env bash\nexit 99\n' >"$fixture/fake-bin/python3"
 chmod 0755 "$fixture/fake-bin/python3"
 export ORICHUM_DATA_HOME="$fixture/data"
 caller_dir="$(cd "$fixture/caller" && pwd -P)"
+graph_from_caller="$(
+  cd "$caller_dir"
+  PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum-graph" .
+)"
+[[ "$graph_from_caller" == "[discover] found 0 repositories" ]]
 observed_cwd="$(
   cd "$caller_dir"
   OBSERVE_CWD=1 PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum" config
@@ -107,6 +112,7 @@ printf 'raise SystemExit(97)\n' >"$fixture/shadowed/runpy.py"
 help="$("$ROOT/bin/orichum" --help)"
 rg -Fq 'usage: orichum ' <<<"$help"
 rg -Fq 'context' <<<"$help"
+rg -Fq 'graph' <<<"$help"
 rg -Fq 'sessions' <<<"$help"
 
 ORICHUM_CONFIG_HOME="$ROOT/config" \
@@ -163,16 +169,16 @@ contexts="$(
 )"
 rg -Fq 'ACCOUNT POOLS' <<<"$contexts"
 rg -Fq 'MCP_DOCKER' "$ROOT/README.md"
-rg -Fq 'orichum fork' "$ROOT/README.md"
-rg -Fq 'orichum models stacks' "$ROOT/README.md"
-rg -Fq 'orichum stack available' "$ROOT/README.md"
-rg -Fq 'orichum stack configure' "$ROOT/README.md"
-rg -Fq 'orichum stack list' "$ROOT/README.md"
-rg -Fq 'orichum stack show heavy' "$ROOT/README.md"
-rg -Fq 'TARGET_STACK' "$ROOT/README.md"
-if rg -Fq 'claude-heavy' "$ROOT/README.md" || \
-   rg -Fq 'google-heavy' "$ROOT/README.md"; then
-  printf 'README references model stacks that are not configured\n' >&2
+rg -Fq 'orichum fork' "$ROOT/docs/sessions.md"
+rg -Fq 'orichum models stacks' "$ROOT/docs/sessions.md"
+rg -Fq 'orichum stack available' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum stack configure' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum stack list' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum stack show STACK' "$ROOT/docs/model-stacks.md"
+rg -Fq 'TARGET_STACK' "$ROOT/docs/sessions.md"
+if rg -Fq 'claude-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md || \
+   rg -Fq 'google-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md; then
+  printf 'documentation references model stacks that are not configured\n' >&2
   exit 1
 fi
 [[ "$(rg -c -- '--max-time 4' \
@@ -185,9 +191,31 @@ rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
+rg -Fq 'repository graph manager and hook contract are available' \
+  "$ROOT/doctor.sh"
+rg -Fq 'central Graphify storage is private' "$ROOT/doctor.sh"
+rg -Fq 'graphify_doctor_diagnostics' "$ROOT/doctor.sh"
+rg -Fq 'repository-local legacy Graphify outputs' \
+  "$ROOT/lib/workflow.sh"
+rg -Fq 'Graphify package/skill drift' "$ROOT/lib/workflow.sh"
+[[ ! -e "$ROOT/controller/plugin/scripts/ensure-graphify-hook.py" ]]
+"$system_python" -I -B - "$ROOT" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from integrations.common.graph_hooks import (
+    graph_hook_status,
+    install_graph_hooks,
+    remove_upstream_graphify_hooks,
+)
+
+assert callable(graph_hook_status)
+assert callable(install_graph_hooks)
+assert callable(remove_upstream_graphify_hooks)
+PY
 rg -Fq \
-  'Account display names are shown only by explicit account-management and stack' \
-  "$ROOT/README.md"
+  'Display names appear in explicit account and route inspection output.' \
+  "$ROOT/docs/providers-and-accounts.md"
 rg -Fq 'validate_orichum_python' \
   "$ROOT/bin/orichum-runtime-ready"
 for parallel_health_contract in \
@@ -231,6 +259,26 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
+    'Verify central repository graph lifecycle' \
+    'orichum graph "$graph_project"' \
+    'orichum graph status "$graph_project"' \
+    'test ! -e "$graph_project/graphify-out"' \
+    'CLAUDEX_MCP_CONFIG' \
+    'mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])' \
+    'sessions = data_home / "state" / "sessions"' \
+    'resolved_data_home / "state" / "sessions" / run_dir.name' \
+    'snapshot = run_dir / "graph.json"' \
+    'graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"' \
+    'central.relative_to(central_root)' \
+    'if not central.is_file():' \
+    'chunk = os.read(graph_fd, 1024 * 1024)' \
+    'hmac.compare_digest(digest.hexdigest(), expected_digest)' \
+    'stat.S_IMODE(before.st_mode) != 0o600' \
+    'integrations/common/mcp_probe.py' \
+    '--require-tool query_graph' \
+    '--require-tool graph_stats' \
+    'graphify_command="$(' \
+    'run-graph-session-fixture' \
     'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
     '--privileged' \
@@ -278,9 +326,29 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
+    'Verify central repository graph lifecycle' \
+    'orichum graph "$graph_project"' \
+    'orichum graph status "$graph_project"' \
+    'test ! -e "$graph_project/graphify-out"' \
+    'CLAUDEX_MCP_CONFIG' \
+    'mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])' \
+    'sessions = data_home / "state" / "sessions"' \
+    'resolved_data_home / "state" / "sessions" / run_dir.name' \
+    'snapshot = run_dir / "graph.json"' \
+    'graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"' \
+    'central.relative_to(central_root)' \
+    'if not central.is_file():' \
+    'chunk = os.read(graph_fd, 1024 * 1024)' \
+    'hmac.compare_digest(digest.hexdigest(), expected_digest)' \
+    'stat.S_IMODE(before.st_mode) != 0o600' \
+    'integrations/common/mcp_probe.py' \
+    '--require-tool query_graph' \
+    '--require-tool graph_stats' \
+    'graphify_command="$(' \
+    'run-graph-session-fixture' \
     'Verify idempotent upgrade' \
     'Clean up launch agents'; do
-  rg -Fq "$required_contract" "$macos_workflow"
+  rg -Fq -- "$required_contract" "$macos_workflow"
 done
 if rg -Fq 'macos-15-intel' "$macos_workflow"; then
   printf 'macOS acceptance must run on Apple Silicon only\n' >&2

@@ -217,6 +217,232 @@ jobs:
             ' >/dev/null
           orichum doctor
 
+      - name: Verify central repository graph lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          graph_project="$RUNNER_TEMP/graph-acceptance"
+          graph_palace="$RUNNER_TEMP/graph-acceptance-palace"
+          install -d -m 0700 "$graph_project" "$graph_palace"
+          git -C "$graph_project" init -q
+          git -C "$graph_project" remote add origin \
+            https://example.invalid/orichum/graph-acceptance.git
+          printf 'def acceptance():\n    return "central"\n' \
+            >"$graph_project/acceptance.py"
+          git -C "$graph_project" add acceptance.py
+          git -C "$graph_project" \
+            -c user.name=acceptance \
+            -c user.email=acceptance@example.invalid \
+            commit -q -m initial
+          python3 - \
+            "$ORICHUM_CONFIG_HOME/projects.json" \
+            "$graph_project" "$graph_palace" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          document = json.loads(path.read_text(encoding="utf-8"))
+          document["contexts"].append(
+              {
+                  "root": sys.argv[2],
+                  "dockerProfile": None,
+                  "modelStack": "balanced",
+                  "accountPools": ["shared"],
+                  "memoryPalace": sys.argv[3],
+                  "memoryWing": "graph-acceptance",
+              }
+          )
+          temporary = path.with_name(f".{path.name}.acceptance")
+          temporary.write_text(
+              json.dumps(document, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          os.chmod(temporary, 0o600)
+          os.replace(temporary, path)
+          PY
+          orichum graph "$graph_project"
+          test ! -e "$graph_project/graphify-out"
+          orichum graph status "$graph_project" |
+            tee "$RUNNER_TEMP/graph-status.log"
+          rg -Fq 'current' "$RUNNER_TEMP/graph-status.log"
+          test "$(find "$ORICHUM_DATA_HOME/graphs" -name graph.json \
+            -type f | wc -l)" -ge 1
+
+          cat >"$RUNNER_TEMP/run-graph-session-fixture" <<'FIXTURE'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          graph_project="$1"
+          marker="$2"
+          claudex="$ORICHUM_DATA_HOME/bin/claudex"
+          real_claudex="$ORICHUM_DATA_HOME/bin/.claudex-graph-acceptance"
+          mv "$claudex" "$real_claudex"
+          restore_claudex() {
+            rm -f -- "$claudex"
+            mv "$real_claudex" "$claudex"
+          }
+          trap restore_claudex EXIT
+          cat >"$claudex" <<'WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "$#" -eq 1 && "$1" == --version ]]; then
+            exec "$ACCEPTANCE_REAL_CLAUDEX" "$@"
+          fi
+          graphify_command="$(
+            PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -I -B - <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import os
+          from pathlib import Path
+          import stat
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def same_file(left, right):
+              return (
+                  left.st_dev == right.st_dev
+                  and left.st_ino == right.st_ino
+                  and left.st_mode == right.st_mode
+                  and left.st_size == right.st_size
+                  and left.st_mtime_ns == right.st_mtime_ns
+              )
+
+          def open_private_file(path):
+              before = os.stat(path, follow_symlinks=False)
+              if (
+                  stat.S_ISLNK(before.st_mode)
+                  or not stat.S_ISREG(before.st_mode)
+                  or before.st_uid != os.getuid()
+                  or stat.S_IMODE(before.st_mode) != 0o600
+              ):
+                  fail(f"unsafe session file: {path}")
+              flags = (
+                  os.O_RDONLY
+                  | getattr(os, "O_CLOEXEC", 0)
+                  | getattr(os, "O_NOFOLLOW", 0)
+                  | getattr(os, "O_NONBLOCK", 0)
+              )
+              descriptor = os.open(path, flags)
+              opened = os.fstat(descriptor)
+              after = os.stat(path, follow_symlinks=False)
+              if not same_file(before, opened) or not same_file(opened, after):
+                  os.close(descriptor)
+                  fail(f"session file changed during validation: {path}")
+              return descriptor, opened
+
+          def load_private_json(path):
+              descriptor, opened = open_private_file(path)
+              if opened.st_size > 4 * 1024 * 1024:
+                  os.close(descriptor)
+                  fail(f"session JSON is unexpectedly large: {path}")
+              with os.fdopen(descriptor, encoding="utf-8") as stream:
+                  document = json.load(stream)
+                  final = os.fstat(stream.fileno())
+              after = os.stat(path, follow_symlinks=False)
+              if not same_file(opened, final) or not same_file(final, after):
+                  fail(f"session file changed during read: {path}")
+              return document
+
+          data_home = Path(os.environ["ORICHUM_DATA_HOME"])
+          resolved_data_home = data_home.resolve(strict=True)
+          mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])
+          sessions = data_home / "state" / "sessions"
+          run_dir = mcp_config.parent
+          if (
+              not mcp_config.is_absolute()
+              or mcp_config != run_dir / "mcp.json"
+              or run_dir.parent != sessions
+              or not run_dir.name.startswith("run.")
+              or run_dir.name == "run."
+              or run_dir.resolve(strict=True)
+              != resolved_data_home / "state" / "sessions" / run_dir.name
+          ):
+              fail("CLAUDEX_MCP_CONFIG is not a physical run mcp.json")
+          run_stat = os.stat(run_dir, follow_symlinks=False)
+          if (
+              not stat.S_ISDIR(run_stat.st_mode)
+              or run_stat.st_uid != os.getuid()
+              or stat.S_IMODE(run_stat.st_mode) != 0o700
+          ):
+              fail("physical run directory is not private")
+
+          snapshot = run_dir / "graph.json"
+          context_file = run_dir / "context.json"
+          mcp = load_private_json(mcp_config)
+          context = load_private_json(context_file)
+          try:
+              graphify = mcp["mcpServers"]["graphify"]
+              graph = context["graph"]
+              graphify_command = graphify["command"]
+              graphify_args = graphify["args"]
+              context_snapshot = Path(graph["graphFile"])
+              central = Path(graph["centralGraphFile"]).resolve(strict=True)
+              expected_digest = graph["sha256"]
+          except (KeyError, TypeError, ValueError) as error:
+              fail(f"invalid physical graph session metadata: {error}")
+          if (
+              not isinstance(graphify_command, str)
+              or not graphify_command.endswith("/graphify-mcp")
+              or not os.access(graphify_command, os.X_OK)
+              or graphify_args != ["--graph", str(snapshot)]
+              or context_snapshot != snapshot
+              or not isinstance(expected_digest, str)
+          ):
+              fail("physical graph session binding is inconsistent")
+          central_root = (data_home / "graphs").resolve(strict=True)
+          if not central.is_file():
+              fail("central graph provenance is not a file")
+          try:
+              central.relative_to(central_root)
+          except ValueError:
+              fail("central graph provenance escapes central graph storage")
+
+          graph_fd, opened = open_private_file(snapshot)
+          digest = hashlib.sha256()
+          try:
+              while True:
+                  chunk = os.read(graph_fd, 1024 * 1024)
+                  if not chunk:
+                      break
+                  digest.update(chunk)
+              final = os.fstat(graph_fd)
+          finally:
+              os.close(graph_fd)
+          after = os.stat(snapshot, follow_symlinks=False)
+          if (
+              not same_file(opened, final)
+              or not same_file(final, after)
+              or not hmac.compare_digest(digest.hexdigest(), expected_digest)
+          ):
+              fail("physical graph snapshot digest mismatch")
+          print(graphify_command)
+          PY
+          )"
+          graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"
+          PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -I -B \
+            "$CLAUDEX_WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+            --timeout 10 \
+            --require-tool query_graph \
+            --require-tool graph_stats \
+            -- "$graphify_command" --graph "$graph_file"
+          : >"$ACCEPTANCE_SESSION_MARKER"
+          WRAPPER
+          chmod 0755 "$claudex"
+          (
+            cd "$graph_project"
+            ACCEPTANCE_REAL_CLAUDEX="$real_claudex" \
+            ACCEPTANCE_SESSION_MARKER="$marker" \
+              orichum run -- -p "central graph acceptance"
+          )
+          test -f "$marker"
+          FIXTURE
+          chmod 0755 "$RUNNER_TEMP/run-graph-session-fixture"
+          "$RUNNER_TEMP/run-graph-session-fixture" \
+            "$graph_project" "$RUNNER_TEMP/graph-session.initial"
+
       - name: Verify idempotent upgrade
         shell: bash
         run: |
@@ -241,6 +467,14 @@ jobs:
           grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Headroom:    reused' "$RUNNER_TEMP/orichum-upgrade.log"
           grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          graph_project="$RUNNER_TEMP/graph-acceptance"
+          orichum graph "$graph_project"
+          test ! -e "$graph_project/graphify-out"
+          orichum graph status "$graph_project" |
+            tee "$RUNNER_TEMP/graph-status.upgrade.log"
+          rg -Fq 'current' "$RUNNER_TEMP/graph-status.upgrade.log"
+          "$RUNNER_TEMP/run-graph-session-fixture" \
+            "$graph_project" "$RUNNER_TEMP/graph-session.upgrade"
           orichum doctor
 
       - name: Print bounded diagnostics

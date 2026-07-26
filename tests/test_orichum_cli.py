@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from integrations.common import graph_manager
 from integrations.common import orichum_cli
 from integrations.common import stack_bindings
 from integrations.common.stack_bindings import (
@@ -284,6 +285,28 @@ class OrichumCliTests(unittest.TestCase):
                 "orichum-context",
                 ["add", "/work/acme", "--pool", "shared"],
             )
+
+        with mock.patch.object(
+            orichum_cli, "_run_external", return_value=0
+        ) as run:
+            status, _, _ = self.run_cli("graph", "status", "/work/acme")
+            self.assertEqual(status, 0)
+            run.assert_called_once_with(
+                "orichum-graph", ["status", "/work/acme"]
+            )
+
+    def test_graph_external_preserves_the_callers_working_directory(self) -> None:
+        completed = SimpleNamespace(returncode=0)
+        with (
+            mock.patch.object(orichum_cli.Path, "cwd", return_value=self.root),
+            mock.patch.object(
+                orichum_cli.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            status = orichum_cli._run_external("orichum-graph", ["."])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(run.call_args.kwargs["cwd"], self.root)
 
     def test_headroom_status_reports_only_orichum_proxy_health(self) -> None:
         payload = json.dumps(
@@ -1341,6 +1364,303 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(
             environment["GH_CONFIG_DIR"], "/caller/github-config"
         )
+
+
+class OrichumGraphCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.data_root = self.root / "data"
+        self.data_root.mkdir(mode=0o700)
+        self.home = self.root / "home"
+        skill = self.home / ".agents" / "skills" / "graphify"
+        skill.mkdir(parents=True)
+        (skill / ".graphify_version").write_text(
+            "1.2.2\n", encoding="ascii"
+        )
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.graphify = self.bin / "graphify"
+        self.graphify.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("graphify 1.2.3")
+    raise SystemExit()
+if sys.argv[1:3] == ["hook", "status"]:
+    print("installed")
+    raise SystemExit()
+repository = Path(sys.argv[2])
+if (repository / "fail-graphify").exists():
+    print("x" * 10000, file=sys.stderr)
+    raise SystemExit(7)
+output = Path(os.environ["GRAPHIFY_OUT"])
+output.mkdir(parents=True, exist_ok=True)
+commit = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+(output / "graph.json").write_text(
+    json.dumps({
+        "built_at_commit": commit,
+        "nodes": [{"id": repository.name, "source_file": "source.py"}],
+        "links": [],
+    }),
+    encoding="utf-8",
+)
+""",
+            encoding="utf-8",
+        )
+        self.graphify.chmod(0o755)
+        self.environment = {
+            "HOME": str(self.home),
+            "ORICHUM_DATA_HOME": str(self.data_root),
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+        }
+        self.project_root = self.root / "project"
+        self.project_root.mkdir()
+        self.repository = self.make_repository(
+            self.project_root / "api", "api"
+        )
+        self.web_repository = self.make_repository(
+            self.project_root / "web", "web"
+        )
+
+    def make_repository(self, path: Path, name: str) -> Path:
+        path.mkdir()
+        self.git(path, "init", "-q")
+        self.git(path, "config", "user.email", "tests@example.invalid")
+        self.git(path, "config", "user.name", "Graph CLI tests")
+        (path / "source.py").write_text(
+            f"print({name!r})\n", encoding="utf-8"
+        )
+        self.git(path, "add", "source.py")
+        self.git(path, "commit", "-qm", "Initial commit")
+        self.git(
+            path,
+            "remote",
+            "add",
+            "origin",
+            f"https://github.com/example/{name}.git",
+        )
+        return path
+
+    def git(self, repository: Path, *arguments: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def run_graph(self, *arguments: str) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.environment, clear=False),
+            mock.patch.object(
+                graph_manager.Path, "cwd", return_value=self.project_root
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            status = graph_manager.graph_main(list(arguments))
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def snapshot_tree(self, root: Path) -> tuple[tuple[str, str, bytes], ...]:
+        snapshot = []
+        if not root.exists():
+            return ()
+        for path in sorted(root.rglob("*")):
+            kind = "d" if path.is_dir() else "f"
+            content = path.read_bytes() if path.is_file() else b""
+            snapshot.append((str(path.relative_to(root)), kind, content))
+        return tuple(snapshot)
+
+    def test_graph_path_syncs_automatic_scope_with_non_tty_progress(self) -> None:
+        status, stdout, stderr = self.run_graph(str(self.project_root))
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("[discover] found 2 repositories", stdout)
+        self.assertIn("[graphify 2/2]", stdout)
+        self.assertNotIn("\r", stdout)
+
+    def test_graph_defaults_to_current_directory(self) -> None:
+        status, stdout, stderr = self.run_graph()
+
+        self.assertEqual(status, 0, stderr)
+        self.assertIn("[discover] found 2 repositories", stdout)
+
+    def test_graph_path_repairs_stale_target_and_reinstalls_hooks(self) -> None:
+        status, _, stderr = self.run_graph(str(self.repository))
+        self.assertEqual(status, 0, stderr)
+        target = graph_manager.resolve_graph_target(
+            self.repository, self.data_root
+        )
+        metadata = json.loads(
+            target.metadata_file.read_text(encoding="utf-8")
+        )
+        metadata["built_at_commit"] = "0" * 40
+        target.metadata_file.write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        post_commit = self.repository / ".git" / "hooks" / "post-commit"
+        post_commit.unlink()
+        self.assertEqual(
+            graph_manager.graph_hook_status(self.repository), "missing"
+        )
+
+        status, stdout, stderr = self.run_graph(str(self.repository))
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("[graphify 1/1] updated api", stdout)
+        self.assertEqual(graph_manager.inspect_graph(target).status, "current")
+        self.assertEqual(
+            graph_manager.graph_hook_status(self.repository), "installed"
+        )
+
+    def test_graph_rejects_invalid_path_and_accepts_empty_scope(self) -> None:
+        status, stdout, stderr = self.run_graph(str(self.root / "missing"))
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("path is not a directory", stderr)
+
+        empty = self.root / "empty"
+        empty.mkdir()
+        status, stdout, stderr = self.run_graph(str(empty))
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("[discover] found 0 repositories", stdout)
+
+    def test_graph_failure_is_nonzero_and_diagnostics_are_bounded(self) -> None:
+        (self.web_repository / "fail-graphify").touch()
+
+        status, stdout, stderr = self.run_graph(str(self.project_root))
+
+        self.assertEqual(status, 2)
+        self.assertIn("[graphify 1/2]", stdout)
+        self.assertIn("[graphify 2/2]", stdout)
+        self.assertIn("Graphify failed with exit code 7", stderr)
+        self.assertLess(len(stderr), 4_000)
+        self.assertTrue(
+            any(self.data_root.rglob("api/revisions/*/graphify-out/graph.json"))
+        )
+
+    def test_graph_status_is_read_only_and_reports_version_drift(self) -> None:
+        (self.repository / "dirty.py").write_text(
+            "print('dirty')\n", encoding="utf-8"
+        )
+        before_data = self.snapshot_tree(self.data_root)
+        before_repository = self.snapshot_tree(self.repository)
+
+        status, stdout, stderr = self.run_graph(
+            "status", str(self.repository)
+        )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("REPOSITORY", stdout)
+        self.assertIn("github.com/example/api", stdout)
+        self.assertIn(str(self.repository), stdout)
+        self.assertIn("Graphify package: 1.2.3", stdout)
+        self.assertIn("Graphify skill: 1.2.2 (drift)", stdout)
+        self.assertEqual(self.snapshot_tree(self.data_root), before_data)
+        self.assertEqual(self.snapshot_tree(self.repository), before_repository)
+
+    def test_graph_status_details_clean_repository_with_invalid_graph(
+        self,
+    ) -> None:
+        status, _, stderr = self.run_graph(str(self.repository))
+        self.assertEqual(status, 0, stderr)
+        target = graph_manager.resolve_graph_target(
+            self.repository, self.data_root
+        )
+        target.graph_file.write_text("{}", encoding="utf-8")
+        before_data = self.snapshot_tree(self.data_root)
+        before_repository = self.snapshot_tree(self.repository)
+
+        status, stdout, stderr = self.run_graph(
+            "status", str(self.repository)
+        )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("invalid", stdout)
+        self.assertIn(f"  checkout: {self.repository}", stdout)
+        self.assertEqual(self.snapshot_tree(self.data_root), before_data)
+        self.assertEqual(self.snapshot_tree(self.repository), before_repository)
+
+    def test_graph_identity_set_clear_and_validation(self) -> None:
+        status, _, stderr = self.run_graph(
+            "identity",
+            str(self.repository),
+            "--set",
+            "git.example.com/platform/api",
+        )
+        self.assertEqual(status, 0, stderr)
+        configured = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repository),
+                "config",
+                "--local",
+                "--get",
+                "orichum.repositoryIdentity",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            configured.stdout.strip(), "git.example.com/platform/api"
+        )
+
+        status, _, stderr = self.run_graph(
+            "identity", str(self.repository), "--clear"
+        )
+        self.assertEqual(status, 0, stderr)
+        configured = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.repository),
+                "config",
+                "--local",
+                "--get",
+                "orichum.repositoryIdentity",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(configured.returncode, 0)
+
+        status, _, stderr = self.run_graph(
+            "identity", str(self.repository)
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("requires exactly one of --set ID or --clear", stderr)
+
+        status, _, stderr = self.run_graph(
+            "identity",
+            str(self.repository),
+            "--set",
+            "git.example.com/platform/api",
+            "--clear",
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("requires exactly one of --set ID or --clear", stderr)
 
 
 if __name__ == "__main__":

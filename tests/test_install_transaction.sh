@@ -74,6 +74,20 @@ private_tool_state_matches \
 [[ ! -e "$private_bin/graphify-future" ]]
 [[ "$(<"$host_bin/graphify-mcp")" == host-tool-unchanged ]]
 
+external_graph_root="$fixture/external-graph-root"
+unsafe_graph_data="$fixture/unsafe-graph-data"
+install -d -m 0700 "$external_graph_root" "$unsafe_graph_data"
+printf 'external-unchanged\n' >"$external_graph_root/owner-marker"
+ln -s "$external_graph_root" "$unsafe_graph_data/graphs"
+if ensure_private_graph_root "$unsafe_graph_data" \
+    >"$fixture/unsafe-graph.stdout" \
+    2>"$fixture/unsafe-graph.stderr"; then
+  printf 'symlinked central graph root was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'central graph root is unsafe' "$fixture/unsafe-graph.stderr"
+[[ "$(<"$external_graph_root/owner-marker")" == external-unchanged ]]
+
 unsafe_snapshot_data="$fixture/unsafe-snapshot-data"
 unsafe_snapshot_external="$fixture/unsafe-snapshot-external"
 unsafe_snapshot_before="$fixture/unsafe-snapshot-before"
@@ -340,6 +354,7 @@ python_transaction = source.index("python_transaction_active=true")
 provision_python = source.index("install_or_reuse_orichum_python")
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
+probe_graphify = source.index("reconcile_graphify_storage", upgrade_graphify)
 upgrade_headroom = source.index("upgrade_headroom_distribution")
 if not (
     python_transaction
@@ -349,9 +364,19 @@ if not (
     snapshot_private_tools
     < upgrade_mempalace
     < upgrade_graphify
+    < probe_graphify
     < upgrade_headroom
 ):
     raise SystemExit("private tool snapshot does not precede all three upgrades")
+if "graphify install" in source:
+    raise SystemExit("installer must not invoke graphify install")
+for global_skill_root in (
+    '$HOME/.agents/skills',
+    '$HOME/.codex/skills',
+    '$HOME/.claude/skills',
+):
+    if global_skill_root in source:
+        raise SystemExit("installer must not mutate global Graphify skills")
 PY
 
 for acceptance_workflow in \

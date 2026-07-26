@@ -1,17 +1,20 @@
 """Discover Git worktrees eligible for bounded context population."""
 
-import json
 import os
 import queue
 import re
 import shutil
-import stat
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from integrations.common.graph_manager import (
+    GraphManagerError,
+    sync_graphs,
+)
 
 
 PRUNED_DIRECTORIES = frozenset({
@@ -385,82 +388,6 @@ def _raise_for_failure(
     raise PopulationError(prefix)
 
 
-def _not_applicable(
-    completed: subprocess.CompletedProcess[str], graph: Path
-) -> bool:
-    return (
-        completed.returncode != 0
-        and not os.path.lexists(graph)
-        and "found 0 code" in completed.stdout.lower()
-        and "graph is empty" in completed.stderr.lower()
-    )
-
-
-def _resolve_contained_graph(repository: Path, graph: Path) -> Path:
-    try:
-        resolved_repository = repository.resolve(strict=True)
-        resolved_graph = graph.resolve(strict=True)
-        resolved_graph.relative_to(resolved_repository)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
-        raise PopulationError(
-            "Graphify graph validation failed for repository "
-            f"{_safe_field(repository)}"
-        ) from error
-    return resolved_graph
-
-
-def _require_regular_graph(repository: Path, graph: Path) -> Path:
-    resolved_graph = _resolve_contained_graph(repository, graph)
-    try:
-        graph_status = resolved_graph.stat()
-    except OSError as error:
-        raise PopulationError(
-            "Graphify graph validation failed for repository "
-            f"{_safe_field(repository)}"
-        ) from error
-    if not stat.S_ISREG(graph_status.st_mode):
-        raise PopulationError(
-            "Graphify graph validation failed for repository "
-            f"{_safe_field(repository)}"
-        )
-    return resolved_graph
-
-
-def _validate_graph(repository: Path, graph: Path) -> None:
-    resolved_graph = _require_regular_graph(repository, graph)
-    descriptor = None
-    try:
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        flags |= getattr(os, "O_NONBLOCK", 0)
-        descriptor = os.open(resolved_graph, flags)
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise PopulationError(
-                "Graphify graph validation failed for repository "
-                f"{_safe_field(repository)}"
-            )
-        source = os.fdopen(descriptor, encoding="utf-8")
-        descriptor = None
-        with source:
-            parsed = json.load(source)
-    except PopulationError:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise PopulationError(
-            "Graphify graph validation failed for repository "
-            f"{_safe_field(repository)}"
-        ) from error
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    nodes = parsed.get("nodes") if isinstance(parsed, dict) else None
-    if not isinstance(nodes, list) or not nodes:
-        raise PopulationError(
-            f"Graphify graph validation failed for repository {_safe_field(repository)}"
-        )
-
-
 def _format_elapsed(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
     minutes, seconds = divmod(total_seconds, 60)
@@ -548,91 +475,19 @@ def _mempalace_mine_environment() -> dict[str, str]:
     return environment
 
 
-def _populate_repository(
-    repository: Path,
-    graphify: str,
-    *,
-    ordinal: int = 1,
-    total: int = 1,
-    progress: Callable[[str], None] | None = None,
-) -> RepositoryResult:
-    graph = repository / "graphify-out" / "graph.json"
-    prefix = f"[graphify {ordinal}/{total}]"
-    repository_name = _safe_field(repository.name)
-    if graph.exists():
-        action = "updated"
-        operation = "update"
-        _emit(
-            progress,
-            f"{prefix} validating existing graph for {repository_name}",
+def _graph_data_root() -> Path:
+    raw = os.environ.get("ORICHUM_DATA_HOME")
+    if raw is None:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        raw = (
+            str(Path(xdg) / "orichum")
+            if xdg
+            else str(Path.home() / ".local/share/orichum")
         )
-        _require_regular_graph(repository, graph)
-        _emit(progress, f"{prefix} existing graph validated")
-        _emit(progress, f"{prefix} updating {repository_name}")
-        operation_started = time.monotonic()
-        _require_success(
-            [graphify, "update", str(repository)],
-            label="Graphify update",
-            repository=repository,
-            heartbeat=_heartbeat(progress, f"{prefix} update"),
-        )
-    else:
-        action = "created"
-        operation = "create"
-        _emit(progress, f"{prefix} creating {repository_name}")
-        operation_started = time.monotonic()
-        try:
-            completed = _run(
-                [graphify, "extract", str(repository), "--code-only"],
-                heartbeat=_heartbeat(progress, f"{prefix} create"),
-            )
-        except PopulationError as error:
-            raise PopulationError(
-                "Graphify extract failed for repository "
-                f"{_safe_field(repository)}: {error}"
-            ) from error
-        if _not_applicable(completed, graph):
-            _emit(
-                progress,
-                f"{prefix} no supported code; skipped — "
-                f"{_format_elapsed(time.monotonic() - operation_started)}",
-            )
-            return RepositoryResult(repository, "not applicable", "not applicable")
-        if completed.returncode != 0:
-            _raise_for_failure(
-                completed, label="Graphify extract", repository=repository
-            )
-    _emit(
-        progress,
-        f"{prefix} {operation} complete — "
-        f"{_format_elapsed(time.monotonic() - operation_started)}",
-    )
-    _emit(progress, f"{prefix} validating graph")
-    _validate_graph(repository, graph)
-    _emit(progress, f"{prefix} graph validated")
-    _emit(progress, f"{prefix} installing Git hooks")
-    _require_success(
-        [graphify, "hook", "install"],
-        label="Graphify hook install",
-        cwd=repository,
-        repository=repository,
-        heartbeat=_heartbeat(progress, f"{prefix} installing Git hooks"),
-    )
-    _emit(progress, f"{prefix} verifying Git hooks")
-    status = _require_success(
-        [graphify, "hook", "status"],
-        label="Graphify hook status",
-        cwd=repository,
-        repository=repository,
-        heartbeat=_heartbeat(progress, f"{prefix} verifying Git hooks"),
-    )
-    if "not installed" in f"{status.stdout}\n{status.stderr}".lower():
-        raise PopulationError(
-            "Graphify hook status failed for repository "
-            f"{_safe_field(repository)}: not installed"
-        )
-    _emit(progress, f"{prefix} hooks installed and verified")
-    return RepositoryResult(repository, action, "installed")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise PopulationError("ORICHUM_DATA_HOME must be an absolute path")
+    return path.resolve(strict=False)
 
 
 def populate_context(
@@ -658,17 +513,11 @@ def populate_context(
             f"{_safe_field(skipped.primary.name)}",
         )
     for index, repository in enumerate(repositories, start=1):
-        graph_exists = (
-            repository / "graphify-out" / "graph.json"
-        ).exists()
-        planned_action = (
-            "update" if graph_exists else "applicability check pending"
-        )
         _emit(
             progress,
             f"[discover] {index}/{len(repositories)} "
             f"{_safe_field(repository.name)} "
-            f"— Graphify {planned_action}",
+            "— Graphify sync pending",
         )
 
     memory_sources = _mempalace_sources(root, repositories)
@@ -716,17 +565,32 @@ def populate_context(
     if not repositories:
         return PopulationResult(Path(palace), wing, ())
     graphify = _resolve_executable("graphify", "Graphify")
-    results = []
-    for index, repository in enumerate(repositories, start=1):
-        result = _populate_repository(
-            repository,
-            graphify,
-            ordinal=index,
-            total=len(repositories),
-            progress=progress,
+    try:
+        synchronized = sync_graphs(
+            root,
+            _graph_data_root(),
+            graphify=graphify,
+            progress=(
+                (lambda message: progress(_safe_field(message)))
+                if progress is not None
+                else None
+            ),
         )
-        results.append(result)
-    return PopulationResult(Path(palace), wing, tuple(results))
+    except GraphManagerError as error:
+        raise PopulationError(str(error)) from error
+    results = tuple(
+        RepositoryResult(
+            result.repository,
+            result.action.replace("-", " "),
+            (
+                "not applicable"
+                if result.action == "not-applicable"
+                else "not managed"
+            ),
+        )
+        for result in synchronized
+    )
+    return PopulationResult(Path(palace), wing, results)
 
 
 def render_population_result(result: PopulationResult) -> str:

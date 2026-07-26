@@ -1324,21 +1324,21 @@ if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
 fi
 
 uv tool install --upgrade 'graphifyy[mcp,terraform]'
+if ! graphify_binary="$(command -v graphify)"; then
+  workflow_die "Graphify installation did not provide graphify"
+fi
 if ! graphify_mcp="$(command -v graphify-mcp)"; then
   workflow_die "Graphify installation did not provide graphify-mcp"
 fi
-graphify_probe_graph="$installer_temp/graphify-probe.json"
-jq -n '{
-  directed: false, multigraph: false, graph: {},
-  nodes: [{id: "claudex-audit", label: "claudex-audit"}], links: []
-}' >"$graphify_probe_graph"
-if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
-  "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
-  --require-tool query_graph \
-  --require-tool graph_stats \
-  -- "$graphify_mcp" --graph "$graphify_probe_graph"; then
-  workflow_die "Graphify MCP failed protocol readiness checks"
-fi
+reconcile_graphify_storage \
+  "$WORKFLOW_DATA_ROOT" "$graphify_binary" "$graphify_mcp" \
+  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$installer_temp" || \
+  workflow_die \
+    "Graphify failed absolute-output, extract, update, or MCP capability checks"
+graphify_doctor_diagnostics \
+  "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_ROOT" \
+  "$ORICHUM_PYTHON" "$graphify_binary" || \
+  printf 'NOTICE: repository graph upgrade diagnostics were unavailable\n' >&2
 upgrade_headroom_distribution "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"
 headroom_binary="$UV_TOOL_BIN_DIR/headroom"
 if [[ ! -x "$headroom_binary" ]] || ! "$headroom_binary" --version >/dev/null; then

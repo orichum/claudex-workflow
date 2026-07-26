@@ -780,6 +780,8 @@ class ContextCommandTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
+        self.data_home = self.root / "orichum-data"
+        self.data_home.mkdir(mode=0o700)
         self.tool_directory = self.root / "fake-tools"
         self.tool_directory.mkdir()
         self.fake_package_directory = self.root / "fake-packages"
@@ -796,6 +798,7 @@ class ContextCommandTests(unittest.TestCase):
                 """#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -813,15 +816,45 @@ if tool == "mempalace":
 operation = sys.argv[1]
 if operation in {"extract", "update"}:
     print("raw graphify success output")
-    repository = Path(sys.argv[2])
+    repository = Path(sys.argv[2]).resolve()
     failure = os.environ.get("FAKE_GRAPHIFY_FAIL")
     if failure and failure in {"1", repository.name}:
         print("fixture graphify failure", file=sys.stderr)
         raise SystemExit(1)
-    graph = repository / "graphify-out" / "graph.json"
-    graph.parent.mkdir(exist_ok=True)
-    graph.write_text(json.dumps({"nodes": [{"id": "fixture"}]}), encoding="utf-8")
-if operation == "hook" and sys.argv[2] == "status" and os.environ.get("FAKE_CONFIG_MUTATION"):
+    output = Path(os.environ["GRAPHIFY_OUT"])
+    if not output.is_absolute():
+        print("fixture requires absolute GRAPHIFY_OUT", file=sys.stderr)
+        raise SystemExit(1)
+    commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_file = subprocess.run(
+        ["git", "-C", str(repository), "ls-files"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()[0]
+    graph = output / "graph.json"
+    graph.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    graph.write_text(
+        json.dumps({
+            "built_at_commit": commit,
+            "provenance": {
+                "repository": str(repository),
+                "commit": commit,
+            },
+            "nodes": [{
+                "id": "fixture",
+                "source_file": source_file,
+            }],
+            "links": [],
+        }),
+        encoding="utf-8",
+    )
+if operation in {"extract", "update"} and os.environ.get("FAKE_CONFIG_MUTATION"):
     config = Path(os.environ["FAKE_CONFIG_MUTATION"])
     root = Path(os.environ["FAKE_CONFIG_ROOT"])
     config.write_text(json.dumps({"contexts": [{
@@ -905,6 +938,7 @@ raise SystemExit(0)
                 "PATH": f"{self.tool_directory}{os.pathsep}{command_environment.get('PATH', '')}",
                 "PYTHONPATH": str(self.fake_package_directory),
                 "FAKE_TOOL_CALLS": str(self.tool_calls_path),
+                "ORICHUM_DATA_HOME": str(self.data_home),
             }
         )
         if environment is not None:
@@ -937,6 +971,7 @@ raise SystemExit(0)
                 "PATH": f"{self.tool_directory}{os.pathsep}{command_environment.get('PATH', '')}",
                 "PYTHONPATH": str(self.fake_package_directory),
                 "FAKE_TOOL_CALLS": str(self.tool_calls_path),
+                "ORICHUM_DATA_HOME": str(self.data_home),
             }
         )
         if environment is not None:
@@ -984,6 +1019,37 @@ raise SystemExit(0)
         path.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["git", "init", "-q", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(path),
+                "config", "user.email", "tests@example.invalid",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git", "-C", str(path),
+                "config", "user.name", "Context tests",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (path / "fixture.py").write_text("pass\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(path), "add", "fixture.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "-qm", "Fixture commit"],
             check=True,
             capture_output=True,
             text=True,
@@ -1269,7 +1335,7 @@ raise SystemExit(0)
             failed.stderr.splitlines()[0],
             "ERROR: project context operation rejected",
         )
-        self.assertIn("Graphify extract failed", failed.stderr)
+        self.assertIn("Graphify failed with exit code 1", failed.stderr)
         self.assertNotIn("Traceback", failed.stderr)
 
     def test_later_repository_failure_keeps_completed_population_progress(self):
@@ -1289,12 +1355,14 @@ raise SystemExit(0)
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(self.load_contexts(), [])
         self.assertIn("[mempalace] store verified", failed.stdout)
+        self.assertIn("[graphify 1/2] created first", failed.stdout)
+        self.assertIn("[graphify 2/2] created second", failed.stdout)
         self.assertIn(
-            "[graphify 1/2] hooks installed and verified", failed.stdout
+            "Graphify failed with exit code 1", failed.stderr
         )
-        self.assertIn("[graphify 2/2] creating second", failed.stdout)
-        self.assertNotIn(
-            "[graphify 2/2] hooks installed and verified", failed.stdout
+        self.assertEqual(
+            len(tuple((self.data_home / "graphs").glob("**/graph.json"))),
+            1,
         )
         self.assertLessEqual(len(failed.stderr), 4_100)
 
@@ -1328,12 +1396,8 @@ raise SystemExit(0)
             ],
         )
         self.assertIn("[mempalace] store verified", failed.stdout)
-        self.assertIn(
-            "[graphify 1/2] hooks installed and verified", failed.stdout
-        )
-        self.assertIn(
-            "[graphify 2/2] hooks installed and verified", failed.stdout
-        )
+        self.assertIn("[graphify 1/2] created first", failed.stdout)
+        self.assertIn("[graphify 2/2] created second", failed.stdout)
         self.assertNotIn("| REPOSITORY", failed.stdout)
         self.assertLessEqual(len(failed.stderr), 4_100)
 
@@ -1403,7 +1467,11 @@ raise SystemExit(0)
 
         self.assertEqual(populated.returncode, 0, populated.stderr)
         self.assertIn(str(repository), populated.stdout)
-        self.assertTrue((repository / "graphify-out" / "graph.json").is_file())
+        self.assertFalse((repository / "graphify-out").exists())
+        self.assertEqual(
+            len(tuple((self.data_home / "graphs").glob("**/graph.json"))),
+            1,
+        )
 
     def test_palace_artifacts_survive_population_failure(self):
         self.init_git(self.workspace)

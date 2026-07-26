@@ -103,6 +103,34 @@ class InstallControlPlaneTests(unittest.TestCase):
             )
         )
 
+    def test_stage_leaves_graph_storage_and_legacy_outputs_outside_candidate(
+        self,
+    ) -> None:
+        graph_root = self.installed / "graphs"
+        legacy = self.installed / "graphify-out"
+        graph_root.mkdir(mode=0o700)
+        legacy.mkdir(mode=0o700)
+        (graph_root / "owner-marker").write_text(
+            "central\n", encoding="utf-8"
+        )
+        (legacy / "owner-marker").write_text(
+            "legacy\n", encoding="utf-8"
+        )
+        shutil.rmtree(self.candidate)
+
+        stage(self.repository, self.installed, self.candidate)
+
+        self.assertFalse((self.candidate / "graphs").exists())
+        self.assertFalse((self.candidate / "graphify-out").exists())
+        self.assertEqual(
+            (graph_root / "owner-marker").read_text(encoding="utf-8"),
+            "central\n",
+        )
+        self.assertEqual(
+            (legacy / "owner-marker").read_text(encoding="utf-8"),
+            "legacy\n",
+        )
+
     def test_rollback_is_idempotent_across_activation_interruptions(
         self,
     ) -> None:
