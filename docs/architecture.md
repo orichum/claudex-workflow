@@ -43,7 +43,7 @@ workflows, and safety hooks.
 
 ```mermaid
 flowchart LR
-    C["Claude Code controller"] --> L["LeanCTX\ncurrent reads, search, tree"]
+    C["Claude Code controller"] --> L["LeanCTX\nsource and shell context"]
     C --> G["Graphify\nrelationships and impact"]
     C --> M["Mempalace\ndurable decisions"]
     L --> S["Exact repository source"]
@@ -53,10 +53,11 @@ flowchart LR
 
 LeanCTX is a per-session headless stdio MCP, not a resident service. Orichum
 pins it to the active Git repository, gives it private session-local storage,
-and exposes only `ctx_read`, `ctx_search`, `ctx_tree`, and `ctx_expand`.
-`ctx_call`, LeanCTX proxying, graph, memory, global hooks, shell interception,
-and autonomous features are disabled. Native Claude Code reads and searches
-remain available as the failure path and for exact verification.
+and exposes a fixed nine-tool surface for source context and observational
+shell output. `ctx_shell` keeps normal Claude Code approval. `ctx_call`,
+LeanCTX proxying, graph, memory, global hooks, shell interception, and
+autonomous features are disabled. Native Claude Code tools remain available as
+the failure path and for exact verification.
 
 ## Launch sequence
 

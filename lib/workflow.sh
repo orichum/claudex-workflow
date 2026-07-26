@@ -545,6 +545,23 @@ finally:
 PY
 }
 
+loopback_port_is_listening() {
+  local port="$1"
+  valid_service_port "$port" || return 1
+  workflow_python - "$port" <<'PY'
+import socket
+import sys
+
+listener = socket.socket()
+listener.settimeout(0.2)
+try:
+    status = listener.connect_ex(("127.0.0.1", int(sys.argv[1])))
+finally:
+    listener.close()
+raise SystemExit(0 if status == 0 else 1)
+PY
+}
+
 next_available_port() {
   local occupied_port="$1"
   local reserved_port
@@ -3085,9 +3102,14 @@ PY
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -B \
     "$workflow_root/integrations/common/mcp_probe.py" \
     --exact-tool ctx_read \
+    --exact-tool ctx_delta \
     --exact-tool ctx_search \
+    --exact-tool ctx_glob \
     --exact-tool ctx_tree \
+    --exact-tool ctx_outline \
+    --exact-tool ctx_explore \
     --exact-tool ctx_expand \
+    --exact-tool ctx_shell \
     -- env \
     LEAN_CTX_ALLOW_REROOT=false \
     LEAN_CTX_AUTONOMY=false \

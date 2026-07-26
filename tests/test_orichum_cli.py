@@ -853,6 +853,11 @@ class OrichumCliTests(unittest.TestCase):
             "--allowed-tools",
             "--disallowedTools=mcp__leanctx__ctx_read",
             "--disallowed-tools",
+            "--plugin-url=https://example.invalid/plugin.zip",
+            "--worktree=review",
+            "-wreview",
+            "--tmux",
+            "--bare",
         )
         for argument in blocked:
             with self.subTest(argument=argument):
@@ -985,10 +990,18 @@ class OrichumCliTests(unittest.TestCase):
             command[allowed_index + 1],
             ",".join((
                 "mcp__leanctx__ctx_read",
+                "mcp__leanctx__ctx_delta",
                 "mcp__leanctx__ctx_search",
+                "mcp__leanctx__ctx_glob",
                 "mcp__leanctx__ctx_tree",
+                "mcp__leanctx__ctx_outline",
+                "mcp__leanctx__ctx_explore",
                 "mcp__leanctx__ctx_expand",
             )),
+        )
+        self.assertNotIn(
+            "mcp__leanctx__ctx_shell",
+            command[allowed_index + 1].split(","),
         )
         self.assertNotIn("mcp__leanctx__*", command)
         self.assertNotIn("--dangerously-skip-permissions", command)

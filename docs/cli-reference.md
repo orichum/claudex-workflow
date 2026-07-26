@@ -37,6 +37,16 @@ current machine.
 | `orichum resume ID` | Resume the same logical session |
 | `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |
 
+Forward ordinary Claude Code arguments after `--`, for example:
+
+```bash
+orichum run -- -p "Summarize this repository"
+```
+
+Orichum rejects model, session, workspace, MCP, plugin, effort, tool-approval,
+and permission-mode options because those are bound by its validated control
+plane.
+
 ## Graph examples
 
 ```bash

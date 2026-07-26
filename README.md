@@ -25,8 +25,9 @@ orichum
 - Selects the correct GitHub identity, MCP_DOCKER profile, Mempalace memory,
   and Graphify code graph from the project directory.
 - Keeps concurrent and resumed sessions isolated.
-- Uses LeanCTX for compact current-source context and Headroom for request-path
-  optimization without changing your source code.
+- Automatically routes source and observational shell context through LeanCTX,
+  relationships through Graphify, durable decisions through Mempalace, and the
+  complete request through Headroom—without tool profiles or manual selection.
 
 You do not need to understand the routing architecture before using Orichum.
 Start with one provider and one project; add the other capabilities only when

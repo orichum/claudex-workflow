@@ -9,12 +9,16 @@ and Claude session identity needed for a consistent resume.
 ```bash
 cd ~/work/project
 orichum
-orichum --permission-mode acceptEdits
+orichum run -- -p "Summarize this repository"
 
 orichum sessions
 orichum session routes SESSION_ID
 orichum sessions routes SESSION_ID
 ```
+
+Use `--` after `orichum run` when forwarding Claude Code arguments. Orichum
+rejects runtime options it owns, including model, session, workspace, MCP,
+plugin, effort, tool-approval, and permission-mode settings.
 
 Every launch re-resolves and validates the project context and live services.
 A newly created logical session then freezes its selected primary route and at

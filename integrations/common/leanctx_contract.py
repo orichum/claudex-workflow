@@ -3,11 +3,21 @@
 from pathlib import Path
 
 
-TOOLS = ("ctx_read", "ctx_search", "ctx_tree", "ctx_expand")
+AUTO_APPROVED_TOOLS = (
+    "ctx_read",
+    "ctx_delta",
+    "ctx_search",
+    "ctx_glob",
+    "ctx_tree",
+    "ctx_outline",
+    "ctx_explore",
+    "ctx_expand",
+)
+TOOLS = (*AUTO_APPROVED_TOOLS, "ctx_shell")
 
 _CONFIG = """compression_level = "lite"
 minimal_overhead = true
-tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand"]
+tools_enabled = ["ctx_read", "ctx_delta", "ctx_search", "ctx_glob", "ctx_tree", "ctx_outline", "ctx_explore", "ctx_expand", "ctx_shell"]
 disabled_tools = ["ctx_call"]
 auto_capture = false
 buddy_enabled = false

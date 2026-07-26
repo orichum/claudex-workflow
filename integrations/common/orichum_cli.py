@@ -35,7 +35,9 @@ from .cliproxy_management import (
     patch_auth_fields,
 )
 from .github_identity import GithubIdentityError, ensure_github_identity
-from .leanctx_contract import TOOLS as LEANCTX_TOOLS
+from .leanctx_contract import (
+    AUTO_APPROVED_TOOLS as LEANCTX_AUTO_APPROVED_TOOLS,
+)
 from .orichum_config import (
     ConfigError,
     ResolvedConfig,
@@ -1200,6 +1202,7 @@ _OWNED_CLAUDE_OPTIONS = (
     "--fallback-model",
     "--config",
     "--plugin-dir",
+    "--plugin-url",
     "--append-system-prompt",
     "--append-system-prompt-file",
     "--system-prompt",
@@ -1222,8 +1225,11 @@ _OWNED_CLAUDE_OPTIONS = (
     "--from-pr",
     "--no-session-persistence",
     "--safe-mode",
+    "--bare",
+    "--worktree",
+    "--tmux",
 )
-_OWNED_CLAUDE_SHORT_OPTIONS = ("-c", "-r")
+_OWNED_CLAUDE_SHORT_OPTIONS = ("-c", "-r", "-w")
 
 
 def _validate_user_claude_arguments(arguments: Sequence[str]) -> list[str]:
@@ -1718,7 +1724,10 @@ def _launch_session(
         str(physical.mcp_file),
         "--strict-mcp-config",
         "--allowedTools",
-        ",".join(f"mcp__leanctx__{tool}" for tool in LEANCTX_TOOLS),
+        ",".join(
+            f"mcp__leanctx__{tool}"
+            for tool in LEANCTX_AUTO_APPROVED_TOOLS
+        ),
         "--effort",
         runtime["effort"],
         "--append-system-prompt-file",
