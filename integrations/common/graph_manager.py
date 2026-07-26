@@ -262,24 +262,41 @@ def resolve_repository_identity(repository: Path) -> RepositoryIdentity:
     return _resolve_repository_identity(repository, persist=True)
 
 
-def _status(repository: Path) -> bytes:
+def _status(
+    repository: Path, ignored_top_level: tuple[Path, ...] = ()
+) -> bytes:
+    arguments = [
+        "git",
+        "-C",
+        str(repository),
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        ".",
+        ":(exclude,top)graphify-out",
+        ":(exclude,top)graphify-out/**",
+    ]
+    for ignored in ignored_top_level:
+        try:
+            relative = ignored.relative_to(repository)
+        except ValueError as error:
+            raise GraphManagerError(
+                "Ignored repository status path is unsafe"
+            ) from error
+        if len(relative.parts) != 1:
+            raise GraphManagerError("Ignored repository status path is unsafe")
+        name = relative.as_posix()
+        arguments.extend(
+            (
+                f":(exclude,top,literal){name}",
+                f":(exclude,top,glob){name}/**",
+            )
+        )
     try:
         result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repository),
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--",
-                ".",
-                ":(exclude,top)graphify-out",
-                ":(exclude,top)graphify-out/**",
-                ":(exclude,top,glob).orichum-legacy-graphify-*",
-                ":(exclude,top,glob).orichum-legacy-graphify-*/**",
-            ],
+            arguments,
             check=False,
             capture_output=True,
         )
@@ -327,10 +344,12 @@ def _content_digest(repository: Path, relative: bytes) -> bytes | None:
         raise GraphManagerError("Changed file cannot be fingerprinted") from error
 
 
-def working_tree_fingerprint(repository: Path) -> str:
+def working_tree_fingerprint(
+    repository: Path, ignored_top_level: tuple[Path, ...] = ()
+) -> str:
     """Hash dirty status and changed or untracked regular-file contents."""
     repository = _directory_without_symlink(repository, "Repository")
-    status = _status(repository)
+    status = _status(repository, ignored_top_level)
     digest = hashlib.sha256(status)
     for path in sorted(set(_status_paths(status))):
         content = _content_digest(repository, path)
@@ -504,7 +523,11 @@ def _existing_checkout_id(repository: Path) -> str:
 
 
 def _resolve_graph_target(
-    repository: Path, data_root: Path, *, persist: bool
+    repository: Path,
+    data_root: Path,
+    *,
+    persist: bool,
+    ignored_top_level: tuple[Path, ...] = (),
 ) -> GraphTarget:
     repository = _directory_without_symlink(repository, "Repository")
     data_root = _directory_without_symlink(
@@ -512,10 +535,12 @@ def _resolve_graph_target(
     )
     identity = _resolve_repository_identity(repository, persist=persist)
     revision = _git_text(repository, "rev-parse", "HEAD")
-    status = _status(repository)
+    status = _status(repository, ignored_top_level)
     root = data_root / "graphs" / identity.key
     if status:
-        fingerprint = working_tree_fingerprint(repository)
+        fingerprint = working_tree_fingerprint(
+            repository, ignored_top_level
+        )
         checkout_id = (
             _checkout_id(repository)
             if persist
@@ -1064,8 +1089,17 @@ def _target_data_root(target: GraphTarget) -> Path:
     return candidate
 
 
-def _require_current_binding(target: GraphTarget, data_root: Path) -> None:
-    current = resolve_graph_target(target.repository, data_root)
+def _require_current_binding(
+    target: GraphTarget,
+    data_root: Path,
+    ignored_top_level: tuple[Path, ...] = (),
+) -> None:
+    current = _resolve_graph_target(
+        target.repository,
+        data_root,
+        persist=True,
+        ignored_top_level=ignored_top_level,
+    )
     expected = (
         target.repository,
         target.identity.key,
@@ -1186,11 +1220,11 @@ def migrate_legacy_graph(target: GraphTarget) -> bool:
         if source_hashes != _tree_hashes(staged):
             raise GraphError("Legacy Graphify output copy verification failed")
         data_root = _target_data_root(target)
-        _require_current_binding(target, data_root)
+        _require_current_binding(target, data_root, (quarantined,))
         _validate_graph_file(staged / "graph.json", target.revision)
         _write_metadata(target, staged)
         _validate_output(target, staged)
-        _require_current_binding(target, data_root)
+        _require_current_binding(target, data_root, (quarantined,))
         _activate_staged_output(staged, target.output_dir)
         activated = True
         try:

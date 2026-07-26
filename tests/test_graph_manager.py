@@ -487,6 +487,19 @@ class GraphManagerTests(unittest.TestCase):
         second = working_tree_fingerprint(self.first_clone)
         self.assertNotEqual(first, second)
 
+    def test_user_quarantine_prefix_content_uses_working_target(self) -> None:
+        user_content = (
+            self.first_clone / ".orichum-legacy-graphify-user-content"
+        )
+        user_content.mkdir()
+        (user_content / "notes.txt").write_text(
+            "user content\n", encoding="utf-8"
+        )
+
+        target = resolve_graph_target(self.first_clone, self.data_root)
+
+        self.assertEqual(target.kind, "working")
+
     def test_ambiguous_fetch_remotes_are_rejected(self) -> None:
         repository = self.root / "ambiguous"
         self._init_repository(repository)
@@ -1665,6 +1678,37 @@ with counter.open("r+", encoding="ascii") as state:
         self.assertTrue(legacy.exists())
         self.assertFalse(target.output_dir.exists())
         self.assertEqual(self.target().kind, "working")
+
+    def test_active_quarantine_is_ignored_only_by_migration_recheck(self):
+        import integrations.common.graph_manager as graph_manager
+
+        target = self.target()
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        (legacy / "graph.json").write_text(
+            json.dumps({
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
+        real_copy = graph_manager._copy_legacy_tree
+        observed = []
+
+        def observe_quarantine(source, destination):
+            hashes = real_copy(source, destination)
+            observed.append(self.target().kind)
+            return hashes
+
+        with mock.patch(
+            "integrations.common.graph_manager._copy_legacy_tree",
+            side_effect=observe_quarantine,
+        ):
+            self.assertTrue(migrate_legacy_graph(target))
+
+        self.assertEqual(observed, ["working"])
+        self.assertEqual(inspect_graph(target).status, "current")
 
     def test_quarantine_cleanup_failure_rolls_back_and_retry_migrates(self):
         import integrations.common.graph_manager as graph_manager
