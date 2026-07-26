@@ -174,16 +174,6 @@ for managed_launcher in orichum; do
   fi
 done
 
-install -d -m 0700 \
-  "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state" "$ORICHUM_CONFIG_ROOT"
-acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
-control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"
-recover_installed_control_plane \
-  python3 "$WORKFLOW_ROOT" \
-  "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
-  "$WORKFLOW_LOCK_FD" || \
-  workflow_die "unfinished Orichum control-plane activation could not be recovered"
-
 case "$(uname -s)" in
   Darwin)
     platform=darwin
@@ -225,6 +215,20 @@ if [[ "$platform" == darwin ]]; then
     command -v "$command_name" >/dev/null || workflow_die "missing required command: $command_name"
   done
 fi
+
+preflight_owned_headroom_installation \
+  "$platform" "$WORKFLOW_DATA_ROOT" || \
+  workflow_die "legacy Orichum Headroom installation is unsafe"
+
+install -d -m 0700 \
+  "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state" "$ORICHUM_CONFIG_ROOT"
+acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
+control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"
+recover_installed_control_plane \
+  python3 "$WORKFLOW_ROOT" \
+  "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
+  "$WORKFLOW_LOCK_FD" || \
+  workflow_die "unfinished Orichum control-plane activation could not be recovered"
 
 (
   cd "$WORKFLOW_ROOT"
@@ -388,6 +392,7 @@ ln -sfn "$WORKFLOW_ROOT/bin/orichum-route-proxy" \
 
 UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/tools/uv"
 UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/tools/bin"
+export UV_TOOL_DIR UV_TOOL_BIN_DIR
 
 migrate_legacy_model_config "$WORKFLOW_DATA_ROOT"
 find "$WORKFLOW_DATA_ROOT/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
@@ -913,6 +918,9 @@ snapshot_path "$claudex_proxy_service_file" \
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
 snapshot_path "$USER_BIN_DIR/orichum" \
   "$snapshot_dir" orichum-launcher
+migrate_legacy_private_tools \
+  "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" || \
+  workflow_die "legacy private Mempalace and Graphify tools could not be migrated"
 snapshot_private_tool_state \
   "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
   "$snapshot_dir/private-tools"
@@ -1258,6 +1266,13 @@ require_activation_port_available() {
   [[ "$activation_port_ready" == true ]] || workflow_die \
     "$service_name activation port $port remained occupied; prior state will be restored"
 }
+
+normalize_headroom_free_endpoint_snapshot \
+  "$snapshot_dir/service-ports.data" \
+  "${prior_model_generation_snapshot:-}" \
+  "$PRIOR_CLIPROXY_PORT" "$PERSISTED_CLAUDEX_PROXY_PORT" \
+  "$PRIOR_ROUTE_PROXY_PORT" || \
+  workflow_die "rollback endpoint state could not be normalized safely"
 
 for cleanup_index in "${!headroom_cleanup_files[@]}"; do
   remove_owned_headroom_installation \

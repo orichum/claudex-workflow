@@ -75,6 +75,18 @@ observed_cwd="$(
 )"
 [[ "$observed_cwd" == "$caller_dir" ]]
 
+set +e
+ORICHUM_CONFIG_HOME="$ROOT/config" \
+PATH="$fixture/fake-bin:$PATH" \
+  "$ROOT/bin/orichum" headroom status \
+  >"$fixture/headroom-command.stdout" \
+  2>"$fixture/headroom-command.stderr"
+headroom_command_status=$?
+set -e
+[[ "$headroom_command_status" -eq 2 ]]
+[[ ! -s "$fixture/headroom-command.stdout" ]]
+rg -Fq "invalid choice: 'headroom'" "$fixture/headroom-command.stderr"
+
 install -d \
   "$fixture/post-install-system-bin" \
   "$fixture/post-install-user-bin" \

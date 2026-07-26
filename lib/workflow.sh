@@ -1048,6 +1048,154 @@ headroom_service_is_owned() {
   service_definition_is_owned "$1" "$2" headroom "${3:-either}"
 }
 
+headroom_private_runtime_is_safe() {
+  local data_root="$1"
+  local data_physical runtime_physical
+  [[ "$data_root" == /* && "$data_root" != / ]] || return 1
+  if [[ ! -e "$data_root/headroom" && ! -L "$data_root/headroom" ]]; then
+    return 0
+  fi
+  [[ -d "$data_root" && ! -L "$data_root" ]] && \
+    [[ -d "$data_root/headroom" && ! -L "$data_root/headroom" ]] && \
+    [[ "$(path_uid "$data_root/headroom")" == "$(id -u)" ]] || return 1
+  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
+  runtime_physical="$(cd -P -- "$data_root/headroom" && pwd)" || return 1
+  [[ "$runtime_physical" == "$data_physical/headroom" ]]
+}
+
+legacy_private_tool_layout_is_safe() (
+  local data_root="$1"
+  local legacy_root="$data_root/headroom"
+  local legacy_tool_dir="$legacy_root/tools"
+  local legacy_bin_dir="$legacy_root/bin"
+  local data_physical legacy_physical source_path source_physical
+  local environment entry_name entry_path current_uid
+  headroom_private_runtime_is_safe "$data_root" || return 1
+  if [[ ! -e "$legacy_tool_dir" && ! -L "$legacy_tool_dir" && \
+        ! -e "$legacy_bin_dir" && ! -L "$legacy_bin_dir" ]]; then
+    return 0
+  fi
+  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
+  legacy_physical="$(cd -P -- "$legacy_root" && pwd)" || return 1
+  [[ "$legacy_physical" == "$data_physical/headroom" ]] || return 1
+  current_uid="$(id -u)"
+  for source_path in "$legacy_tool_dir" "$legacy_bin_dir"; do
+    if [[ -e "$source_path" || -L "$source_path" ]]; then
+      [[ -d "$source_path" && ! -L "$source_path" ]] && \
+        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || return 1
+    fi
+  done
+  for environment in mempalace graphifyy; do
+    source_path="$legacy_tool_dir/$environment"
+    if [[ -e "$source_path" || -L "$source_path" ]]; then
+      [[ -d "$source_path" && ! -L "$source_path" ]] && \
+        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || return 1
+      source_physical="$(cd -P -- "$source_path" && pwd)" || return 1
+      [[ "$source_physical" == "$legacy_physical/tools/$environment" ]] || \
+        return 1
+    fi
+  done
+  shopt -s nullglob
+  for entry_path in "$legacy_bin_dir"/*; do
+    entry_name="$(basename "$entry_path")"
+    [[ "$entry_name" != headroom ]] || continue
+    [[ -L "$entry_path" ]] || return 1
+    source_physical="$(workflow_physical_path "$entry_path")" || return 1
+    case "$source_physical" in
+      "$legacy_physical/tools/mempalace/"*|\
+      "$legacy_physical/tools/graphifyy/"*) ;;
+      *) return 1 ;;
+    esac
+  done
+)
+
+preflight_owned_headroom_installation() {
+  local platform="$1"
+  local data_root="$2"
+  local cleanup_index service_file service_label service_unit ownership_mode
+  local target_state loaded_definition
+  local -a service_files service_labels service_units ownership_modes
+  headroom_private_runtime_is_safe "$data_root" || {
+    workflow_die "refusing unsafe private Headroom runtime"
+    return 1
+  }
+  legacy_private_tool_layout_is_safe "$data_root" || {
+    workflow_die "refusing unsafe legacy private tool layout"
+    return 1
+  }
+  case "$platform" in
+    darwin)
+      service_files=(
+        "$HOME/Library/LaunchAgents/io.orichum.headroom.plist"
+        "$HOME/Library/LaunchAgents/com.user.claudex-headroom.plist"
+        "$HOME/Library/LaunchAgents/com.user.headroom-proxy.plist"
+      )
+      service_labels=(
+        io.orichum.headroom
+        com.user.claudex-headroom
+        com.user.headroom-proxy
+      )
+      service_units=(- - -)
+      ;;
+    systemd)
+      service_files=(
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-headroom.service"
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-headroom.service"
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
+      )
+      service_labels=(- - -)
+      service_units=(
+        orichum-headroom.service
+        claudex-headroom.service
+        headroom-proxy.service
+      )
+      ;;
+    *) return 1 ;;
+  esac
+  ownership_modes=(new legacy legacy)
+  for cleanup_index in "${!service_files[@]}"; do
+    service_file="${service_files[$cleanup_index]}"
+    ownership_mode="${ownership_modes[$cleanup_index]}"
+    if [[ -e "$service_file" || -L "$service_file" ]]; then
+      headroom_service_is_owned \
+        "$service_file" "$data_root" "$ownership_mode" || {
+          workflow_die "refusing to remove unknown service file: $service_file"
+          return 1
+        }
+    fi
+  done
+  for cleanup_index in "${!service_files[@]}"; do
+    service_file="${service_files[$cleanup_index]}"
+    service_label="${service_labels[$cleanup_index]}"
+    service_unit="${service_units[$cleanup_index]}"
+    target_state="$(managed_service_target_state \
+      "$platform" "$service_label" "$service_unit")" || {
+        workflow_die "Headroom service target could not be inspected safely"
+        return 1
+      }
+    if [[ "$target_state" == loaded ]]; then
+      if [[ ! -f "$service_file" || -L "$service_file" ]]; then
+        workflow_die "refusing loaded unknown Headroom target"
+        return 1
+      fi
+      loaded_definition="$(managed_service_definition_path \
+        "$platform" "$service_label" "$service_unit" 2>/dev/null)" || {
+          workflow_die "Headroom service definition could not be inspected safely"
+          return 1
+        }
+      if [[ "$loaded_definition" != "$service_file" ]]; then
+        workflow_die "refusing loaded unknown Headroom target"
+        return 1
+      fi
+      managed_headroom_loaded_identity_is_owned \
+        "$platform" "$service_label" "$service_unit" "$service_file" || {
+          workflow_die "refusing loaded foreign Headroom identity"
+          return 1
+        }
+    fi
+  done
+}
+
 remove_owned_headroom_installation() {
   local platform="$1"
   local data_root="$2"
@@ -1055,21 +1203,15 @@ remove_owned_headroom_installation() {
   local service_label="$4"
   local service_unit="$5"
   local ownership_mode="$6"
-  local status remaining_service_file remaining_mode cleanup_index
-  local -a known_service_files known_service_modes
+  local remaining_service_file
+  local target_state loaded_definition
+  local -a known_service_files
   [[ "$data_root" == /* && "$data_root" != / ]] || return 1
   if [[ ! -d "$data_root" || -L "$data_root" ]]; then
     workflow_die "refusing to remove Headroom from unsafe data root"
     return 1
   fi
-  if [[ ! -e "$service_file" && ! -L "$service_file" ]]; then
-    return 0
-  fi
-  headroom_service_is_owned \
-    "$service_file" "$data_root" "$ownership_mode" || {
-      workflow_die "refusing to remove unknown service file: $service_file"
-      return 1
-    }
+  preflight_owned_headroom_installation "$platform" "$data_root" || return 1
   if [[ "$platform" == darwin ]]; then
     known_service_files=(
       "$HOME/Library/LaunchAgents/io.orichum.headroom.plist"
@@ -1083,35 +1225,39 @@ remove_owned_headroom_installation() {
       "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
     )
   fi
-  known_service_modes=(new legacy legacy)
-  for cleanup_index in "${!known_service_files[@]}"; do
-    remaining_service_file="${known_service_files[$cleanup_index]}"
-    remaining_mode="${known_service_modes[$cleanup_index]}"
-    if [[ -e "$remaining_service_file" || \
-          -L "$remaining_service_file" ]]; then
-      headroom_service_is_owned \
-        "$remaining_service_file" "$data_root" "$remaining_mode" || {
-          workflow_die \
-            "refusing to remove unknown service file: $remaining_service_file"
-          return 1
-        }
-    fi
-  done
-  if [[ -e "$data_root/headroom" || -L "$data_root/headroom" ]]; then
-    if [[ ! -d "$data_root/headroom" || -L "$data_root/headroom" ]]; then
-      workflow_die "refusing to remove unsafe private Headroom runtime"
+  if [[ ! -e "$service_file" && ! -L "$service_file" ]]; then
+    for remaining_service_file in "${known_service_files[@]}"; do
+      [[ ! -e "$remaining_service_file" && \
+         ! -L "$remaining_service_file" ]] || return 0
+    done
+    rm -rf -- "$data_root/headroom"
+    return
+  fi
+  headroom_service_is_owned \
+    "$service_file" "$data_root" "$ownership_mode" || {
+      workflow_die "refusing to remove unknown service file: $service_file"
+      return 1
+    }
+  target_state="$(managed_service_target_state \
+    "$platform" "$service_label" "$service_unit")" || return 1
+  if [[ "$target_state" == loaded ]]; then
+    loaded_definition="$(managed_service_definition_path \
+      "$platform" "$service_label" "$service_unit" 2>/dev/null)" || return 1
+    if [[ "$loaded_definition" != "$service_file" ]]; then
+      workflow_die "refusing to remove loaded unknown Headroom target"
       return 1
     fi
+    managed_headroom_loaded_identity_is_owned \
+      "$platform" "$service_label" "$service_unit" "$service_file" || {
+        workflow_die "refusing to remove loaded foreign Headroom identity"
+        return 1
+      }
   fi
   case "$platform" in
     darwin)
-      if launchctl print "gui/$(id -u)/$service_label" \
-          >/dev/null 2>&1; then
+      if [[ "$target_state" == loaded ]]; then
         launchctl bootout "gui/$(id -u)" "$service_file" \
           >/dev/null 2>&1 || return 1
-      else
-        status=$?
-        [[ "$status" -eq 113 ]] || return 1
       fi
       ;;
     systemd)
@@ -1204,6 +1350,135 @@ managed_service_definition_path() {
   esac
   [[ "$definition_path" == /* ]] || return 1
   printf '%s\n' "$definition_path"
+}
+
+managed_headroom_loaded_identity_is_owned() {
+  local platform="$1"
+  local label="$2"
+  local unit="$3"
+  local service_file="$4"
+  local loaded_output loaded_environment=
+  case "$platform" in
+    darwin)
+      loaded_output="$(launchctl print \
+        "gui/$(id -u)/$label" 2>/dev/null)" || return 1
+      ;;
+    systemd)
+      loaded_output="$(systemctl --user show \
+        --property ExecStart --value "$unit" 2>/dev/null)" || return 1
+      loaded_environment="$(systemctl --user show \
+        --property Environment --value "$unit" 2>/dev/null)" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  workflow_python - \
+    "$platform" "$service_file" "$loaded_output" "$loaded_environment" <<'PY'
+import plistlib
+import shlex
+import sys
+from pathlib import Path
+
+platform = sys.argv[1]
+service_file = Path(sys.argv[2])
+loaded_text = sys.argv[3]
+loaded_environment_text = sys.argv[4]
+
+
+def systemd_words(value):
+    return shlex.split(value.replace("%%", "%").replace("$$", "$"))
+
+
+if platform == "darwin":
+    document = plistlib.loads(service_file.read_bytes())
+    expected_arguments = document.get("ProgramArguments")
+    expected_environment = document.get("EnvironmentVariables")
+    if not isinstance(expected_arguments, list) or not isinstance(
+        expected_environment, dict
+    ):
+        raise SystemExit(1)
+    loaded_program = None
+    loaded_arguments = []
+    loaded_values = {}
+    section = None
+    for raw_line in loaded_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("program = "):
+            loaded_program = line[len("program = ") :]
+            continue
+        if line == "arguments = {":
+            section = "arguments"
+            continue
+        if line == "environment = {":
+            section = "environment"
+            continue
+        if line == "}":
+            section = None
+            continue
+        if section == "arguments" and line:
+            try:
+                values = shlex.split(line)
+            except ValueError:
+                raise SystemExit(1)
+            loaded_arguments.append(values[0] if len(values) == 1 else line)
+        elif section == "environment" and " => " in line:
+            key, value = line.split(" => ", 1)
+            loaded_values[key] = value
+    owned = (
+        loaded_program == expected_arguments[0]
+        and loaded_arguments == expected_arguments
+        and all(
+            loaded_values.get(key) == value
+            for key, value in expected_environment.items()
+        )
+    )
+    raise SystemExit(0 if owned else 1)
+
+lines = [
+    line.strip()
+    for line in service_file.read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith(("#", ";"))
+]
+exec_lines = [
+    line[len("ExecStart=") :] for line in lines if line.startswith("ExecStart=")
+]
+if len(exec_lines) != 1:
+    raise SystemExit(1)
+try:
+    expected_arguments = systemd_words(exec_lines[0])
+except ValueError:
+    raise SystemExit(1)
+expected_environment = {}
+for line in lines:
+    if not line.startswith("Environment="):
+        continue
+    try:
+        values = shlex.split(line[len("Environment=") :].replace("%%", "%"))
+    except ValueError:
+        raise SystemExit(1)
+    for value in values:
+        if "=" in value:
+            key, item = value.split("=", 1)
+            expected_environment[key] = item
+
+loaded_command = loaded_text.strip()
+if "argv[]=" in loaded_command:
+    loaded_command = loaded_command.split("argv[]=", 1)[1]
+    loaded_command = loaded_command.split(" ; ", 1)[0]
+try:
+    loaded_arguments = shlex.split(loaded_command)
+    loaded_values = {}
+    for value in shlex.split(loaded_environment_text.replace("%%", "%")):
+        if "=" in value:
+            key, item = value.split("=", 1)
+            loaded_values[key] = item
+except ValueError:
+    raise SystemExit(1)
+owned = loaded_arguments == expected_arguments and all(
+    loaded_values.get(key) == value
+    for key, value in expected_environment.items()
+)
+raise SystemExit(0 if owned else 1)
+PY
 }
 
 managed_service_main_pid_value() {
@@ -1774,6 +2049,139 @@ private_tool_layout_is_owned() {
     [[ "$tool_physical" == "$data_physical/tools/uv" ]] && \
     [[ "$bin_physical" == "$data_physical/tools/bin" ]]
 }
+
+migrate_legacy_private_tools() (
+  local data_root="$1"
+  local tool_dir="$2"
+  local bin_dir="$3"
+  local legacy_root="$data_root/headroom"
+  local legacy_tool_dir="$legacy_root/tools"
+  local legacy_bin_dir="$legacy_root/bin"
+  local data_physical legacy_physical source_physical destination_physical
+  local environment source_path destination_path temporary_path
+  local cleanup_index entry_name entry_path translated_target
+  local current_uid
+  local -a legacy_entries legacy_targets
+  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
+    workflow_die "refusing unsafe private tool migration layout"
+    return 1
+  }
+  legacy_private_tool_layout_is_safe "$data_root" || {
+    workflow_die "refusing unsafe legacy private tool layout"
+    return 1
+  }
+  if [[ ! -e "$legacy_tool_dir" && ! -L "$legacy_tool_dir" && \
+        ! -e "$legacy_bin_dir" && ! -L "$legacy_bin_dir" ]]; then
+    return 0
+  fi
+  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
+  legacy_physical="$(cd -P -- "$legacy_root" && pwd)" || return 1
+  [[ "$legacy_physical" == "$data_physical/headroom" ]] || return 1
+  current_uid="$(id -u)"
+  for source_path in "$legacy_tool_dir" "$legacy_bin_dir"; do
+    if [[ -e "$source_path" || -L "$source_path" ]]; then
+      [[ -d "$source_path" && ! -L "$source_path" ]] && \
+        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || {
+          workflow_die "refusing unsafe legacy private tool layout"
+          return 1
+        }
+    fi
+  done
+  for environment in mempalace graphifyy; do
+    source_path="$legacy_tool_dir/$environment"
+    if [[ -e "$source_path" || -L "$source_path" ]]; then
+      [[ -d "$source_path" && ! -L "$source_path" ]] && \
+        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || {
+          workflow_die "refusing unsafe legacy private tool environment"
+          return 1
+        }
+      source_physical="$(cd -P -- "$source_path" && pwd)" || return 1
+      [[ "$source_physical" == "$legacy_physical/tools/$environment" ]] || \
+        return 1
+    fi
+  done
+  shopt -s nullglob
+  for entry_path in "$legacy_bin_dir"/*; do
+    entry_name="$(basename "$entry_path")"
+    [[ "$entry_name" != headroom ]] || continue
+    source_physical="$(workflow_physical_path "$entry_path")" || return 1
+    case "$source_physical" in
+      "$legacy_physical/tools/mempalace/"*)
+        translated_target="$tool_dir/mempalace/${source_physical#"$legacy_physical/tools/mempalace/"}"
+        ;;
+      "$legacy_physical/tools/graphifyy/"*)
+        translated_target="$tool_dir/graphifyy/${source_physical#"$legacy_physical/tools/graphifyy/"}"
+        ;;
+      *)
+        workflow_die "refusing unknown legacy private tool entrypoint"
+        return 1
+        ;;
+    esac
+    legacy_entries+=("$entry_name")
+    legacy_targets+=("$translated_target")
+  done
+  for environment in mempalace graphifyy; do
+    source_path="$legacy_tool_dir/$environment"
+    destination_path="$tool_dir/$environment"
+    if [[ ! -e "$source_path" && ! -L "$source_path" ]] || \
+       [[ ! -e "$destination_path" && ! -L "$destination_path" ]]; then
+      continue
+    fi
+    [[ -d "$destination_path" && ! -L "$destination_path" ]] && \
+      [[ "$(path_uid "$destination_path")" == "$current_uid" ]] || {
+        workflow_die "refusing unsafe migrated private tool environment"
+        return 1
+      }
+    destination_physical="$(cd -P -- "$destination_path" && pwd)" || return 1
+    [[ "$destination_physical" == \
+       "$(cd -P -- "$tool_dir" && pwd)/$environment" ]] && \
+      diff -qr -- "$source_path" "$destination_path" >/dev/null || {
+        workflow_die "refusing conflicting private tool migration state"
+        return 1
+      }
+  done
+  for cleanup_index in "${!legacy_entries[@]}"; do
+    entry_name="${legacy_entries[$cleanup_index]}"
+    destination_path="$bin_dir/$entry_name"
+    if [[ ! -e "$destination_path" && ! -L "$destination_path" ]]; then
+      continue
+    fi
+    [[ -L "$destination_path" ]] && \
+      [[ "$(readlink "$destination_path")" == \
+         "${legacy_targets[$cleanup_index]}" ]] || {
+        workflow_die "refusing stale private tool migration entrypoint"
+        return 1
+      }
+  done
+  for environment in mempalace graphifyy; do
+    source_path="$legacy_tool_dir/$environment"
+    destination_path="$tool_dir/$environment"
+    if [[ ! -e "$source_path" && ! -L "$source_path" ]]; then
+      continue
+    fi
+    if [[ -e "$destination_path" || -L "$destination_path" ]]; then
+      continue
+    fi
+    temporary_path="$tool_dir/.migrate-$environment.$$.$RANDOM"
+    rm -rf -- "$temporary_path"
+    cp -pPR "$source_path" "$temporary_path" || {
+      rm -rf -- "$temporary_path"
+      return 1
+    }
+    mv "$temporary_path" "$destination_path" || {
+      rm -rf -- "$temporary_path"
+      return 1
+    }
+  done
+  for cleanup_index in "${!legacy_entries[@]}"; do
+    entry_name="${legacy_entries[$cleanup_index]}"
+    destination_path="$bin_dir/$entry_name"
+    if [[ -e "$destination_path" || -L "$destination_path" ]]; then
+      continue
+    fi
+    ln -s "${legacy_targets[$cleanup_index]}" "$destination_path" || return 1
+  done
+)
 
 snapshot_private_tree() {
   local source_path="$1"
@@ -2935,6 +3343,71 @@ render_discovered_claudex_config() {
     "$controller_model" "$fast_model" "$balanced_model" "$powerful_model" \
     "$haiku_model" "$sonnet_model" "$opus_model" "" \
     "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port"
+}
+
+normalize_headroom_free_endpoint_snapshot() {
+  local ports_snapshot="$1"
+  local model_snapshot="$2"
+  local cliproxy_port="$3"
+  local claudex_proxy_port="$4"
+  local route_proxy_port="$5"
+  local ports_temporary= config_temporary=
+  valid_service_port "$cliproxy_port" || return 1
+  valid_service_port "$claudex_proxy_port" || return 1
+  valid_service_port "$route_proxy_port" || return 1
+  [[ "$cliproxy_port" != "$claudex_proxy_port" && \
+     "$cliproxy_port" != "$route_proxy_port" && \
+     "$claudex_proxy_port" != "$route_proxy_port" ]] || return 1
+  if [[ -e "$ports_snapshot" || -L "$ports_snapshot" ]]; then
+    [[ -f "$ports_snapshot" && ! -L "$ports_snapshot" ]] || return 1
+    ports_temporary="$(mktemp \
+      "$(dirname "$ports_snapshot")/.service-ports.rollback.XXXXXX")" || \
+      return 1
+    if ! jq -n \
+        --argjson cliproxy "$cliproxy_port" \
+        --argjson claudex_proxy "$claudex_proxy_port" \
+        --argjson route_proxy "$route_proxy_port" \
+        '{
+          claudexProxyPort: $claudex_proxy,
+          cliproxyPort: $cliproxy,
+          routeProxyPort: $route_proxy
+        }' >"$ports_temporary" || \
+       ! chmod 0600 "$ports_temporary"; then
+      rm -f -- "$ports_temporary"
+      return 1
+    fi
+  fi
+  if [[ -n "$model_snapshot" ]]; then
+    [[ -d "$model_snapshot" && ! -L "$model_snapshot" ]] && \
+      [[ -f "$model_snapshot/models.json" && \
+         ! -L "$model_snapshot/models.json" ]] && \
+      [[ -f "$model_snapshot/claudex.toml" && \
+         ! -L "$model_snapshot/claudex.toml" ]] || {
+        rm -f -- "$ports_temporary"
+        return 1
+      }
+    config_temporary="$(mktemp \
+      "$model_snapshot/.claudex.rollback.XXXXXX")" || {
+        rm -f -- "$ports_temporary"
+        return 1
+      }
+    if ! render_discovered_claudex_config \
+        "$model_snapshot/models.json" "$config_temporary" \
+        "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port" || \
+       ! chmod 0600 "$config_temporary"; then
+      rm -f -- "$ports_temporary" "$config_temporary"
+      return 1
+    fi
+  fi
+  if [[ -n "$config_temporary" ]]; then
+    mv -f "$config_temporary" "$model_snapshot/claudex.toml" || {
+      rm -f -- "$ports_temporary" "$config_temporary"
+      return 1
+    }
+  fi
+  if [[ -n "$ports_temporary" ]]; then
+    mv -f "$ports_temporary" "$ports_snapshot"
+  fi
 }
 
 extract_semver() {

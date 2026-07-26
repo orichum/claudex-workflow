@@ -1064,9 +1064,67 @@ cleanup_command_log="$fixture/headroom-cleanup.commands"
 : >"$cleanup_command_log"
 launchctl() {
   printf 'launchctl\t%s\n' "$*" >>"$cleanup_command_log"
+  if [[ "${1:-}" == print ]]; then
+    local label="${2##*/}"
+    local managed_path="$HOME/Library/LaunchAgents/$label.plist"
+    local service_path="$managed_path"
+    local identity_path="${FAKE_LAUNCHD_IDENTITY_FILE:-$managed_path}"
+    if [[ "${FAKE_LAUNCHD_LABEL:-}" == "$label" ]]; then
+      service_path="$FAKE_LAUNCHD_LOADED_PATH"
+    elif [[ ! -f "$managed_path" ]]; then
+      return 113
+    fi
+    printf 'path = %s\n' "$service_path"
+    python3 - "$identity_path" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+document = plistlib.loads(Path(sys.argv[1]).read_bytes())
+arguments = document["ProgramArguments"]
+print(f"program = {arguments[0]}")
+print("arguments = {")
+for argument in arguments:
+    print(f"\t{argument}")
+print("}")
+print("environment = {")
+for key, value in document["EnvironmentVariables"].items():
+    print(f"\t{key} => {value}")
+print("}")
+PY
+  fi
 }
 systemctl() {
   printf 'systemctl\t%s\n' "$*" >>"$cleanup_command_log"
+  if [[ "${1:-}" == --user && "${2:-}" == show ]]; then
+    local property="${4:-}"
+    local unit="${6:-}"
+    local managed_path="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$unit"
+    local service_path="$managed_path"
+    local identity_path="${FAKE_SYSTEMD_IDENTITY_FILE:-$managed_path}"
+    if [[ "${FAKE_SYSTEMD_UNIT:-}" == "$unit" ]]; then
+      service_path="$FAKE_SYSTEMD_LOADED_PATH"
+    elif [[ ! -f "$managed_path" ]]; then
+      if [[ "$property" == LoadState ]]; then
+        printf 'not-found\n'
+        return 0
+      fi
+      return 1
+    fi
+    case "$property" in
+      LoadState) printf 'loaded\n' ;;
+      FragmentPath) printf '%s\n' "$service_path" ;;
+      ExecStart)
+        printf '{ path=fake ; argv[]=%s ; ignore_errors=no ; start_time=[] ; stop_time=[] ; pid=0 ; code=(null) ; status=0 }\n' \
+          "$(sed -n 's/^ExecStart=//p' "$identity_path")"
+        ;;
+      Environment)
+        sed -n 's/^Environment=//p' "$identity_path" | tr '\n' ' '
+        printf '\n'
+        ;;
+      *) return 1 ;;
+    esac
+  fi
 }
 
 for launchd_case in \
@@ -1181,6 +1239,139 @@ fi
 rg -Fq 'refusing to remove unknown service file' \
   "$foreign_root/removal.stderr"
 
+loaded_foreign_launchd_root="$fixture/cleanup-loaded-foreign-launchd"
+loaded_foreign_launchd_data="$loaded_foreign_launchd_root/data"
+loaded_foreign_launchd_home="$loaded_foreign_launchd_root/home"
+loaded_foreign_launchd_service="$loaded_foreign_launchd_home/Library/LaunchAgents/io.orichum.headroom.plist"
+install -d -m 0700 \
+  "$loaded_foreign_launchd_data/headroom/bin" \
+  "$(dirname "$loaded_foreign_launchd_service")"
+write_legacy_headroom_launchd_fixture \
+  "$loaded_foreign_launchd_service" "$loaded_foreign_launchd_data" \
+  io.orichum.headroom
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$loaded_foreign_launchd_home" \
+  FAKE_LAUNCHD_LABEL=io.orichum.headroom \
+  FAKE_LAUNCHD_LOADED_PATH="$loaded_foreign_launchd_root/foreign.plist" \
+  remove_owned_headroom_installation \
+    darwin "$loaded_foreign_launchd_data" "$loaded_foreign_launchd_service" \
+    io.orichum.headroom - new \
+    2>"$loaded_foreign_launchd_root/removal.stderr"; then
+  printf 'owned launchd file removed while label loaded a foreign target\n' >&2
+  exit 1
+fi
+[[ -f "$loaded_foreign_launchd_service" && \
+   -d "$loaded_foreign_launchd_data/headroom" ]]
+if tail -n "+$((commands_before + 1))" "$cleanup_command_log" | \
+    rg -q '^launchctl[[:space:]]+bootout[[:space:]]'; then
+  printf 'foreign loaded launchd target was stopped\n' >&2
+  exit 1
+fi
+
+loaded_foreign_systemd_root="$fixture/cleanup-loaded-foreign-systemd"
+loaded_foreign_systemd_data="$loaded_foreign_systemd_root/data"
+loaded_foreign_systemd_home="$loaded_foreign_systemd_root/home"
+loaded_foreign_systemd_config="$loaded_foreign_systemd_root/config"
+loaded_foreign_systemd_service="$loaded_foreign_systemd_config/systemd/user/orichum-headroom.service"
+install -d -m 0700 \
+  "$loaded_foreign_systemd_data/headroom/bin" \
+  "$(dirname "$loaded_foreign_systemd_service")"
+write_legacy_headroom_systemd_fixture \
+  "$loaded_foreign_systemd_service" "$loaded_foreign_systemd_data" \
+  'Orichum Headroom proxy'
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$loaded_foreign_systemd_home" \
+  XDG_CONFIG_HOME="$loaded_foreign_systemd_config" \
+  FAKE_SYSTEMD_UNIT=orichum-headroom.service \
+  FAKE_SYSTEMD_LOADED_PATH="$loaded_foreign_systemd_root/foreign.service" \
+  remove_owned_headroom_installation \
+    systemd "$loaded_foreign_systemd_data" \
+    "$loaded_foreign_systemd_service" - orichum-headroom.service new \
+    2>"$loaded_foreign_systemd_root/removal.stderr"; then
+  printf 'owned systemd file removed while unit loaded a foreign target\n' >&2
+  exit 1
+fi
+[[ -f "$loaded_foreign_systemd_service" && \
+   -d "$loaded_foreign_systemd_data/headroom" ]]
+if tail -n "+$((commands_before + 1))" "$cleanup_command_log" | \
+    rg -q '^systemctl[[:space:]]+--user[[:space:]]+(stop|disable)[[:space:]]'; then
+  printf 'foreign loaded systemd target was stopped or disabled\n' >&2
+  exit 1
+fi
+
+stale_loaded_launchd_root="$fixture/cleanup-stale-loaded-launchd"
+stale_loaded_launchd_data="$stale_loaded_launchd_root/data"
+stale_loaded_launchd_home="$stale_loaded_launchd_root/home"
+stale_loaded_launchd_service="$stale_loaded_launchd_home/Library/LaunchAgents/io.orichum.headroom.plist"
+stale_loaded_launchd_identity="$stale_loaded_launchd_root/loaded.plist"
+install -d -m 0700 \
+  "$stale_loaded_launchd_data/headroom/bin" \
+  "$(dirname "$stale_loaded_launchd_service")"
+write_legacy_headroom_launchd_fixture \
+  "$stale_loaded_launchd_service" "$stale_loaded_launchd_data" \
+  io.orichum.headroom
+cp "$stale_loaded_launchd_service" "$stale_loaded_launchd_identity"
+python3 - "$stale_loaded_launchd_identity" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+document["ProgramArguments"][3] = "127.0.0.2"
+path.write_bytes(plistlib.dumps(document))
+PY
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$stale_loaded_launchd_home" \
+  FAKE_LAUNCHD_IDENTITY_FILE="$stale_loaded_launchd_identity" \
+  remove_owned_headroom_installation \
+    darwin "$stale_loaded_launchd_data" "$stale_loaded_launchd_service" \
+    io.orichum.headroom - new \
+    2>"$stale_loaded_launchd_root/removal.stderr"; then
+  printf 'stale foreign launchd identity was stopped from a replaced file\n' >&2
+  exit 1
+fi
+[[ -f "$stale_loaded_launchd_service" && \
+   -d "$stale_loaded_launchd_data/headroom" ]]
+if tail -n "+$((commands_before + 1))" "$cleanup_command_log" | \
+    rg -q '^launchctl[[:space:]]+bootout[[:space:]]'; then
+  printf 'stale foreign launchd identity was stopped\n' >&2
+  exit 1
+fi
+
+stale_loaded_systemd_root="$fixture/cleanup-stale-loaded-systemd"
+stale_loaded_systemd_data="$stale_loaded_systemd_root/data"
+stale_loaded_systemd_home="$stale_loaded_systemd_root/home"
+stale_loaded_systemd_config="$stale_loaded_systemd_root/config"
+stale_loaded_systemd_service="$stale_loaded_systemd_config/systemd/user/orichum-headroom.service"
+stale_loaded_systemd_identity="$stale_loaded_systemd_root/loaded.service"
+install -d -m 0700 \
+  "$stale_loaded_systemd_data/headroom/bin" \
+  "$(dirname "$stale_loaded_systemd_service")"
+write_legacy_headroom_systemd_fixture \
+  "$stale_loaded_systemd_service" "$stale_loaded_systemd_data" \
+  'Orichum Headroom proxy'
+sed 's#--host 127.0.0.1#--host 127.0.0.2#' \
+  "$stale_loaded_systemd_service" >"$stale_loaded_systemd_identity"
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$stale_loaded_systemd_home" \
+  XDG_CONFIG_HOME="$stale_loaded_systemd_config" \
+  FAKE_SYSTEMD_IDENTITY_FILE="$stale_loaded_systemd_identity" \
+  remove_owned_headroom_installation \
+    systemd "$stale_loaded_systemd_data" \
+    "$stale_loaded_systemd_service" - orichum-headroom.service new \
+    2>"$stale_loaded_systemd_root/removal.stderr"; then
+  printf 'stale foreign systemd identity was stopped from a replaced file\n' >&2
+  exit 1
+fi
+[[ -f "$stale_loaded_systemd_service" && \
+   -d "$stale_loaded_systemd_data/headroom" ]]
+if tail -n "+$((commands_before + 1))" "$cleanup_command_log" | \
+    rg -q '^systemctl[[:space:]]+--user[[:space:]]+(stop|disable)[[:space:]]'; then
+  printf 'stale foreign systemd identity was stopped or disabled\n' >&2
+  exit 1
+fi
+
 mixed_root="$fixture/cleanup-mixed"
 mixed_data="$mixed_root/data"
 mixed_home="$mixed_root/home"
@@ -1228,7 +1419,155 @@ if HOME="$unsafe_runtime_home" remove_owned_headroom_installation \
 fi
 [[ -f "$unsafe_runtime_service" && -f "$unsafe_runtime_data/headroom" ]]
 [[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+
+preflight_foreign_root="$fixture/preflight-foreign"
+preflight_foreign_data="$preflight_foreign_root/data"
+preflight_foreign_home="$preflight_foreign_root/home"
+preflight_foreign_config="$preflight_foreign_root/config"
+preflight_foreign_service="$preflight_foreign_config/systemd/user/orichum-headroom.service"
+install -d -m 0700 \
+  "$preflight_foreign_data/headroom/bin" \
+  "$(dirname "$preflight_foreign_service")"
+write_legacy_headroom_systemd_fixture \
+  "$preflight_foreign_service" "$preflight_foreign_data" \
+  'Orichum Headroom proxy'
+sed 's#--host 127.0.0.1#--host 127.0.0.2#' \
+  "$preflight_foreign_service" >"$preflight_foreign_service.tmp"
+mv "$preflight_foreign_service.tmp" "$preflight_foreign_service"
+preflight_foreign_hash="$(
+  sha256_file "$preflight_foreign_service"
+)"
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$preflight_foreign_home" \
+  XDG_CONFIG_HOME="$preflight_foreign_config" \
+  preflight_owned_headroom_installation \
+    systemd "$preflight_foreign_data" \
+    2>"$preflight_foreign_root/preflight.stderr"; then
+  printf 'foreign Headroom state passed the read-only preflight\n' >&2
+  exit 1
+fi
+[[ "$(sha256_file "$preflight_foreign_service")" == \
+   "$preflight_foreign_hash" ]]
+[[ -d "$preflight_foreign_data/headroom" ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+
+preflight_unsafe_root="$fixture/preflight-unsafe-runtime"
+preflight_unsafe_data="$preflight_unsafe_root/data"
+preflight_unsafe_home="$preflight_unsafe_root/home"
+install -d -m 0700 "$preflight_unsafe_data"
+printf 'foreign runtime\n' >"$preflight_unsafe_data/headroom"
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$preflight_unsafe_home" preflight_owned_headroom_installation \
+    darwin "$preflight_unsafe_data" \
+    2>"$preflight_unsafe_root/preflight.stderr"; then
+  printf 'unsafe private runtime passed the read-only preflight\n' >&2
+  exit 1
+fi
+[[ "$(<"$preflight_unsafe_data/headroom")" == 'foreign runtime' ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+
+preflight_unsafe_tools_root="$fixture/preflight-unsafe-tools"
+preflight_unsafe_tools_data="$preflight_unsafe_tools_root/data"
+preflight_unsafe_tools_home="$preflight_unsafe_tools_root/home"
+preflight_unsafe_tools_external="$preflight_unsafe_tools_root/external"
+install -d -m 0700 \
+  "$preflight_unsafe_tools_data/headroom/bin" \
+  "$preflight_unsafe_tools_external"
+printf 'external\n' >"$preflight_unsafe_tools_external/marker"
+ln -s "$preflight_unsafe_tools_external" \
+  "$preflight_unsafe_tools_data/headroom/tools"
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$preflight_unsafe_tools_home" \
+  preflight_owned_headroom_installation \
+    darwin "$preflight_unsafe_tools_data" \
+    2>"$preflight_unsafe_tools_root/preflight.stderr"; then
+  printf 'unsafe legacy private tool subtree passed early preflight\n' >&2
+  exit 1
+fi
+[[ -L "$preflight_unsafe_tools_data/headroom/tools" ]]
+[[ "$(<"$preflight_unsafe_tools_external/marker")" == external ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+
+orphan_runtime_root="$fixture/cleanup-orphan-runtime"
+orphan_runtime_data="$orphan_runtime_root/data"
+orphan_runtime_home="$orphan_runtime_root/home"
+orphan_runtime_service="$orphan_runtime_home/Library/LaunchAgents/io.orichum.headroom.plist"
+install -d -m 0700 "$orphan_runtime_data/headroom/bin"
+HOME="$orphan_runtime_home" remove_owned_headroom_installation \
+  darwin "$orphan_runtime_data" "$orphan_runtime_service" \
+  io.orichum.headroom - new
+[[ ! -e "$orphan_runtime_data/headroom" && \
+   ! -L "$orphan_runtime_data/headroom" ]]
+
+for unsafe_orphan_kind in regular symlink; do
+  unsafe_orphan_root="$fixture/cleanup-unsafe-orphan-$unsafe_orphan_kind"
+  unsafe_orphan_data="$unsafe_orphan_root/data"
+  unsafe_orphan_home="$unsafe_orphan_root/home"
+  unsafe_orphan_service="$unsafe_orphan_home/Library/LaunchAgents/io.orichum.headroom.plist"
+  install -d -m 0700 "$unsafe_orphan_data"
+  case "$unsafe_orphan_kind" in
+    regular)
+      printf 'foreign runtime\n' >"$unsafe_orphan_data/headroom"
+      ;;
+    symlink)
+      install -d -m 0700 "$unsafe_orphan_root/external"
+      printf 'external\n' >"$unsafe_orphan_root/external/marker"
+      ln -s "$unsafe_orphan_root/external" "$unsafe_orphan_data/headroom"
+      ;;
+  esac
+  commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+  if HOME="$unsafe_orphan_home" remove_owned_headroom_installation \
+      darwin "$unsafe_orphan_data" "$unsafe_orphan_service" \
+      io.orichum.headroom - new \
+      2>"$unsafe_orphan_root/removal.stderr"; then
+    printf '%s orphan Headroom runtime was accepted\n' \
+      "$unsafe_orphan_kind" >&2
+    exit 1
+  fi
+  [[ -e "$unsafe_orphan_data/headroom" || \
+     -L "$unsafe_orphan_data/headroom" ]]
+  if [[ "$unsafe_orphan_kind" == symlink ]]; then
+    [[ "$(<"$unsafe_orphan_root/external/marker")" == external ]]
+  fi
+  [[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+done
 unset -f launchctl systemctl
+
+python3 - "$ROOT/install.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+preflight = source.index(
+    'preflight_owned_headroom_installation \\\n'
+    '  "$platform" "$WORKFLOW_DATA_ROOT"'
+)
+first_data_write = source.index(
+    'install -d -m 0700 \\\n'
+    '  "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state"'
+)
+management_key = source.index(
+    'management_key_file="$WORKFLOW_DATA_ROOT/cliproxy-management.key"'
+)
+route_link = source.index(
+    'ln -sfn "$WORKFLOW_ROOT/bin/orichum-route-proxy"'
+)
+model_migration = source.index(
+    'migrate_legacy_model_config "$WORKFLOW_DATA_ROOT"'
+)
+tool_upgrade = source.index("uv tool install --upgrade mempalace")
+if not (
+    preflight
+    < first_data_write
+    < management_key
+    < route_link
+    < model_migration
+    < tool_upgrade
+):
+    raise SystemExit(
+        "Headroom safety preflight does not precede persistent installer writes"
+    )
+PY
 
 rg -Fq 'for launcher in orichum' "$ROOT/install.sh"
 if rg -q 'for launcher in .*claudex-gpt' "$ROOT/install.sh"; then

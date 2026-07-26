@@ -70,6 +70,203 @@ private_tool_state_matches \
 [[ ! -e "$private_bin/graphify-future" ]]
 [[ "$(<"$host_bin/graphify-mcp")" == host-tool-unchanged ]]
 
+legacy_data="$fixture/legacy-private-data"
+legacy_tools="$legacy_data/headroom/tools"
+legacy_bin="$legacy_data/headroom/bin"
+migrated_tools="$legacy_data/tools/uv"
+migrated_bin="$legacy_data/tools/bin"
+legacy_snapshot="$fixture/legacy-private-snapshot"
+install -d -m 0700 \
+  "$legacy_tools/mempalace/bin" "$legacy_tools/graphifyy/bin" \
+  "$legacy_bin" "$migrated_tools" "$migrated_bin"
+printf 'legacy-mempalace\n' >"$legacy_tools/mempalace/version"
+printf 'legacy-graphify\n' >"$legacy_tools/graphifyy/version"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$legacy_tools/mempalace/bin/mempalace-mcp"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$legacy_tools/graphifyy/bin/graphify-mcp"
+chmod 0755 \
+  "$legacy_tools/mempalace/bin/mempalace-mcp" \
+  "$legacy_tools/graphifyy/bin/graphify-mcp"
+ln -s "$legacy_tools/mempalace/bin/mempalace-mcp" \
+  "$legacy_bin/mempalace-mcp"
+ln -s "$legacy_tools/graphifyy/bin/graphify-mcp" \
+  "$legacy_bin/graphify-mcp"
+ln -s "$legacy_tools/graphifyy/bin/graphify-mcp" \
+  "$legacy_bin/headroom"
+
+migrate_legacy_private_tools \
+  "$legacy_data" "$migrated_tools" "$migrated_bin"
+snapshot_private_tool_state \
+  "$legacy_data" "$migrated_tools" "$migrated_bin" "$legacy_snapshot"
+inject_failure_after_legacy_cleanup() {
+  rm -rf -- "$legacy_data/headroom"
+  printf 'failed-upgrade\n' >"$migrated_tools/mempalace/version"
+  printf 'failed-upgrade\n' >"$migrated_tools/graphifyy/version"
+  return 73
+}
+if inject_failure_after_legacy_cleanup; then
+  printf 'legacy cleanup failure injection unexpectedly succeeded\n' >&2
+  exit 1
+fi
+restore_private_tool_state \
+  "$legacy_data" "$migrated_tools" "$migrated_bin" "$legacy_snapshot"
+private_tool_state_matches \
+  "$legacy_data" "$migrated_tools" "$migrated_bin" "$legacy_snapshot"
+[[ "$(<"$migrated_tools/mempalace/version")" == legacy-mempalace ]]
+[[ "$(<"$migrated_tools/graphifyy/version")" == legacy-graphify ]]
+[[ -x "$migrated_bin/mempalace-mcp" ]]
+[[ -x "$migrated_bin/graphify-mcp" ]]
+[[ "$(readlink "$migrated_bin/mempalace-mcp")" == \
+   "$migrated_tools/mempalace/bin/mempalace-mcp" ]]
+[[ "$(readlink "$migrated_bin/graphify-mcp")" == \
+   "$migrated_tools/graphifyy/bin/graphify-mcp" ]]
+[[ ! -e "$migrated_bin/headroom" && ! -L "$migrated_bin/headroom" ]]
+[[ ! -e "$legacy_data/headroom" && ! -L "$legacy_data/headroom" ]]
+
+partial_data="$fixture/partial-legacy-data"
+partial_legacy_tools="$partial_data/headroom/tools"
+partial_legacy_bin="$partial_data/headroom/bin"
+partial_tools="$partial_data/tools/uv"
+partial_bin="$partial_data/tools/bin"
+install -d -m 0700 \
+  "$partial_legacy_tools/mempalace" \
+  "$partial_legacy_tools/graphifyy" \
+  "$partial_legacy_bin" \
+  "$partial_tools/mempalace" \
+  "$partial_tools/graphifyy" \
+  "$partial_bin"
+printf 'legacy-mempalace\n' \
+  >"$partial_legacy_tools/mempalace/version"
+printf 'legacy-graphify\n' \
+  >"$partial_legacy_tools/graphifyy/version"
+printf 'partial-mempalace\n' >"$partial_tools/mempalace/version"
+printf 'partial-graphify\n' >"$partial_tools/graphifyy/version"
+if migrate_legacy_private_tools \
+    "$partial_data" "$partial_tools" "$partial_bin" \
+    2>"$fixture/partial-legacy.stderr"; then
+  printf 'partial private tool migration destinations were accepted\n' >&2
+  exit 1
+fi
+[[ "$(<"$partial_legacy_tools/mempalace/version")" == \
+   legacy-mempalace ]]
+[[ "$(<"$partial_legacy_tools/graphifyy/version")" == legacy-graphify ]]
+[[ "$(<"$partial_tools/mempalace/version")" == partial-mempalace ]]
+[[ "$(<"$partial_tools/graphifyy/version")" == partial-graphify ]]
+
+stale_data="$fixture/stale-legacy-data"
+stale_legacy_tools="$stale_data/headroom/tools"
+stale_legacy_bin="$stale_data/headroom/bin"
+stale_tools="$stale_data/tools/uv"
+stale_bin="$stale_data/tools/bin"
+install -d -m 0700 \
+  "$stale_legacy_tools/mempalace/bin" \
+  "$stale_legacy_tools/graphifyy/bin" \
+  "$stale_legacy_bin" "$stale_tools" "$stale_bin"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$stale_legacy_tools/mempalace/bin/mempalace-mcp"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$stale_legacy_tools/graphifyy/bin/graphify-mcp"
+chmod 0755 \
+  "$stale_legacy_tools/mempalace/bin/mempalace-mcp" \
+  "$stale_legacy_tools/graphifyy/bin/graphify-mcp"
+cp -pPR "$stale_legacy_tools/mempalace" "$stale_tools/mempalace"
+cp -pPR "$stale_legacy_tools/graphifyy" "$stale_tools/graphifyy"
+ln -s "$stale_legacy_tools/mempalace/bin/mempalace-mcp" \
+  "$stale_legacy_bin/mempalace-mcp"
+ln -s "$stale_legacy_tools/graphifyy/bin/graphify-mcp" \
+  "$stale_legacy_bin/graphify-mcp"
+ln -s "$stale_legacy_tools/mempalace/bin/mempalace-mcp" \
+  "$stale_bin/mempalace-mcp"
+ln -s "$stale_legacy_tools/graphifyy/bin/graphify-mcp" \
+  "$stale_bin/graphify-mcp"
+if migrate_legacy_private_tools \
+    "$stale_data" "$stale_tools" "$stale_bin" \
+    2>"$fixture/stale-legacy.stderr"; then
+  printf 'stale private tool migration entrypoints were accepted\n' >&2
+  exit 1
+fi
+[[ "$(readlink "$stale_bin/mempalace-mcp")" == \
+   "$stale_legacy_tools/mempalace/bin/mempalace-mcp" ]]
+[[ "$(readlink "$stale_bin/graphify-mcp")" == \
+   "$stale_legacy_tools/graphifyy/bin/graphify-mcp" ]]
+
+for endpoint_case in legacy-three legacy-four; do
+  endpoint_data="$fixture/$endpoint_case-data"
+  endpoint_snapshot="$fixture/$endpoint_case-snapshot"
+  endpoint_generation="$endpoint_data/model-config/generation.legacy"
+  endpoint_generation_snapshot="$endpoint_snapshot/prior-model-generation"
+  install -d -m 0700 \
+    "$endpoint_data/headroom" "$endpoint_generation" "$endpoint_snapshot"
+  case "$endpoint_case" in
+    legacy-three)
+      printf '%s\n' \
+        '{"cliproxyPort":8317,"headroomPort":8787,"routeProxyPort":13457}' \
+        >"$endpoint_data/service-ports.json"
+      ;;
+    legacy-four)
+      printf '%s\n' \
+        '{"claudexProxyPort":13456,"cliproxyPort":8317,"headroomPort":8787,"routeProxyPort":13457}' \
+        >"$endpoint_data/service-ports.json"
+      ;;
+  esac
+  cat >"$endpoint_generation/models.json" <<'JSON'
+{
+  "controller": "gpt-5.6-sol",
+  "agents": {
+    "repository-explorer": "gpt-5.6-terra",
+    "repository-verifier": "claude-sonnet-5",
+    "correctness-critic": "claude-sonnet-5",
+    "architecture-advisor": "claude-opus-4-8"
+  }
+}
+JSON
+  cat >"$endpoint_generation/claudex.toml" <<'TOML'
+proxy_port = 13456
+default_model = "gpt-5.6-sol"
+base_url = "http://127.0.0.1:8787"
+X-Headroom-Base-Url = "http://127.0.0.1:13457"
+TOML
+  ln -s generation.legacy "$endpoint_data/model-config/current"
+  snapshot_path \
+    "$endpoint_data/service-ports.json" "$endpoint_snapshot" service-ports
+  cp -pPR "$endpoint_generation" "$endpoint_generation_snapshot"
+  normalize_headroom_free_endpoint_snapshot \
+    "$endpoint_snapshot/service-ports.data" \
+    "$endpoint_generation_snapshot" 8317 13456 13457
+
+  inject_failure_after_endpoint_cleanup() {
+    rm -rf -- "$endpoint_data/headroom" "$endpoint_generation"
+    write_service_ports "$endpoint_data" 18317 18318 18319
+    return 74
+  }
+  if inject_failure_after_endpoint_cleanup; then
+    printf '%s endpoint failure injection unexpectedly succeeded\n' \
+      "$endpoint_case" >&2
+    exit 1
+  fi
+  restore_snapshot \
+    "$endpoint_data/service-ports.json" "$endpoint_snapshot" service-ports
+  restore_model_config_generation \
+    "$endpoint_data" generation.legacy "$endpoint_generation_snapshot"
+  jq -e '
+    keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
+    .claudexProxyPort == 13456 and
+    .cliproxyPort == 8317 and
+    .routeProxyPort == 13457
+  ' "$endpoint_data/service-ports.json" >/dev/null
+  restored_claudex="$endpoint_data/model-config/current/claudex.toml"
+  rg -Fxq 'base_url = "http://127.0.0.1:13457"' "$restored_claudex"
+  if rg -qi 'headroom|X-Headroom-Base-Url' "$restored_claudex"; then
+    printf '%s rollback restored a Headroom endpoint\n' \
+      "$endpoint_case" >&2
+    exit 1
+  fi
+  [[ "$(claudex_config_default_model "$restored_claudex")" == \
+     gpt-5.6-sol ]]
+  [[ ! -e "$endpoint_data/headroom" && ! -L "$endpoint_data/headroom" ]]
+done
+
 external_graph_root="$fixture/external-graph-root"
 unsafe_graph_data="$fixture/unsafe-graph-data"
 install -d -m 0700 "$external_graph_root" "$unsafe_graph_data"
@@ -344,22 +541,35 @@ if not activate_config < finalize_config < config_inactive < transaction_end:
     )
 
 snapshot_private_tools = source.index("snapshot_private_tool_state")
+migrate_legacy_tools = source.index("migrate_legacy_private_tools")
+private_tool_exports = source.index("export UV_TOOL_DIR UV_TOOL_BIN_DIR")
 python_transaction = source.index("python_transaction_active=true")
 provision_python = source.index("install_or_reuse_orichum_python")
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
 probe_graphify = source.index("reconcile_graphify_storage", upgrade_graphify)
+normalize_endpoint = source.index("normalize_headroom_free_endpoint_snapshot")
+remove_headroom = source.index("remove_owned_headroom_installation")
 if not (
     python_transaction
     < provision_python
+    < migrate_legacy_tools
     < snapshot_private_tools
+    and
+    private_tool_exports
+    < migrate_legacy_tools
     and
     snapshot_private_tools
     < upgrade_mempalace
     < upgrade_graphify
     < probe_graphify
+    < normalize_endpoint
+    < remove_headroom
 ):
-    raise SystemExit("private tool snapshot does not precede both upgrades")
+    raise SystemExit(
+        "legacy migration, private tool snapshot, endpoint normalization, "
+        "and Headroom cleanup order is unsafe"
+    )
 if "headroom" in rollback.lower():
     raise SystemExit("rollback still reinstalls or re-enables Headroom")
 if "graphify install" in source:
