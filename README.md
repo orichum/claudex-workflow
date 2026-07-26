@@ -1,31 +1,39 @@
 # Orichum
 
-> One local control plane for Claude Code, multiple model families, multiple
-> accounts, project-aware tools, and efficient specialist agents.
+> Run Claude Code with the models, accounts, project tools, memory, and
+> specialist agents that fit each project.
 
-Orichum keeps Claude Code as the interactive shell while routing controllers
-and specialists through a validated model stack. A project can select its own
-accounts, GitHub identity, Docker MCP profile, memory palace, and code graph.
-Sessions remain isolated and resumable.
+Orichum is an independent harness for Claude Code. You continue working inside
+Claude Code while Orichum prepares the right model stack, provider account,
+project context, and optional tools for the directory you launched from.
+
+Once setup is complete, daily use is simply:
 
 ```bash
+cd ~/projects/my-app
 orichum
 ```
 
-## Why Orichum
+## What Orichum does
 
-- Use GPT, Claude, Google, Kimi, and future configured model families.
-- Assign models to controller and specialist roles with an interactive wizard.
-- Use multiple accounts without changing the machine-wide active login.
-- Resolve project tooling automatically from the launch directory.
-- Recover once to a frozen, compatible account route without replaying work.
-- Keep one controller as the sole writer; delegate bounded read-only work only
-  when it is useful.
-- Reduce prompt overhead with lossless Headroom optimization.
+- Lets one Claude Code workflow use GPT, Claude, Google, Kimi, and other
+  configured model families.
+- Chooses models for controller and specialist roles from a model stack you
+  control.
+- Supports named accounts, account priorities, and bounded same-family
+  failover.
+- Selects the correct GitHub identity, MCP_DOCKER profile, Mempalace memory,
+  and Graphify code graph from the project directory.
+- Keeps concurrent and resumed sessions isolated.
+- Uses Headroom to reduce prompt overhead without changing your source code.
 
-## Installation
+You do not need to understand the routing architecture before using Orichum.
+Start with one provider and one project; add the other capabilities only when
+you need them.
 
-Supported hosts are macOS, Linux with a systemd user manager, and WSL2 with
+## Install
+
+Orichum supports macOS, Linux with a systemd user manager, and WSL2 with
 systemd enabled.
 
 ```bash
@@ -34,107 +42,268 @@ cd orichum
 ./install.sh
 ```
 
-The installer is also the upgrader. It reconciles Orichum-owned services,
-installs current upstream tool releases, validates the control plane, and runs
-the final doctor check itself.
+The installer also handles upgrades. It installs or updates Orichum's
+dependencies, reconciles the services it owns, and finishes by running the
+doctor check. See [Installation and upgrades](docs/installation.md) for
+prerequisites, locations, services, and port handling.
 
-Read [Installation and upgrades](docs/installation.md) before installing on a
-new machine.
+## Your first Orichum session
 
-## Usage
+This walkthrough creates the smallest useful setup: one provider, one named
+account, one model stack, and one project.
 
-Authenticate a provider, register its credential, build a stack, and add a
-project:
+### 1. Connect one provider
+
+Choose the provider you want to use first. This example authenticates a Claude
+account through CLIProxyAPI:
 
 ```bash
 orichum provider login claude
-orichum provider account add \
-  "Personal Claude" anthropic CREDENTIAL_FILE shared --priority primary
-orichum stack configure
-orichum context add ~/work --pool shared
-cd ~/work/my-repository
-orichum
 ```
 
-Inspect what Orichum will use:
+Other supported login types include `codex`, `antigravity`, and `kimi`.
+
+### 2. Register the account
+
+The login creates a credential file inside Orichum's private auth directory.
+Find the data directory with:
 
 ```bash
 orichum config paths
-orichum context list
+```
+
+Look inside its `auth` directory and use the credential **filename**, not its
+contents or full path, in the next command:
+
+```bash
+orichum provider account add \
+  "Personal Claude" anthropic CREDENTIAL_FILE shared --priority primary
+```
+
+In this command:
+
+- `Personal Claude` is the name shown in Orichum.
+- `anthropic` is the configured provider.
+- `CREDENTIAL_FILE` is the filename created by the login.
+- `shared` is the account pool available to projects.
+- `primary` gives this account first priority.
+
+Confirm that the account is active:
+
+```bash
+orichum provider accounts
+```
+
+See [Providers and accounts](docs/providers-and-accounts.md) for other
+providers and account-management commands.
+
+### 3. Create a model stack
+
+A stack assigns live models to the main controller and optional specialist
+roles. Start the interactive wizard:
+
+```bash
+orichum stack configure
+```
+
+The wizard lists the models currently available through your registered
+accounts. Choose a controller model, accept or change the specialist choices,
+review the result, and save the stack.
+
+Inspect saved stacks with:
+
+```bash
 orichum stack list
-orichum graph status .
-orichum sessions
+orichum stack show STACK
+```
+
+See [Model stacks](docs/model-stacks.md) for provider locks, account policies,
+and role behavior.
+
+### 4. Add a project
+
+A context tells Orichum which settings belong to a parent directory and every
+repository below it. This example adds `~/projects` using the shared account
+pool:
+
+```bash
+orichum context add ~/projects --pool shared
+```
+
+This is a one-time foreground setup. Orichum discovers repositories, prepares
+Mempalace and Graphify data, installs its Graphify refresh hooks, and saves the
+context only after population succeeds.
+
+Docker MCP Toolkit is optional. Add a profile only when the project needs one:
+
+```bash
+orichum context add ~/work --pool shared --docker work
+```
+
+Check the configured directory mappings:
+
+```bash
+orichum context list
+```
+
+See [Project contexts](docs/project-contexts.md) for GitHub identities,
+multiple parent directories, repository discovery, and context maintenance.
+
+### 5. Start Orichum
+
+Enter a repository below the configured parent and launch:
+
+```bash
+cd ~/projects/my-app
+orichum
+```
+
+Orichum resolves the project, freezes the selected model and account routes,
+prepares only the relevant tools, and opens Claude Code. From this point, talk
+to Claude Code normally; the controller decides when a configured specialist
+is useful.
+
+If launch fails, start with:
+
+```bash
 orichum doctor
 ```
 
-Build or refresh Graphify data for the current repository, or for every
-repository below a directory:
+## Daily use
 
-```bash
-orichum graph .
-orichum graph ~/xebia
-```
+| What you want to do | Command |
+|---|---|
+| Start in the current project | `orichum` |
+| Check project mappings | `orichum context list` |
+| List or inspect stacks | `orichum stack list` / `orichum stack show STACK` |
+| Check named accounts | `orichum provider accounts` |
+| List sessions | `orichum sessions` |
+| Inspect a session's routes | `orichum session routes SESSION_ID` |
+| Resume a session | `orichum resume SESSION_ID` |
+| Refresh the current code graph | `orichum graph .` |
+| Inspect graph state without changing it | `orichum graph status .` |
+| Check the installation | `orichum doctor` |
+| Upgrade Orichum | Run `./install.sh` again from the Orichum checkout |
 
-Orichum stores Graphify output centrally rather than in the checkout. Clean
-graphs are shared by repositories with the same identity and commit; dirty
-working states stay isolated per checkout. See
-[Memory and code graph](docs/memory-and-code-graph.md) for identity overrides,
-hooks, worktrees, migration, and pruning.
+The complete command map is in the [CLI reference](docs/cli-reference.md).
 
-## How a session flows
+## Add capabilities when you need them
+
+- **More accounts:** register additional credentials, name them, and set
+  priorities for new-session selection and same-family recovery. See
+  [Multi-account routing](docs/multi-account-usage.md).
+- **More model families:** authenticate another provider and use
+  `orichum stack configure` to add its live models. See
+  [Model stacks](docs/model-stacks.md).
+- **Resumes and family changes:** resume a frozen session or fork it with a
+  bounded handoff onto another stack. See [Sessions](docs/sessions.md).
+- **Memory and code graphs:** Mempalace recalls durable decisions; Graphify
+  answers structural repository questions. Both are used on demand. See
+  [Memory and code graph](docs/memory-and-code-graph.md).
+- **Plugins:** declare and synchronize optional Claude Code plugins through
+  Orichum. See [Plugins](docs/plugins.md).
+- **MCP_DOCKER:** attach a project-specific Docker MCP Toolkit profile for Jira
+  and other live-service tools. See [MCP integrations](docs/mcp-integrations.md).
+- **Specialist agents:** let the controller delegate bounded exploration,
+  review, architecture, or implementation work while keeping one writer. See
+  [Subagents](docs/subagents.md).
+- **Prompt optimization:** inspect the shared Headroom service and measured
+  savings. See [Headroom](docs/headroom.md).
+
+## How a request flows
 
 ```mermaid
 flowchart LR
-    U["You"] --> O["Orichum CLI"]
+    U["You"] --> O["Orichum"]
     O --> C["Claude Code"]
-    C --> X["Private Claudex translator"]
-    X --> H["Headroom optimization"]
-    H --> R["Session-aware route proxy"]
+    C --> X["Claudex"]
+    X --> H["Headroom"]
+    H --> R["Orichum routing"]
     R --> P["CLIProxyAPI"]
-    P --> M["Selected provider account and model"]
+    P --> M["Selected account and model"]
 ```
 
-The launch directory selects the longest matching project context. That context
-selects a stack and account pools. Orichum freezes the resulting route into an
-immutable logical session, prepares only the relevant MCPs and controller
-plugin, then launches Claude Code.
+The directory where you run `orichum` selects the project context. Orichum
+then creates an isolated session with fixed model and account routes, relevant
+MCPs, and its controller policy. Resident services are shared where safe;
+session-specific state remains private.
 
-See [Architecture](docs/architecture.md) for service ownership, security
-boundaries, and the complete request path.
+Read [Architecture](docs/architecture.md) for service ownership, security
+boundaries, session isolation, and the complete request path.
 
-## Feature guides
+## If something is wrong
 
-| Capability | What it covers |
+Run the bounded health check first:
+
+```bash
+orichum doctor
+```
+
+Then inspect the part of the setup involved:
+
+```bash
+orichum config paths
+orichum provider accounts
+orichum stack list
+orichum context list
+orichum sessions
+orichum graph status .
+```
+
+The [Troubleshooting guide](docs/troubleshooting.md) covers unavailable routes,
+connection failures, GitHub identity, missing MCPs, stale graphs, population
+delays, and installer port conflicts.
+
+## Documentation
+
+| Guide | Use it for |
 |---|---|
-| [Installation and upgrades](docs/installation.md) | Platforms, prerequisites, locations, ports, services, and upgrade behavior |
-| [Providers and accounts](docs/providers-and-accounts.md) | Login, credential registration, account names, pools, priority, and multi-account use |
-| [Model stacks](docs/model-stacks.md) | Interactive stack creation, controller and agent roles, provider locks, and validation |
-| [Project contexts](docs/project-contexts.md) | Directory matching, GitHub identity, Docker profiles, initial population, and updates |
-| [Sessions](docs/sessions.md) | Start, inspect, resume, fork, immutable bindings, and concurrent sessions |
-| [Routing and failover](docs/routing-and-failover.md) | Route selection, account rollover, retry limits, cooldowns, and cross-family handoff |
-| [Subagents](docs/subagents.md) | Automatic delegation policy, audited roles, limits, and sole-writer behavior |
-| [Plugins](docs/plugins.md) | Declare, synchronize, update, inspect, and remove Claude Code plugins |
-| [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER, per-session MCP configuration, relevance, and approval boundaries |
-| [Memory and code graph](docs/memory-and-code-graph.md) | Mempalace, Graphify, population, hooks, and token-conscious retrieval |
-| [Headroom](docs/headroom.md) | What is compressed, what is disabled, service placement, and savings measurement |
-| [Configuration](docs/configuration.md) | Focused JSON files, private state, environment overrides, and validation |
-| [Troubleshooting](docs/troubleshooting.md) | Doctor checks, service logs, route errors, identity issues, and recovery |
-| [CLI reference](docs/cli-reference.md) | Command map and common inspection commands |
+| [Installation and upgrades](docs/installation.md) | Platforms, prerequisites, locations, ports, services, and upgrades |
+| [Providers and accounts](docs/providers-and-accounts.md) | Login, credentials, account names, pools, and priorities |
+| [Multi-account routing](docs/multi-account-usage.md) | Multiple accounts from the same or different providers |
+| [Model stacks](docs/model-stacks.md) | Interactive model selection, roles, and provider locks |
+| [Project contexts](docs/project-contexts.md) | Directory mappings, identities, Docker profiles, and population |
+| [Sessions](docs/sessions.md) | Start, inspect, resume, fork, and concurrent sessions |
+| [Routing and failover](docs/routing-and-failover.md) | Route selection, cooldowns, rollover, and handoff boundaries |
+| [Subagents](docs/subagents.md) | Automatic delegation, specialist roles, and the sole-writer policy |
+| [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
+| [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
+| [Memory and code graph](docs/memory-and-code-graph.md) | Mempalace, Graphify, hooks, worktrees, and retrieval |
+| [Headroom](docs/headroom.md) | Compression behavior, service placement, and savings |
+| [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
+| [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
+| [Troubleshooting](docs/troubleshooting.md) | Symptoms, diagnostics, and recovery |
+| [CLI reference](docs/cli-reference.md) | The complete command map |
 
-## Architecture principles
+## Built with
 
-- Loopback-only services and private runtime state.
-- Exact project and session bindings verified before launch and resume.
-- One writer; specialists are bounded and read-only.
-- Same-family account recovery only; family changes require an explicit fork.
-- No source patches to CLIProxyAPI, Claudex, Headroom, Mempalace, or Graphify.
-- Configuration contains declarations and credential references, never secrets.
+### Runs on
+
+- [Claude Code](https://code.claude.com/docs/en/overview) — the interactive
+  coding host.
+
+### Integrates
+
+- [Claudex](https://claudex.space/en/) — translates Claude Code requests for
+  the selected model.
+- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — provides
+  provider authentication and model access.
+- [Headroom](https://github.com/chopratejas/headroom) — applies lossless prompt
+  optimization.
+- [Mempalace](https://github.com/MemPalace/mempalace) — provides durable
+  project memory.
+- [Graphify](https://github.com/Graphify-Labs/graphify) — provides repository
+  knowledge graphs.
+- [Docker MCP Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
+  — provides project-specific external tools through Orichum's `MCP_DOCKER`
+  integration.
+
+Orichum is an independent project. It is not affiliated with or endorsed by
+these upstream projects, and it integrates them without modifying their source
+code.
 
 ## References
 
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-- [Claudex](https://claudex.space/en/)
 - [Claude Code LLM gateway configuration](https://docs.anthropic.com/en/docs/claude-code/llm-gateway)
-- [Headroom](https://github.com/chopratejas/headroom)
-- [Mempalace](https://github.com/MemPalace/mempalace)
-- [Graphify](https://github.com/Graphify-Labs/graphify)
+- [Docker MCP Toolkit documentation](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
+- [Orichum architecture](docs/architecture.md)
