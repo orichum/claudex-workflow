@@ -397,7 +397,7 @@ with urllib.request.urlopen(
         raise SystemExit(1)
 PY
 printf \
-  '{"claudexProxyPort":13456,"cliproxyPort":%s,"headroomPort":18787,"routeProxyPort":13457}\n' \
+  '{"claudexProxyPort":13456,"cliproxyPort":%s,"routeProxyPort":13457}\n' \
   "$cliproxy_port" >"$data_root/service-ports.json"
 chmod 0600 "$data_root/service-ports.json"
 

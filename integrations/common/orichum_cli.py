@@ -521,7 +521,6 @@ def _runtime_service_ports(paths: Mapping[str, Path]) -> dict[str, int]:
     expected = {
         "claudexProxyPort",
         "cliproxyPort",
-        "headroomPort",
         "routeProxyPort",
     }
     if not isinstance(document, dict) or set(document) != expected:
@@ -565,51 +564,6 @@ def _live_models(paths: Mapping[str, Path]) -> frozenset[str]:
     if response.status != 200 or len(payload) > 2 * 1024 * 1024:
         raise CliError("live Orichum model catalogue is unavailable")
     return available
-
-
-def _headroom_status(paths: Mapping[str, Path]) -> str:
-    try:
-        ports = json.loads(
-            _read_stable_file(
-                paths["data"] / "service-ports.json",
-                "service port state",
-                64 * 1024,
-            )
-        )
-        port = ports["headroomPort"]
-        if type(port) is not int or port < 1024 or port > 65535:
-            raise ValueError
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        connection.request("GET", "/health")
-        response = connection.getresponse()
-        payload = response.read(256 * 1024 + 1)
-        connection.close()
-        document = json.loads(payload)
-        version = document["version"]
-    except (
-        KeyError,
-        TypeError,
-        ValueError,
-        UnicodeError,
-        json.JSONDecodeError,
-        http.client.HTTPException,
-        OSError,
-    ) as error:
-        raise CliError("Headroom health is unavailable") from error
-    if (
-        response.status != 200
-        or len(payload) > 256 * 1024
-        or document.get("service") != "headroom-proxy"
-        or document.get("status") != "healthy"
-        or document.get("ready") is not True
-        or not isinstance(version, str)
-        or not version
-    ):
-        raise CliError("Headroom is not healthy and ready")
-    return (
-        f"Headroom {version}: healthy and ready at "
-        f"http://127.0.0.1:{port}\n"
-    )
 
 
 def _validate_live_models(
@@ -1668,7 +1622,6 @@ def _launch_session(
                 runtime_ports[name]
                 for name in (
                     "cliproxyPort",
-                    "headroomPort",
                     "routeProxyPort",
                 )
             ),
@@ -1822,10 +1775,6 @@ def build_parser() -> argparse.ArgumentParser:
         command = plugin_action.add_parser(name)
         command.add_argument("arguments", nargs=argparse.REMAINDER)
 
-    headroom = commands.add_parser("headroom")
-    headroom.add_subparsers(dest="headroom_command", required=True).add_parser(
-        "status"
-    )
     graph = commands.add_parser("graph")
     graph.add_argument("arguments", nargs=argparse.REMAINDER)
     commands.add_parser("doctor")
@@ -1855,9 +1804,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if parsed.command is None:
             raise CliError("run Orichum through the installed launcher")
-        if parsed.command == "headroom":
-            print(_headroom_status(_paths()), end="")
-            return 0
         if parsed.command == "doctor":
             return _run_external("orichum-doctor", [])
         if parsed.command == "graph":

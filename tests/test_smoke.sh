@@ -2,8 +2,37 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/workflow.sh
+source "$ROOT/lib/workflow.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-smoke.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
+
+ports_root="$fixture/ports"
+for legacy_ports in \
+  '{"cliproxyPort":8317,"headroomPort":8787,"routeProxyPort":13457}' \
+  '{"claudexProxyPort":13456,"cliproxyPort":8317,"headroomPort":8787,"routeProxyPort":13457}'; do
+  install -d -m 0700 "$ports_root"
+  printf '%s\n' "$legacy_ports" >"$ports_root/service-ports.json"
+  IFS=$'\t' read -r cliproxy_port claudex_proxy_port route_proxy_port \
+    < <(read_service_ports "$ports_root")
+  write_service_ports \
+    "$ports_root" "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port"
+  jq -e '
+    keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
+    ([.[]] | unique | length) == 3
+  ' "$ports_root/service-ports.json" >/dev/null
+done
+
+render_claudex_config \
+  "$fixture/claudex.toml" \
+  gpt-5.6-sol gpt-5.6-terra claude-sonnet-5 gpt-5.6-sol \
+  gpt-5.6-terra claude-sonnet-5 claude-opus-4-8 \
+  /usr/bin/true 8317 13456 13457
+rg -Fxq 'base_url = "http://127.0.0.1:13457"' "$fixture/claudex.toml"
+if rg -qi 'Headroom|X-Headroom-Base-Url' "$fixture/claudex.toml"; then
+  printf 'Claudex config still routes through Headroom\n' >&2
+  exit 1
+fi
 
 for script in "$ROOT"/bin/orichum* "$ROOT/install.sh" "$ROOT/doctor.sh"; do
   [[ -x "$script" ]]
@@ -49,7 +78,7 @@ observed_cwd="$(
 install -d \
   "$fixture/post-install-system-bin" \
   "$fixture/post-install-user-bin" \
-  "$fixture/post-install-data/headroom/bin" \
+  "$fixture/post-install-data/tools/bin" \
   "$fixture/post-install-data/bin" \
   "$fixture/post-install-data/python/cpython-3.14.6/bin"
 printf '%s\n' \
@@ -66,8 +95,8 @@ ln -s "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14" \
   "$fixture/post-install-data/bin/orichum-python"
 for private_tool in mempalace-mcp graphify-mcp; do
   printf '#!/usr/bin/env bash\nexit 0\n' \
-    >"$fixture/post-install-data/headroom/bin/$private_tool"
-  chmod 0755 "$fixture/post-install-data/headroom/bin/$private_tool"
+    >"$fixture/post-install-data/tools/bin/$private_tool"
+  chmod 0755 "$fixture/post-install-data/tools/bin/$private_tool"
 done
 ln -s "$ROOT/bin/orichum" "$fixture/post-install-user-bin/orichum"
 post_install_tools="$(
@@ -77,8 +106,8 @@ post_install_tools="$(
 )"
 [[ "$post_install_tools" == "$(
   printf '%s\n' \
-    "$fixture/post-install-data/headroom/bin/mempalace-mcp" \
-    "$fixture/post-install-data/headroom/bin/graphify-mcp"
+    "$fixture/post-install-data/tools/bin/mempalace-mcp" \
+    "$fixture/post-install-data/tools/bin/graphify-mcp"
 )" ]]
 
 forwarded="$(
@@ -182,7 +211,7 @@ if rg -Fq 'claude-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md || \
   exit 1
 fi
 [[ "$(rg -c -- '--max-time 4' \
-  "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 4 ]]
+  "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 3 ]]
 rg -Fq \
   'Claudex template separates per-session and recovery proxy ports' \
   "$ROOT/doctor.sh"
@@ -220,7 +249,6 @@ rg -Fq 'validate_orichum_python' \
   "$ROOT/bin/orichum-runtime-ready"
 for parallel_health_contract in \
     'clip_verify_pid=$!' \
-    'head_verify_pid=$!' \
     'route_verify_pid=$!'; do
   rg -Fq "$parallel_health_contract" "$ROOT/bin/orichum-runtime-ready"
 done
@@ -255,7 +283,6 @@ for required_contract in \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
     'sudo apt-get install --yes ripgrep' \
     'PATH="$poison_bin:$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
-    'systemctl --user show orichum-headroom.service --property=ExecStart --value' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
@@ -321,7 +348,6 @@ for required_contract in \
     'test "$(uname -m)" = arm64' \
     'brew install ripgrep' \
     'launchctl print "gui/$(id -u)/io.orichum.cliproxy"' \
-    'launchctl print "gui/$(id -u)/io.orichum.headroom"' \
     'launchctl print "gui/$(id -u)/io.orichum.route-proxy"' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \

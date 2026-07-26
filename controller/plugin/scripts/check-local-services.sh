@@ -6,7 +6,7 @@ WORKFLOW_ROOT="${CLAUDEX_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 if ! IFS=$'\t' read -r \
-    CLIPROXY_PORT HEADROOM_PORT _ ROUTE_PROXY_PORT \
+    CLIPROXY_PORT _ ROUTE_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   jq -cn '{systemMessage:"Orichum health warning: service port configuration is invalid."}'
   exit 0
@@ -24,8 +24,6 @@ if [[ -z "${CLAUDEX_RUN_DIR:-}" ]] || \
 fi
 
 tmp_dir=""
-headroom_response=""
-headroom_error=""
 models_response=""
 models_error=""
 claudex_response=""
@@ -35,12 +33,6 @@ session_error=""
 
 # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
-  if [[ -n "$headroom_response" ]]; then
-    rm -f -- "$headroom_response" || :
-  fi
-  if [[ -n "$headroom_error" ]]; then
-    rm -f -- "$headroom_error" || :
-  fi
   if [[ -n "$models_response" ]]; then
     rm -f -- "$models_response" || :
   fi
@@ -78,8 +70,6 @@ if ! chmod 0700 "$tmp_dir" 2>/dev/null; then
   exit 0
 fi
 
-headroom_response="$tmp_dir/headroom.response"
-headroom_error="$tmp_dir/headroom.error"
 models_response="$tmp_dir/models.response"
 models_error="$tmp_dir/models.error"
 claudex_response="$tmp_dir/claudex.response"
@@ -87,8 +77,6 @@ claudex_error="$tmp_dir/claudex.error"
 session_response="$tmp_dir/session.response"
 session_error="$tmp_dir/session.error"
 if ! (umask 077
-  : >"$headroom_response"
-  : >"$headroom_error"
   : >"$models_response"
   : >"$models_error"
   : >"$claudex_response"
@@ -96,7 +84,6 @@ if ! (umask 077
   : >"$session_response"
   : >"$session_error"
   chmod 0600 \
-    "$headroom_response" "$headroom_error" \
     "$models_response" "$models_error" \
     "$claudex_response" "$claudex_error" \
     "$session_response" "$session_error"
@@ -105,10 +92,6 @@ if ! (umask 077
   exit 0
 fi
 
-curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
-  "http://127.0.0.1:$HEADROOM_PORT/health" \
-  >"$headroom_response" 2>"$headroom_error" &
-headroom_pid=$!
 curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   "http://127.0.0.1:$CLIPROXY_PORT/v1/models" \
   >"$models_response" 2>"$models_error" &
@@ -122,15 +105,9 @@ curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   >"$session_response" 2>"$session_error" &
 session_pid=$!
 
-headroom_status=0
 models_status=0
 claudex_status=0
 session_status=0
-if wait "$headroom_pid"; then
-  :
-else
-  headroom_status=$?
-fi
 if wait "$models_pid"; then
   :
 else
@@ -148,15 +125,9 @@ else
 fi
 
 warning=""
-if [[ "$headroom_status" -ne 0 || "$models_status" -ne 0 || \
-      "$claudex_status" -ne 0 || "$session_status" -ne 0 ]]; then
-  warning="Orichum health warning: a bounded local Claudex, Headroom, CLIProxyAPI, or Orichum proxy request failed."
-elif ! jq -e '
-  .service == "headroom-proxy" and
-  .status == "healthy" and
-  .ready == true
-' "$headroom_response" >/dev/null 2>&1; then
-  warning="Orichum health warning: Headroom is not healthy and ready."
+if [[ "$models_status" -ne 0 || "$claudex_status" -ne 0 || \
+      "$session_status" -ne 0 ]]; then
+  warning="Orichum health warning: a bounded local Claudex, CLIProxyAPI, or Orichum proxy request failed."
 else
   effective_models_file="${CLAUDEX_EFFECTIVE_MODELS_FILE:-}"
   effective_controller=""

@@ -676,7 +676,6 @@ set +e
   cliproxy_transaction_active=false
   endpoint_transaction_active=false
   claudex_proxy_transaction_active=false
-  headroom_transaction_active=false
   claudex_proxy_runtime_mutated=false
   orichum_launcher_mutated=false
   endpoint_lock_owned=false
@@ -894,7 +893,7 @@ PY
 
 for script in \
     install.sh lib/workflow.sh bin/orichum bin/orichum-context \
-    bin/orichum-doctor bin/orichum-headroom bin/orichum-login \
+    bin/orichum-doctor bin/orichum-login \
     bin/orichum-plugin bin/orichum-route-proxy \
     bin/orichum-runtime-ready bin/orichum-verify-cliproxy; do
   bash -n "$ROOT/$script"
@@ -909,21 +908,21 @@ rg -Fq 'export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"' \
   "$ROOT/install.sh"
 
 ports_root="$fixture/ports"
-write_service_ports "$ports_root" 18317 18787 13456 13457
+write_service_ports "$ports_root" 18317 13456 13457
 [[ "$(read_service_ports "$ports_root")" == \
-   $'18317\t18787\t13456\t13457' ]]
+   $'18317\t13456\t13457' ]]
 [[ "$(jq -r 'keys | @tsv' "$(service_ports_file "$ports_root")")" == \
-   $'claudexProxyPort\tcliproxyPort\theadroomPort\trouteProxyPort' ]]
+   $'claudexProxyPort\tcliproxyPort\trouteProxyPort' ]]
 [[ "$(path_mode "$(service_ports_file "$ports_root")")" == 600 ]]
 printf '{"cliproxyPort":18318,"headroomPort":18788,"routeProxyPort":13458}\n' \
   >"$(service_ports_file "$ports_root")"
 [[ "$(read_service_ports "$ports_root")" == \
-   $'18318\t18788\t13456\t13458' ]]
-printf '{"claudexProxyPort":13459,"cliproxyPort":18319,"headroomPort":18789}\n' \
+   $'18318\t13456\t13458' ]]
+printf '{"claudexProxyPort":13459,"cliproxyPort":18319,"headroomPort":18789,"routeProxyPort":13458}\n' \
   >"$(service_ports_file "$ports_root")"
 [[ "$(read_service_ports "$ports_root")" == \
-   $'18319\t18789\t13456\t13459' ]]
-if write_service_ports "$ports_root" 18317 18317 13456 13457; then
+   $'18319\t13459\t13458' ]]
+if write_service_ports "$ports_root" 18317 18317 13457; then
   printf 'duplicate ports were accepted\n' >&2
   exit 1
 fi
@@ -949,47 +948,27 @@ jq -n '{
   }
 }' >"$effective"
 render_discovered_claudex_config \
-  "$effective" "$fixture/claudex.toml" 18317 18787 13456 13457
+  "$effective" "$fixture/claudex.toml" 18317 13456 13457
 rg -Fq 'proxy_port = 13456' "$fixture/claudex.toml"
-rg -Fq 'base_url = "http://127.0.0.1:18787"' "$fixture/claudex.toml"
-rg -Fq \
-  'X-Headroom-Base-Url = "http://127.0.0.1:13457"' \
-  "$fixture/claudex.toml"
+rg -Fq 'base_url = "http://127.0.0.1:13457"' "$fixture/claudex.toml"
+if rg -qi 'Headroom|X-Headroom-Base-Url' "$fixture/claudex.toml"; then
+  printf 'rendered Claudex config still routes through Headroom\n' >&2
+  exit 1
+fi
 rg -Fq 'X-Orichum-Session-ID = "unbound"' "$fixture/claudex.toml"
 
 data_root="$fixture/data"
 install -d -m 0700 \
-  "$data_root/bin" "$data_root/state" "$data_root/logs" \
-  "$data_root/headroom/bin" "$data_root/headroom/config" \
-  "$data_root/headroom/state"
+  "$data_root/bin" "$data_root/state" "$data_root/logs"
 touch "$data_root/bin/cli-proxy-api" "$data_root/bin/orichum-route-proxy"
 chmod 0755 "$data_root/bin/cli-proxy-api" \
   "$data_root/bin/orichum-route-proxy"
-headroom="$data_root/headroom/bin/headroom"
-touch "$headroom"
-chmod 0755 "$headroom"
-
 render_launch_agent "$fixture/cliproxy.plist" "$data_root"
 render_claudex_proxy_launch_agent \
   "$fixture/route.plist" "$data_root" "$ROOT" 13457 18317 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-render_headroom_launch_agent \
-  "$fixture/headroom.plist" "$data_root" "$headroom" \
-  "$fixture/ca.pem" 18787 13457
 cliproxy_service_is_owned "$fixture/cliproxy.plist" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.plist" "$data_root" "$ROOT"
-headroom_service_is_owned "$fixture/headroom.plist" "$data_root" new
-sed 's/io.orichum.headroom/com.user.claudex-headroom/' \
-  "$fixture/headroom.plist" >"$fixture/previous-headroom.plist"
-headroom_service_is_owned \
-  "$fixture/previous-headroom.plist" "$data_root" legacy
-sed 's#http://127.0.0.1:13457#http://127.0.0.2:13457#' \
-  "$fixture/headroom.plist" >"$fixture/foreign-headroom.plist"
-if headroom_service_is_owned \
-    "$fixture/foreign-headroom.plist" "$data_root" new; then
-  printf 'foreign Headroom upstream was accepted\n' >&2
-  exit 1
-fi
 rg -Fq '<string>io.orichum.cliproxy</string>' "$fixture/cliproxy.plist"
 rg -Fq '<string>io.orichum.route-proxy</string>' "$fixture/route.plist"
 rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' "$fixture/route.plist"
@@ -1004,26 +983,12 @@ awk '
 ' "$fixture/route.plist" >"$fixture/previous-route.plist"
 claudex_proxy_service_is_owned \
   "$fixture/previous-route.plist" "$data_root" "$ROOT"
-rg -Fq '<string>io.orichum.headroom</string>' "$fixture/headroom.plist"
-rg -Fq '<string>--anthropic-api-url</string>' "$fixture/headroom.plist"
-rg -Fq '<string>http://127.0.0.1:13457</string>' \
-  "$fixture/headroom.plist"
-
 render_systemd_user_unit "$fixture/cliproxy.service" "$data_root"
 render_claudex_proxy_systemd_user_unit \
   "$fixture/route.service" "$data_root" "$ROOT" 13457 18317 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-render_headroom_systemd_user_unit \
-  "$fixture/headroom.service" "$data_root" "$headroom" \
-  "$fixture/ca.pem" 18787 13457
 cliproxy_service_is_owned "$fixture/cliproxy.service" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.service" "$data_root" "$ROOT"
-headroom_service_is_owned "$fixture/headroom.service" "$data_root" new
-sed \
-  's/Description=Orichum Headroom proxy/Description=Claudex Headroom proxy/' \
-  "$fixture/headroom.service" >"$fixture/previous-headroom.service"
-headroom_service_is_owned \
-  "$fixture/previous-headroom.service" "$data_root" legacy
 rg -Fq 'Description=Orichum same-family recovery proxy' \
   "$fixture/route.service"
 rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' \
@@ -1037,15 +1002,233 @@ claudex_proxy_service_is_owned \
   "$fixture/previous-route.service" "$data_root" "$ROOT"
 rg -Fq 'Wants=orichum-cliproxy.service' "$fixture/route.service"
 rg -Fq 'resolve_orichum_python' "$ROOT/bin/orichum-route-proxy"
-rg -Fq -- '--anthropic-api-url http://127.0.0.1:13457' \
-  "$fixture/headroom.service"
-rg -Fq -- '--disable-kompress' "$fixture/headroom.service"
-rg -Fq 'StandardOutput=journal' "$fixture/headroom.service"
-rg -Fq 'StandardError=journal' "$fixture/headroom.service"
-if rg -Fq 'append:' "$fixture/headroom.service"; then
-  printf 'systemd Headroom unit still uses an invalid quoted append target\n' >&2
+
+write_legacy_headroom_launchd_fixture() {
+  local output_file="$1"
+  local fixture_data_root="$2"
+  local label="$3"
+  python3 - "$output_file" "$fixture_data_root" "$label" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+data_root = sys.argv[2]
+label = sys.argv[3]
+output.write_bytes(
+    plistlib.dumps(
+        {
+            "Label": label,
+            "ProgramArguments": [
+                f"{data_root}/headroom/bin/headroom",
+                "proxy",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "18787",
+                "--anthropic-api-url",
+                "http://127.0.0.1:13457",
+                "--mode",
+                "token",
+                "--no-cache",
+                "--intercept-tool-results",
+                "--lossless",
+                "--code-aware",
+                "--disable-kompress",
+            ],
+            "EnvironmentVariables": {
+                "HEADROOM_CONFIG_DIR": f"{data_root}/headroom/config",
+                "HEADROOM_WORKSPACE_DIR": f"{data_root}/headroom/state",
+            },
+        }
+    )
+)
+PY
+}
+
+write_legacy_headroom_systemd_fixture() {
+  local output_file="$1"
+  local fixture_data_root="$2"
+  local description="$3"
+  printf '%s\n' \
+    '[Unit]' \
+    "Description=$description" \
+    '[Service]' \
+    "ExecStart=\"$fixture_data_root/headroom/bin/headroom\" proxy --host 127.0.0.1 --port 18787 --anthropic-api-url http://127.0.0.1:13457 --mode token --no-cache --intercept-tool-results --lossless --code-aware --disable-kompress" \
+    "Environment=\"HEADROOM_CONFIG_DIR=$fixture_data_root/headroom/config\"" \
+    "Environment=\"HEADROOM_WORKSPACE_DIR=$fixture_data_root/headroom/state\"" \
+    >"$output_file"
+}
+
+cleanup_command_log="$fixture/headroom-cleanup.commands"
+: >"$cleanup_command_log"
+launchctl() {
+  printf 'launchctl\t%s\n' "$*" >>"$cleanup_command_log"
+}
+systemctl() {
+  printf 'systemctl\t%s\n' "$*" >>"$cleanup_command_log"
+}
+
+for launchd_case in \
+    'io.orichum.headroom:new' \
+    'com.user.claudex-headroom:legacy' \
+    'com.user.headroom-proxy:legacy'; do
+  IFS=: read -r service_label ownership_mode <<<"$launchd_case"
+  cleanup_root="$fixture/cleanup-launchd-${service_label//./-}"
+  cleanup_data="$cleanup_root/data"
+  cleanup_home="$cleanup_root/home"
+  cleanup_service="$cleanup_home/Library/LaunchAgents/$service_label.plist"
+  unrelated_service="$cleanup_root/standalone.plist"
+  install -d -m 0700 \
+    "$cleanup_data/headroom/bin" "$(dirname "$cleanup_service")"
+  write_legacy_headroom_launchd_fixture \
+    "$cleanup_service" "$cleanup_data" "$service_label"
+  cp "$cleanup_service" "$unrelated_service"
+  HOME="$cleanup_home" remove_owned_headroom_installation \
+    darwin "$cleanup_data" "$cleanup_service" "$service_label" - \
+    "$ownership_mode"
+  [[ ! -e "$cleanup_service" && ! -e "$cleanup_data/headroom" ]]
+  [[ -f "$unrelated_service" ]]
+done
+[[ "$(rg -c '^launchctl[[:space:]]+bootout[[:space:]]' \
+  "$cleanup_command_log")" == 3 ]]
+
+for systemd_case in \
+    'orichum-headroom.service|Orichum Headroom proxy|new' \
+    'claudex-headroom.service|Claudex Headroom proxy|legacy' \
+    'headroom-proxy.service|Headroom proxy for Claudex|legacy'; do
+  IFS='|' read -r service_unit description ownership_mode <<<"$systemd_case"
+  cleanup_root="$fixture/cleanup-systemd-${service_unit//./-}"
+  cleanup_data="$cleanup_root/data"
+  cleanup_home="$cleanup_root/home"
+  cleanup_config="$cleanup_root/config"
+  cleanup_service="$cleanup_config/systemd/user/$service_unit"
+  unrelated_service="$cleanup_root/standalone-headroom.service"
+  install -d -m 0700 \
+    "$cleanup_data/headroom/bin" "$(dirname "$cleanup_service")"
+  write_legacy_headroom_systemd_fixture \
+    "$cleanup_service" "$cleanup_data" "$description"
+  cp "$cleanup_service" "$unrelated_service"
+  HOME="$cleanup_home" XDG_CONFIG_HOME="$cleanup_config" \
+    remove_owned_headroom_installation \
+    systemd "$cleanup_data" "$cleanup_service" - "$service_unit" \
+    "$ownership_mode"
+  [[ ! -e "$cleanup_service" && ! -e "$cleanup_data/headroom" ]]
+  [[ -f "$unrelated_service" ]]
+done
+for service_unit in \
+    orichum-headroom.service \
+    claudex-headroom.service \
+    headroom-proxy.service; do
+  rg -Fq "systemctl	--user stop $service_unit" "$cleanup_command_log"
+  rg -Fq "systemctl	--user disable $service_unit" "$cleanup_command_log"
+done
+
+foreign_launchd_root="$fixture/cleanup-foreign-launchd"
+foreign_launchd_data="$foreign_launchd_root/data"
+foreign_launchd_home="$foreign_launchd_root/home"
+foreign_launchd_service="$foreign_launchd_home/Library/LaunchAgents/io.orichum.headroom.plist"
+install -d -m 0700 \
+  "$foreign_launchd_data/headroom/bin" \
+  "$(dirname "$foreign_launchd_service")"
+write_legacy_headroom_launchd_fixture \
+  "$foreign_launchd_service" "$foreign_launchd_data" io.orichum.headroom
+python3 - "$foreign_launchd_service" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+document["ProgramArguments"][3] = "127.0.0.2"
+path.write_bytes(plistlib.dumps(document))
+PY
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$foreign_launchd_home" remove_owned_headroom_installation \
+    darwin "$foreign_launchd_data" "$foreign_launchd_service" \
+    io.orichum.headroom - new \
+    2>"$foreign_launchd_root/removal.stderr"; then
+  printf 'foreign launchd Headroom service at managed path was removed\n' >&2
   exit 1
 fi
+[[ -f "$foreign_launchd_service" && \
+   -d "$foreign_launchd_data/headroom" ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+
+foreign_root="$fixture/cleanup-foreign"
+foreign_data="$foreign_root/data"
+foreign_home="$foreign_root/home"
+foreign_config="$foreign_root/config"
+foreign_service="$foreign_config/systemd/user/orichum-headroom.service"
+install -d -m 0700 \
+  "$foreign_data/headroom/bin" "$(dirname "$foreign_service")"
+write_legacy_headroom_systemd_fixture \
+  "$foreign_service" "$foreign_data" 'Orichum Headroom proxy'
+sed 's#http://127.0.0.1:13457#http://127.0.0.2:13457#' \
+  "$foreign_service" >"$foreign_service.tmp"
+mv "$foreign_service.tmp" "$foreign_service"
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$foreign_home" XDG_CONFIG_HOME="$foreign_config" \
+  remove_owned_headroom_installation \
+    systemd "$foreign_data" "$foreign_service" - \
+    orichum-headroom.service new \
+    2>"$foreign_root/removal.stderr"; then
+  printf 'foreign Headroom service at managed path was removed\n' >&2
+  exit 1
+fi
+[[ -f "$foreign_service" && -d "$foreign_data/headroom" ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+rg -Fq 'refusing to remove unknown service file' \
+  "$foreign_root/removal.stderr"
+
+mixed_root="$fixture/cleanup-mixed"
+mixed_data="$mixed_root/data"
+mixed_home="$mixed_root/home"
+mixed_config="$mixed_root/config"
+mixed_current="$mixed_config/systemd/user/orichum-headroom.service"
+mixed_foreign="$mixed_config/systemd/user/claudex-headroom.service"
+install -d -m 0700 \
+  "$mixed_data/headroom/bin" "$(dirname "$mixed_current")"
+write_legacy_headroom_systemd_fixture \
+  "$mixed_current" "$mixed_data" 'Orichum Headroom proxy'
+write_legacy_headroom_systemd_fixture \
+  "$mixed_foreign" "$mixed_data" 'Claudex Headroom proxy'
+sed 's#http://127.0.0.1:13457#http://127.0.0.2:13457#' \
+  "$mixed_foreign" >"$mixed_foreign.tmp"
+mv "$mixed_foreign.tmp" "$mixed_foreign"
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$mixed_home" XDG_CONFIG_HOME="$mixed_config" \
+  remove_owned_headroom_installation \
+    systemd "$mixed_data" "$mixed_current" - \
+    orichum-headroom.service new \
+    2>"$mixed_root/removal.stderr"; then
+  printf 'mixed owned and foreign Headroom definitions were partially removed\n' >&2
+  exit 1
+fi
+[[ -f "$mixed_current" && -f "$mixed_foreign" ]]
+[[ -d "$mixed_data/headroom" ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+
+unsafe_runtime_root="$fixture/cleanup-unsafe-runtime"
+unsafe_runtime_data="$unsafe_runtime_root/data"
+unsafe_runtime_home="$unsafe_runtime_root/home"
+unsafe_runtime_service="$unsafe_runtime_home/Library/LaunchAgents/io.orichum.headroom.plist"
+install -d -m 0700 \
+  "$unsafe_runtime_data" "$(dirname "$unsafe_runtime_service")"
+printf 'unrelated file\n' >"$unsafe_runtime_data/headroom"
+write_legacy_headroom_launchd_fixture \
+  "$unsafe_runtime_service" "$unsafe_runtime_data" io.orichum.headroom
+commands_before="$(wc -l <"$cleanup_command_log" | tr -d ' ')"
+if HOME="$unsafe_runtime_home" remove_owned_headroom_installation \
+    darwin "$unsafe_runtime_data" "$unsafe_runtime_service" \
+    io.orichum.headroom - new \
+    2>"$unsafe_runtime_root/removal.stderr"; then
+  printf 'non-directory private Headroom path was removed\n' >&2
+  exit 1
+fi
+[[ -f "$unsafe_runtime_service" && -f "$unsafe_runtime_data/headroom" ]]
+[[ "$(wc -l <"$cleanup_command_log" | tr -d ' ')" == "$commands_before" ]]
+unset -f launchctl systemctl
 
 rg -Fq 'for launcher in orichum' "$ROOT/install.sh"
 if rg -q 'for launcher in .*claudex-gpt' "$ROOT/install.sh"; then
@@ -1053,17 +1236,6 @@ if rg -q 'for launcher in .*claudex-gpt' "$ROOT/install.sh"; then
   exit 1
 fi
 rg -Fq 'ORICHUM_ROUTE_PROXY_PORT' "$ROOT/install.sh"
-rg -Fq 'com.user.claudex-headroom.plist' "$ROOT/install.sh"
-rg -Fq 'claudex-headroom.service' "$ROOT/install.sh"
-rg -Fq "headroom-ai[proxy,code]" "$ROOT/lib/workflow.sh"
-if rg -Fq "headroom-ai[all]" "$ROOT/lib/workflow.sh"; then
-  printf 'Headroom still installs the unbounded all extra\n' >&2
-  exit 1
-fi
-rg -Fq 'headroom_service_is_ready' "$ROOT/install.sh"
-rg -Fq \
-  'Headroom did not become fully ready after route proxy activation' \
-  "$ROOT/install.sh"
 rg -Fq 'preflight_claudex_translation_proxy' "$ROOT/install.sh"
 rg -Fq \
   'Claudex translation proxy failed isolated bind and catalogue preflight' \

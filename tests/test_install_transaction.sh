@@ -32,35 +32,31 @@ snapshot_path_matches "$absent" "$snapshot" absent
 [[ ! -e "$absent" && ! -L "$absent" ]]
 
 private_data="$fixture/private-data"
-private_tools="$private_data/headroom/tools"
-private_bin="$private_data/headroom/bin"
+private_tools="$private_data/tools/uv"
+private_bin="$private_data/tools/bin"
 private_snapshot="$fixture/private-snapshot"
 host_bin="$fixture/host-bin"
 install -d -m 0700 \
   "$private_tools/mempalace" "$private_tools/graphifyy" \
-  "$private_tools/headroom-ai" "$private_bin" "$host_bin"
+  "$private_bin" "$host_bin"
 printf 'mempalace-old\n' >"$private_tools/mempalace/version"
 printf 'graphify-old\n' >"$private_tools/graphifyy/version"
-printf 'headroom-old\n' >"$private_tools/headroom-ai/version"
 printf 'mempalace-bin-old\n' >"$private_bin/mempalace-mcp"
 printf 'graphify-bin-old\n' >"$private_bin/graphify-mcp"
-printf 'headroom-bin-old\n' >"$private_bin/headroom"
 printf 'host-tool-unchanged\n' >"$host_bin/graphify-mcp"
 
 snapshot_private_tool_state \
   "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
-inject_failure_after_all_three_upgrades() {
+inject_failure_after_both_tool_upgrades() {
   printf 'mempalace-new\n' >"$private_tools/mempalace/version"
   printf 'graphify-new\n' >"$private_tools/graphifyy/version"
-  printf 'headroom-new\n' >"$private_tools/headroom-ai/version"
   printf 'mempalace-bin-new\n' >"$private_bin/mempalace-mcp"
   printf 'graphify-bin-new\n' >"$private_bin/graphify-mcp"
-  printf 'headroom-bin-new\n' >"$private_bin/headroom"
   printf 'new-entrypoint\n' >"$private_bin/graphify-future"
   return 72
 }
-if inject_failure_after_all_three_upgrades; then
-  printf 'three-upgrade failure injection unexpectedly succeeded\n' >&2
+if inject_failure_after_both_tool_upgrades; then
+  printf 'two-upgrade failure injection unexpectedly succeeded\n' >&2
   exit 1
 fi
 restore_private_tool_state \
@@ -93,23 +89,22 @@ unsafe_snapshot_external="$fixture/unsafe-snapshot-external"
 unsafe_snapshot_before="$fixture/unsafe-snapshot-before"
 install -d -m 0700 \
   "$unsafe_snapshot_data" \
-  "$unsafe_snapshot_external/headroom/tools/mempalace" \
-  "$unsafe_snapshot_external/headroom/tools/graphifyy" \
-  "$unsafe_snapshot_external/headroom/bin"
+  "$unsafe_snapshot_external/uv/mempalace" \
+  "$unsafe_snapshot_external/uv/graphifyy" \
+  "$unsafe_snapshot_data/tools/bin"
 printf 'external-mempalace\n' \
-  >"$unsafe_snapshot_external/headroom/tools/mempalace/version"
+  >"$unsafe_snapshot_external/uv/mempalace/version"
 printf 'external-graphify\n' \
-  >"$unsafe_snapshot_external/headroom/tools/graphifyy/version"
+  >"$unsafe_snapshot_external/uv/graphifyy/version"
 printf 'external-bin\n' \
-  >"$unsafe_snapshot_external/headroom/bin/graphify-mcp"
-cp -pPR "$unsafe_snapshot_external/headroom" "$unsafe_snapshot_before"
-ln -s "$unsafe_snapshot_external/headroom" \
-  "$unsafe_snapshot_data/headroom"
+  >"$unsafe_snapshot_data/tools/bin/graphify-mcp"
+cp -pPR "$unsafe_snapshot_external/uv" "$unsafe_snapshot_before"
+ln -s "$unsafe_snapshot_external/uv" "$unsafe_snapshot_data/tools/uv"
 set +e
 snapshot_private_tool_state \
   "$unsafe_snapshot_data" \
-  "$unsafe_snapshot_data/headroom/tools" \
-  "$unsafe_snapshot_data/headroom/bin" \
+  "$unsafe_snapshot_data/tools/uv" \
+  "$unsafe_snapshot_data/tools/bin" \
   "$fixture/unsafe-snapshot" \
   2>"$fixture/unsafe-snapshot.stderr"
 unsafe_snapshot_rc=$?
@@ -122,15 +117,15 @@ fi
 rg -Fq 'refusing unsafe private tool snapshot layout' \
   "$fixture/unsafe-snapshot.stderr"
 if ! diff -qr -- \
-    "$unsafe_snapshot_before" "$unsafe_snapshot_external/headroom" \
+    "$unsafe_snapshot_before" "$unsafe_snapshot_external/uv" \
     >/dev/null; then
   printf 'private tool snapshot changed an external target\n' >&2
   unsafe_layout_rejected=false
 fi
 
 unsafe_restore_data="$fixture/unsafe-restore-data"
-unsafe_restore_tools="$unsafe_restore_data/headroom/tools"
-unsafe_restore_bin="$unsafe_restore_data/headroom/bin"
+unsafe_restore_tools="$unsafe_restore_data/tools/uv"
+unsafe_restore_bin="$unsafe_restore_data/tools/bin"
 unsafe_restore_snapshot="$fixture/unsafe-restore-snapshot"
 unsafe_restore_external="$fixture/unsafe-restore-external"
 unsafe_restore_before="$fixture/unsafe-restore-before"
@@ -144,26 +139,21 @@ printf 'owned-bin\n' >"$unsafe_restore_bin/graphify-mcp"
 snapshot_private_tool_state \
   "$unsafe_restore_data" "$unsafe_restore_tools" "$unsafe_restore_bin" \
   "$unsafe_restore_snapshot"
-mv "$unsafe_restore_data/headroom" \
-  "$unsafe_restore_data/headroom-owned"
+mv "$unsafe_restore_data/tools/uv" "$unsafe_restore_data/tools/uv-owned"
 install -d -m 0700 \
-  "$unsafe_restore_external/headroom/tools/mempalace" \
-  "$unsafe_restore_external/headroom/tools/graphifyy" \
-  "$unsafe_restore_external/headroom/bin"
+  "$unsafe_restore_external/uv/mempalace" \
+  "$unsafe_restore_external/uv/graphifyy"
 printf 'external-mempalace\n' \
-  >"$unsafe_restore_external/headroom/tools/mempalace/version"
+  >"$unsafe_restore_external/uv/mempalace/version"
 printf 'external-graphify\n' \
-  >"$unsafe_restore_external/headroom/tools/graphifyy/version"
-printf 'external-bin\n' \
-  >"$unsafe_restore_external/headroom/bin/graphify-mcp"
-cp -pPR "$unsafe_restore_external/headroom" "$unsafe_restore_before"
-ln -s "$unsafe_restore_external/headroom" \
-  "$unsafe_restore_data/headroom"
+  >"$unsafe_restore_external/uv/graphifyy/version"
+cp -pPR "$unsafe_restore_external/uv" "$unsafe_restore_before"
+ln -s "$unsafe_restore_external/uv" "$unsafe_restore_data/tools/uv"
 set +e
 restore_private_tool_state \
   "$unsafe_restore_data" \
-  "$unsafe_restore_data/headroom/tools" \
-  "$unsafe_restore_data/headroom/bin" \
+  "$unsafe_restore_data/tools/uv" \
+  "$unsafe_restore_data/tools/bin" \
   "$unsafe_restore_snapshot" \
   2>"$fixture/unsafe-restore.stderr"
 unsafe_restore_rc=$?
@@ -175,7 +165,7 @@ fi
 rg -Fq 'refusing unsafe private tool restore layout' \
   "$fixture/unsafe-restore.stderr"
 if ! diff -qr -- \
-    "$unsafe_restore_before" "$unsafe_restore_external/headroom" \
+    "$unsafe_restore_before" "$unsafe_restore_external/uv" \
     >/dev/null; then
   printf 'private tool restore changed an external target\n' >&2
   unsafe_layout_rejected=false
@@ -288,7 +278,6 @@ restore_cliproxy = rollback.index(
 )
 restore_endpoint = rollback.index("restore_model_config_generation")
 restore_route = rollback.index("restore_claudex_proxy_service")
-restore_headroom = rollback.index("restore_headroom_service")
 if not (
     stop_route
     < restore_installed_config
@@ -297,7 +286,6 @@ if not (
     < restore_cliproxy
     < restore_endpoint
     < restore_route
-    < restore_headroom
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
 
@@ -355,16 +343,12 @@ if not activate_config < finalize_config < config_inactive < transaction_end:
         "rollback"
     )
 
-if 'if [[ "$claudex_proxy_action" != pending-provider-login ]]; then' not in source:
-    raise SystemExit("final Headroom readiness is not tied to usable route state")
-
 snapshot_private_tools = source.index("snapshot_private_tool_state")
 python_transaction = source.index("python_transaction_active=true")
 provision_python = source.index("install_or_reuse_orichum_python")
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
 probe_graphify = source.index("reconcile_graphify_storage", upgrade_graphify)
-upgrade_headroom = source.index("upgrade_headroom_distribution")
 if not (
     python_transaction
     < provision_python
@@ -374,9 +358,10 @@ if not (
     < upgrade_mempalace
     < upgrade_graphify
     < probe_graphify
-    < upgrade_headroom
 ):
-    raise SystemExit("private tool snapshot does not precede all three upgrades")
+    raise SystemExit("private tool snapshot does not precede both upgrades")
+if "headroom" in rollback.lower():
+    raise SystemExit("rollback still reinstalls or re-enables Headroom")
 if "graphify install" in source:
     raise SystemExit("installer must not invoke graphify install")
 for global_skill_root in (
@@ -391,11 +376,6 @@ PY
 for acceptance_workflow in \
     "$ROOT/.github/workflows/amd64-acceptance.yml" \
     "$ROOT/.github/workflows/macos-arm64-acceptance.yml"; do
-  rg -Fq 'headroom-provider-pending.json' "$acceptance_workflow"
-  rg -Fq -- "--write-out '%{http_code}'" "$acceptance_workflow"
-  rg -Fq 'test "$headroom_status" = 200' "$acceptance_workflow"
-  rg -Fq '.status == "unhealthy"' "$acceptance_workflow"
-  rg -Fq '.ready == false' "$acceptance_workflow"
   rg -Fq 'if ! bash "$test_script"; then' "$acceptance_workflow"
   rg -Fq 'bash -x "$test_script"' "$acceptance_workflow"
   rg -Fq 'report_acceptance_failure()' "$acceptance_workflow"

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import contextlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
@@ -182,7 +181,6 @@ class OrichumCliTests(unittest.TestCase):
                 return_value={
                     "claudexProxyPort": 13457,
                     "cliproxyPort": 8317,
-                    "headroomPort": 8787,
                     "routeProxyPort": 13456,
                 },
             ),
@@ -308,50 +306,39 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(run.call_args.kwargs["cwd"], self.root)
 
-    def test_headroom_status_reports_only_orichum_proxy_health(self) -> None:
-        payload = json.dumps(
-            {
-                "service": "headroom-proxy",
-                "status": "healthy",
-                "ready": True,
-                "version": "0.32.1",
-            }
-        ).encode()
+    def test_headroom_command_is_rejected_by_argparse(self) -> None:
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            orichum_cli.build_parser().parse_args(["headroom", "status"])
+        self.assertEqual(raised.exception.code, 2)
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *_args: object) -> None:
-                return
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(thread.join)
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-
+    def test_runtime_service_ports_accepts_only_three_distinct_ports(
+        self,
+    ) -> None:
         data_home = self.root / "data"
         data_home.mkdir(mode=0o700)
         ports = data_home / "service-ports.json"
         ports.write_text(
-            json.dumps({"headroomPort": server.server_port}),
+            json.dumps(
+                {
+                    "claudexProxyPort": 13456,
+                    "cliproxyPort": 8317,
+                    "routeProxyPort": 13457,
+                }
+            ),
             encoding="utf-8",
         )
         ports.chmod(0o600)
 
-        status, stdout, stderr = self.run_cli("headroom", "status")
-        self.assertEqual(status, 0)
-        self.assertEqual(stderr, "")
         self.assertEqual(
-            stdout,
-            f"Headroom 0.32.1: healthy and ready at "
-            f"http://127.0.0.1:{server.server_port}\n",
+            orichum_cli._runtime_service_ports({"data": data_home}),
+            {
+                "claudexProxyPort": 13456,
+                "cliproxyPort": 8317,
+                "routeProxyPort": 13457,
+            },
         )
 
     def provision_account_runtime(self) -> tuple[Path, Path]:
@@ -948,7 +935,6 @@ class OrichumCliTests(unittest.TestCase):
                 "_runtime_service_ports",
                 return_value={
                     "cliproxyPort": 8317,
-                    "headroomPort": 8787,
                     "claudexProxyPort": 13457,
                     "routeProxyPort": 13456,
                 },
@@ -1274,7 +1260,6 @@ class OrichumCliTests(unittest.TestCase):
                 return_value={
                     "claudexProxyPort": 13457,
                     "cliproxyPort": 8317,
-                    "headroomPort": 8787,
                     "routeProxyPort": 13456,
                 },
             ),
