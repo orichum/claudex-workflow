@@ -8,6 +8,41 @@ export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-transaction.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
+python3 - "$ROOT/install.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index('elif [[ -n "$prior_model_generation" ]]')
+end = source.index('routing_action=reused', start)
+fallback = source[start:end]
+required = (
+    '[[ "$cliproxy_binary_changed" == false ]]',
+    '[[ "$cliproxy_config_changed" == unchanged ]]',
+    '[[ "$cliproxy_service_changed" == unchanged ]]',
+    '[[ "$cliproxy_listener_owned" == true ]]',
+    '[[ "$cliproxy_ready_before" == true ]]',
+)
+missing = [condition for condition in required if condition not in fallback]
+if missing:
+    raise SystemExit(
+        "model-discovery fallback lacks CLIProxy invariants: "
+        + ", ".join(missing)
+    )
+PY
+
+model_file_data="$fixture/model-file-data"
+model_file_generation="$model_file_data/model-config/generation.test"
+install -d -m 0700 "$model_file_generation"
+printf '{}\n' >"$model_file_generation/models.json"
+printf 'default_model = "test"\n' \
+  >"$model_file_generation/claudex.toml"
+printf '{}\n' >"$model_file_generation/effective-models.json"
+ln -s generation.test "$model_file_data/model-config/current"
+[[ "$(model_config_file \
+  "$model_file_data" effective-models.json)" == \
+  "$model_file_data/model-config/current/effective-models.json" ]]
+
 snapshot="$fixture/snapshot"
 install -d -m 0700 "$snapshot" "$fixture/bin"
 
@@ -30,6 +65,21 @@ printf 'partial install\n' >"$absent"
 restore_snapshot "$absent" "$snapshot" absent
 snapshot_path_matches "$absent" "$snapshot" absent
 [[ ! -e "$absent" && ! -L "$absent" ]]
+
+install_state_dir="$fixture/install-state"
+install_state_snapshot="$fixture/install-state-snapshot"
+install_state_file="$install_state_dir/install-state.json"
+install -d -m 0700 "$install_state_dir" "$install_state_snapshot"
+printf '{"prior":true}\n' >"$install_state_file"
+chmod 0600 "$install_state_file"
+snapshot_path \
+  "$install_state_file" "$install_state_snapshot" install-state
+printf '{"partial":true}\n' >"$install_state_file"
+restore_snapshot \
+  "$install_state_file" "$install_state_snapshot" install-state
+snapshot_path_matches \
+  "$install_state_file" "$install_state_snapshot" install-state
+[[ "$(<"$install_state_file")" == '{"prior":true}' ]]
 
 private_data="$fixture/private-data"
 private_tools="$private_data/tools/uv"
@@ -568,6 +618,9 @@ restore_cliproxy = rollback.index(
 )
 restore_endpoint = rollback.index("restore_model_config_generation")
 restore_route = rollback.index("restore_claudex_proxy_service")
+restore_install_state = rollback.index(
+    'restore_snapshot "$install_state_path"'
+)
 if not (
     stop_route
     < restore_installed_config
@@ -576,8 +629,55 @@ if not (
     < restore_cliproxy
     < restore_endpoint
     < restore_route
+    < restore_install_state
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
+
+fast_attempt = source.index("if attempt_verified_fast_install")
+source_validation = source.index("source Orichum control plane is invalid")
+first_runtime_snapshot = source.index(
+    'snapshot_path "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
+)
+private_tool_snapshot = source.index("snapshot_private_tool_state")
+if not (
+    source_validation
+    < fast_attempt
+    < first_runtime_snapshot
+    < private_tool_snapshot
+):
+    raise SystemExit(
+        "verified fast path validation or snapshot ordering is unsafe"
+    )
+fast_start = source.index("attempt_verified_fast_install()")
+fast_end = source.index("\n)\n\nif attempt_verified_fast_install", fast_start)
+fast_body = source[fast_start:fast_end]
+if (
+    "trap cleanup_fast_verifiers EXIT" not in fast_body
+    or "wait \"$config_verify_pid\"" not in fast_body
+    or "wait \"$runtime_verify_pid\"" not in fast_body
+):
+    raise SystemExit("verified fast path does not reap background verifiers")
+
+restore_start = source.index("restore_claudex_proxy_service()")
+restore_end = source.index("\n}\n\nrollback_install_transaction()", restore_start)
+restore_service = source[restore_start:restore_end]
+platform_branch = restore_service.index('if [[ "$platform" == darwin ]]')
+bootstrap = restore_service.index("launchctl bootstrap", platform_branch)
+runtime_branch = restore_service.index(
+    'if [[ "${claudex_proxy_runtime_mutated:-false}" == true ]]'
+)
+if "claudex_proxy_loaded_target_is_expected" in restore_service[
+    runtime_branch:platform_branch
+] or "claudex_proxy_loaded_target_is_expected" in restore_service[
+    platform_branch:bootstrap
+]:
+    raise SystemExit(
+        "darwin rollback requires a loaded target after bootout"
+    )
+if "claudex_proxy_service_is_owned" not in restore_service:
+    raise SystemExit(
+        "route-proxy rollback does not validate the restored service file"
+    )
 
 stage_config = source.index(
     "stage_installed_control_plane",
@@ -624,10 +724,37 @@ if '"$candidate_config_root" "$INSTALLED_CONFIG_ROOT" \\\n  "$control_plane_jour
 finalize_config = source.index(
     "finalize_installed_control_plane", activate_config
 )
+doctor = source.index('"$USER_BIN_DIR/orichum" doctor', activate_config)
+runtime_ready = source.index(
+    '"$WORKFLOW_ROOT/bin/orichum-runtime-ready"',
+    activate_config,
+)
+committed_routing_fingerprint = source.index(
+    "committed routing input fingerprint failed",
+    activate_config,
+)
+publish_install_state = source.index(
+    'write "$install_state_path" "$install_state_platform"',
+    doctor,
+)
+install_state_active = source.index(
+    "install_state_transaction_active=true",
+    doctor,
+)
 config_inactive = source.index(
     "config_transaction_active=false", finalize_config
 )
-if not activate_config < finalize_config < config_inactive < transaction_end:
+if not (
+    activate_config
+    < committed_routing_fingerprint
+    < runtime_ready
+    < doctor
+    < install_state_active
+    < publish_install_state
+    < finalize_config
+    < config_inactive
+    < transaction_end
+):
     raise SystemExit(
         "stable control-plane journal is not finalized before disarming "
         "rollback"
@@ -638,13 +765,17 @@ migrate_legacy_tools = source.index("migrate_legacy_private_tools")
 private_tool_exports = source.index("export UV_TOOL_DIR UV_TOOL_BIN_DIR")
 python_transaction = source.index("python_transaction_active=true")
 provision_python = source.index("install_or_reuse_orichum_python")
+snapshot_install_state = source.index(
+    'snapshot_path "$install_state_path"'
+)
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
 probe_graphify = source.index("reconcile_graphify_storage", upgrade_graphify)
 normalize_endpoint = source.index("normalize_headroom_free_endpoint_snapshot")
 remove_headroom = source.index("remove_owned_headroom_installation")
 if not (
-    python_transaction
+    snapshot_install_state
+    < python_transaction
     < provision_python
     < migrate_legacy_tools
     < snapshot_private_tools

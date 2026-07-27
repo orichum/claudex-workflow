@@ -1,4 +1,4 @@
-# Installation and upgrades
+# Installation, reconciliation, and upgrades
 
 ## Supported hosts
 
@@ -13,7 +13,7 @@ normally supplied by `iproute2`.
 The host Python only bootstraps installation. Orichum commands and services use
 an isolated, uv-managed CPython 3.14.x.
 
-## Install or upgrade
+## Install
 
 ```bash
 git clone https://github.com/arvind9981/claudex-workflow.git orichum
@@ -21,7 +21,7 @@ cd orichum
 ./install.sh
 ```
 
-Every run is an idempotent upgrade and reconciliation pass. It:
+The first run performs the complete installation. It:
 
 1. validates the focused configuration and controller plugin;
 2. installs the newest available CPython 3.14 patch privately;
@@ -30,7 +30,41 @@ Every run is an idempotent upgrade and reconciliation pass. It:
 4. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
 5. installs or reconciles the shared loopback services;
 6. preserves valid configuration and authentication;
-7. runs `orichum doctor` and reports the final locations and ports.
+7. runs `orichum doctor` and reports the final locations and ports once a
+   provider route is available.
+
+Without a logged-in provider, installation completes in
+`pending-provider-login` state and prints the login command instead of failing
+the full route check.
+
+## Fast reconciliation or explicit upgrade
+
+For normal maintenance, run:
+
+```bash
+./install.sh
+# Fast reconciliation; no upstream checks when verified and healthy.
+```
+
+An unchanged healthy installation targets completion in under 10 seconds.
+Orichum verifies its private install-state manifest, checks owned services and
+critical runtime readiness, and reuses matching components. A missing or
+damaged component is repaired without upgrading unrelated tools. Fresh
+installations automatically use the complete path. Repairs can take longer
+than the fast-path target.
+
+To deliberately resolve current external releases and upgrade every managed
+runtime, run:
+
+```bash
+./install.sh --upgrade
+# Resolve releases, run complete probes, and run the full doctor.
+```
+
+Verified state is stored at
+`~/.local/share/orichum/state/install-state.json`. The private manifest contains
+component identities and digests, not secrets. Do not edit it; the installer
+discards invalid state and safely reconciles the installation.
 
 If a preferred port belongs to an existing Orichum service, the installer
 reconciles and reuses it. It does not overwrite an unknown process. Interactive
@@ -48,6 +82,7 @@ next available port.
 | Managed Python versions | `~/.local/share/orichum/python/` |
 | Stable private Python | `~/.local/share/orichum/bin/orichum-python` |
 | Logical session state | `~/.local/share/orichum/state/` |
+| Verified install state | `~/.local/share/orichum/state/install-state.json` |
 
 Use `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and `ORICHUM_CACHE_HOME` to
 relocate these roots. Values must be absolute.

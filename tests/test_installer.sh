@@ -20,6 +20,185 @@ install -d -m 0700 "$fixture/install.lock"
 exec 9<"$fixture/install.lock"
 WORKFLOW_LOCK_FD=9
 
+[[ "$(parse_install_mode)" == fast ]]
+[[ "$(parse_install_mode --upgrade)" == upgrade ]]
+[[ "$(parse_install_mode --uninstall)" == uninstall ]]
+[[ "$(parse_install_mode --uninstall --purge)" == purge ]]
+if parse_install_mode --purge >/dev/null 2>&1; then
+  printf 'standalone --purge was accepted\n' >&2
+  exit 1
+fi
+
+matching_digest="$(printf 'a%.0s' {1..64})"
+changed_digest="$(printf 'b%.0s' {1..64})"
+matching_manifest="$fixture/matching-manifest.json"
+jq -n \
+  --arg digest "$matching_digest" \
+  '{
+    schemaVersion: 1,
+    platform: "darwin:aarch64",
+    components: {
+      cliproxy: {
+        version: "7.2.97",
+        sourceIdentity: "github:router-for-me/CLIProxyAPI@v7.2.97",
+        artifactSha256: $digest,
+        inputSha256: $digest,
+        probeSha256: $digest
+      }
+    }
+  }' >"$matching_manifest"
+component_state_matches \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$matching_digest"
+if component_state_matches \
+    "$matching_manifest" cliproxy 7.2.97 \
+    github:router-for-me/CLIProxyAPI@v7.2.97 \
+    "$changed_digest" "$matching_digest" "$matching_digest"; then
+  printf 'changed component artifact matched installer state\n' >&2
+  exit 1
+fi
+INSTALL_MODE=fast
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$matching_digest")" == reused ]]
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$changed_digest" "$matching_digest" "$matching_digest")" == repaired ]]
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$changed_digest")" == repaired ]]
+INSTALL_MODE=upgrade
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$matching_digest")" == upgraded ]]
+INSTALL_MODE=fast
+component_table="$(
+  print_component_status_table \
+    reused repaired upgraded reused repaired upgraded reused repaired
+)"
+rg -Fq 'CLIProxyAPI           repaired' <<<"$component_table"
+rg -Fq 'Controller plugin     repaired' <<<"$component_table"
+if print_component_status_table \
+    invalid reused reused reused reused reused reused reused >/dev/null; then
+  printf 'invalid component status was accepted\n' >&2
+  exit 1
+fi
+
+routing_fixture="$fixture/routing-fingerprint"
+routing_data="$routing_fixture/data"
+routing_config="$routing_fixture/config"
+routing_generation="$routing_data/model-config/generation.test"
+routing_descriptor="$routing_fixture/runtime.descriptor"
+install -d -m 0700 \
+  "$routing_data/claude-config" "$routing_generation" "$routing_config"
+printf '%s\n' cliproxy.yaml >"$routing_data/cliproxy.yaml"
+for routing_file in cliproxy.service route-proxy.service; do
+  printf '%s\n' "$routing_file" >"$routing_fixture/$routing_file"
+done
+for routing_file in \
+    claudex.toml models.json effective-models.json; do
+  printf '%s\n' "$routing_file" >"$routing_generation/$routing_file"
+done
+for routing_file in \
+    accounts.json model-stacks.json plugins.json projects.json \
+    providers.json runtime.json controller-policy.md; do
+  printf '%s\n' "$routing_file" >"$routing_config/$routing_file"
+done
+printf '{}\n' >"$routing_data/claude-config/settings.json"
+ln -s generation.test "$routing_data/model-config/current"
+routing_artifact="$(
+  verified_routing_runtime_artifact \
+    "$routing_data" "$routing_config" \
+    "$routing_fixture/cliproxy.service" \
+    "$routing_fixture/route-proxy.service" \
+    "$routing_descriptor"
+)"
+[[ "$routing_artifact" =~ ^[a-f0-9]{64}$ ]]
+printf 'changed\n' >>"$routing_config/projects.json"
+changed_routing_artifact="$(
+  verified_routing_runtime_artifact \
+    "$routing_data" "$routing_config" \
+    "$routing_fixture/cliproxy.service" \
+    "$routing_fixture/route-proxy.service" \
+    "$routing_descriptor"
+)"
+[[ "$changed_routing_artifact" != "$routing_artifact" ]]
+routing_source="$routing_fixture/source-runtime.json"
+printf '{"source":"v1"}\n' >"$routing_source"
+routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+same_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-copy.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+[[ "$routing_input" == "$same_routing_input" ]]
+changed_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-changed.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf changed-route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+[[ "$changed_routing_input" != "$routing_input" ]]
+printf '{"source":"v2"}\n' >"$routing_source"
+source_changed_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-source-changed.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+[[ "$source_changed_routing_input" != "$routing_input" ]]
+
+candidate_models="$routing_fixture/candidate-models.json"
+committed_models="$routing_fixture/committed-models.json"
+printf '{"models":{"demo":{"priority":1}}}\n' >"$candidate_models"
+printf '{\n  "models": {\n    "demo": {\n      "priority": 1\n    }\n  }\n}\n' >"$committed_models"
+precommit_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-precommit.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$candidate_models"
+)"
+committed_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-committed.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$committed_models"
+)"
+fast_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-fast.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$committed_models"
+)"
+[[ "$precommit_routing_input" != "$committed_routing_input" ]]
+[[ "$committed_routing_input" == "$fast_routing_input" ]]
+
 python_data="$fixture/python-data"
 python_root="$python_data/python"
 python_bin="$python_root/cpython-3.14.6/bin"
@@ -124,6 +303,101 @@ chmod 0755 "$managed_bin/tool"
 ln -s "$managed_bin/tool" "$managed_bin/tool-link"
 if managed_executable_is_safe "$managed_bin/tool-link"; then
   printf 'managed executable symlink was accepted\n' >&2
+  exit 1
+fi
+
+identity_data="$fixture/private-tool-identity"
+identity_tools="$identity_data/tools/uv"
+identity_bin="$identity_data/tools/bin"
+identity_env="$identity_tools/mempalace"
+identity_metadata="$identity_env/lib/python3.14/site-packages/mempalace-3.6.0.dist-info/METADATA"
+identity_python_marker="$fixture/private-tool-python-executed"
+install -d -m 0700 \
+  "$identity_env/bin" "$(dirname "$identity_metadata")" "$identity_bin"
+cat >"$identity_env/bin/python" <<EOF
+#!/usr/bin/env bash
+touch "$identity_python_marker"
+printf "3.6.0\\n"
+EOF
+printf '%s\n' \
+  'Metadata-Version: 2.4' \
+  'Name: mempalace' \
+  'Version: 3.6.0' >"$identity_metadata"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$identity_env/bin/mempalace"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$identity_env/bin/mempalace-mcp"
+chmod 0755 "$identity_env/bin/"*
+ln -s "$identity_env/bin/mempalace" "$identity_bin/mempalace"
+ln -s "$identity_env/bin/mempalace-mcp" "$identity_bin/mempalace-mcp"
+IFS=$'\t' read -r identity_version identity_artifact < <(
+  private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp
+)
+[[ "$identity_version" == 3.6.0 ]]
+[[ "$identity_artifact" =~ ^[a-f0-9]{64}$ ]]
+[[ ! -e "$identity_python_marker" ]]
+for writable_identity_parent in \
+    "$identity_data/tools" "$identity_tools"; do
+  chmod 0770 "$writable_identity_parent"
+  if private_uv_tool_identity \
+      "$identity_data" mempalace mempalace \
+      mempalace mempalace-mcp >/dev/null 2>&1; then
+    printf 'writable private tool ancestor was accepted: %s\n' \
+      "$writable_identity_parent" >&2
+    exit 1
+  fi
+  chmod 0700 "$writable_identity_parent"
+done
+chmod 0770 "$identity_env/lib/python3.14/site-packages"
+if private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp >/dev/null 2>&1; then
+  printf 'writable private tool metadata path was accepted\n' >&2
+  exit 1
+fi
+chmod 0700 "$identity_env/lib/python3.14/site-packages"
+printf '# changed\n' >>"$identity_env/bin/mempalace-mcp"
+IFS=$'\t' read -r changed_identity_version changed_identity_artifact < <(
+  private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp
+)
+[[ "$changed_identity_version" == 3.6.0 ]]
+[[ "$changed_identity_artifact" != "$identity_artifact" ]]
+external_identity_tool="$fixture/external-identity-tool"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$external_identity_tool"
+chmod 0755 "$external_identity_tool"
+ln -sfn "$external_identity_tool" "$identity_bin/mempalace-mcp"
+if private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp >/dev/null 2>&1; then
+  printf 'private tool entrypoint escape was accepted\n' >&2
+  exit 1
+fi
+
+plugin_fixture="$fixture/plugin-fingerprint"
+install -d -m 0700 \
+  "$plugin_fixture/controller/plugin/hooks" "$plugin_fixture/config"
+printf '{"hooks":{}}\n' \
+  >"$plugin_fixture/controller/plugin/hooks/hooks.json"
+printf '{"plugins":[]}\n' >"$plugin_fixture/config/plugins.json"
+plugin_fingerprint="$(
+  controller_plugin_fingerprint "$ROOT" "$plugin_fixture" python3
+)"
+[[ "$plugin_fingerprint" =~ ^[a-f0-9]{64}$ ]]
+printf 'untracked runtime content\n' \
+  >"$plugin_fixture/controller/plugin/untracked.txt"
+plugin_fingerprint_with_untracked="$(
+  controller_plugin_fingerprint "$ROOT" "$plugin_fixture" python3
+)"
+[[ "$plugin_fingerprint_with_untracked" != "$plugin_fingerprint" ]]
+ln -s hooks/hooks.json \
+  "$plugin_fixture/controller/plugin/unsafe-link"
+if controller_plugin_fingerprint \
+    "$ROOT" "$plugin_fixture" python3 >/dev/null 2>&1; then
+  printf 'symlinked controller plugin content was accepted\n' >&2
   exit 1
 fi
 
@@ -458,6 +732,102 @@ IFS=$'\t' read -r \
      "$provisioned_data/python/cpython-3.14.6/bin/python3.14")" ]]
 [[ -z "$python_generation" ]]
 
+: >"$fake_uv_log"
+IFS=$'\t' read -r \
+  python_action python_version python_candidate python_generation < <(
+  PATH="$fake_uv_bin:$PATH" \
+  FAKE_UV_LOG="$fake_uv_log" \
+  FAKE_UV_VERSION=3.14.6 \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6
+)
+[[ "$python_action" == reused ]]
+[[ "$python_version" == 3.14.6 ]]
+[[ "$python_candidate" == \
+   "$(workflow_physical_path \
+     "$provisioned_data/python/cpython-3.14.6/bin/python3.14")" ]]
+[[ -z "$python_generation" ]]
+[[ ! -s "$fake_uv_log" ]]
+
+python_runtime="$provisioned_data/python/cpython-3.14.6/bin/python3.14"
+python_runtime_backup="$fixture/python3.14.saved"
+cp -p "$python_runtime" "$python_runtime_backup"
+python_recorded_sha="$(sha256_file "$python_runtime")"
+printf '# drift\n' >>"$python_runtime"
+: >"$fake_uv_log"
+IFS=$'\t' read -r \
+  python_action python_version python_candidate python_generation < <(
+  PATH="$fake_uv_bin:$PATH" \
+  FAKE_UV_LOG="$fake_uv_log" \
+  FAKE_UV_VERSION=3.14.6 \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6 "$python_recorded_sha"
+)
+[[ "$python_action" == repaired ]]
+[[ "$python_version" == 3.14.6 ]]
+[[ -n "$python_generation" ]]
+[[ "$(sha256_file "$python_candidate")" == "$python_recorded_sha" ]]
+if rg -Fq 'python list ' "$fake_uv_log"; then
+  printf 'recorded Python repair resolved latest upstream version\n' >&2
+  exit 1
+fi
+rg -Fq 'python install ' "$fake_uv_log"
+remove_orichum_python_generation "$provisioned_data" "$python_generation"
+cp -p "$python_runtime_backup" "$python_runtime"
+
+newer_recorded_runtime="$provisioned_data/python/cpython-3.14.7/bin/python3.14"
+install -d -m 0700 "$(dirname "$newer_recorded_runtime")"
+sed 's/3\.14\.6/3.14.7/' "$python_runtime_backup" \
+  >"$newer_recorded_runtime"
+chmod 0755 "$newer_recorded_runtime"
+ln -sfn "$newer_recorded_runtime" \
+  "$provisioned_data/bin/orichum-python"
+: >"$fake_uv_log"
+IFS=$'\t' read -r \
+  python_action python_version python_candidate python_generation < <(
+  PATH="$fake_uv_bin:$PATH" \
+  FAKE_UV_LOG="$fake_uv_log" \
+  FAKE_UV_VERSION=3.14.6 \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6 "$python_recorded_sha"
+)
+[[ "$python_action" == repaired ]]
+[[ "$python_version" == 3.14.6 ]]
+[[ "$(sha256_file "$python_candidate")" == "$python_recorded_sha" ]]
+remove_orichum_python_generation "$provisioned_data" "$python_generation"
+ln -sfn "$python_runtime" "$provisioned_data/bin/orichum-python"
+rm -rf -- "$(dirname "$(dirname "$newer_recorded_runtime")")"
+
+printf '# drift again\n' >>"$python_runtime"
+if PATH="$fake_uv_bin:$PATH" \
+   FAKE_UV_LOG="$fake_uv_log" \
+   FAKE_UV_VERSION=3.14.6 \
+   FAKE_UV_INSTALL_FAIL=true \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6 "$python_recorded_sha" \
+      >"$fixture/python-repair.stdout" \
+      2>"$fixture/python-repair.stderr"; then
+  printf 'failed exact Python repair reused a drifted runtime\n' >&2
+  exit 1
+fi
+rg -Fq 'could not install private CPython 3.14.6' \
+  "$fixture/python-repair.stderr"
+cp -p "$python_runtime_backup" "$python_runtime"
+
+if INSTALL_MODE=upgrade \
+   PATH="$fake_uv_bin:$PATH" \
+   FAKE_UV_LOG="$fake_uv_log" \
+   FAKE_UV_VERSION=3.14.7 \
+   FAKE_UV_INSTALL_FAIL=true \
+    install_or_reuse_orichum_python "$provisioned_data" true \
+      >"$fixture/python-upgrade.stdout" \
+      2>"$fixture/python-upgrade.stderr"; then
+  printf 'failed explicit Python upgrade reused the prior runtime\n' >&2
+  exit 1
+fi
+rg -Fq 'could not install private CPython 3.14.7' \
+  "$fixture/python-upgrade.stderr"
+
 rollback_data="$fixture/rollback-data"
 rollback_snapshot="$fixture/rollback-snapshot"
 old_runtime="$rollback_data/python/cpython-3.14.5/bin/python3.14"
@@ -545,6 +915,170 @@ curl() {
 GH_TOKEN= fetch_latest_github_release example/tool "$anonymous_release"
 [[ "$(jq -r .tag_name "$anonymous_release")" == v4.5.6 ]]
 unset -f gh curl
+
+recorded_binary_root="$fixture/recorded-binary"
+recorded_binary="$recorded_binary_root/tool"
+recorded_release_log="$fixture/recorded-release.log"
+install -d -m 0700 "$recorded_binary_root"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.3\n"' >"$recorded_binary"
+chmod 0755 "$recorded_binary"
+fetch_latest_github_release() {
+  printf 'unexpected release lookup\n' >>"$recorded_release_log"
+  return 97
+}
+fetch_github_release_tag() {
+  printf 'unexpected tagged release lookup\n' >>"$recorded_release_log"
+  return 97
+}
+curl() {
+  printf 'unexpected artifact download\n' >>"$recorded_release_log"
+  return 97
+}
+recorded_state="$(
+  stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/recorded-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$recorded_binary")"
+)"
+[[ "$(jq -r '.version' <<<"$recorded_state")" == 1.2.3 ]]
+[[ "$(jq -r '.changed' <<<"$recorded_state")" == false ]]
+[[ "$(jq -r '.staged_path' <<<"$recorded_state")" == null ]]
+[[ ! -e "$recorded_release_log" ]]
+unset -f fetch_latest_github_release fetch_github_release_tag curl
+
+repair_archive_root="$fixture/repair-archive"
+repair_archive="$fixture/tool-1.2.3.tar.gz"
+repair_fetch_log="$fixture/repair-fetch.log"
+install -d -m 0700 "$repair_archive_root"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.3\n"' >"$repair_archive_root/tool"
+chmod 0755 "$repair_archive_root/tool"
+tar -czf "$repair_archive" -C "$repair_archive_root" tool
+repair_digest="$(sha256_file "$repair_archive")"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.2\n"' >"$recorded_binary"
+chmod 0755 "$recorded_binary"
+fetch_github_release_tag() {
+  local repository="$1"
+  local tag="$2"
+  local output_file="$3"
+  printf '%s|%s\n' "$repository" "$tag" >>"$repair_fetch_log"
+  jq -n \
+    --arg tag "$tag" \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: $tag,
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+curl() {
+  local output_file=
+  while (($# > 0)); do
+    if [[ "$1" == --output ]]; then
+      output_file="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  cp "$repair_archive" "$output_file"
+}
+repaired_state="$(
+  stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/repair-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$repair_archive_root/tool")"
+)"
+[[ "$(jq -r '.changed' <<<"$repaired_state")" == true ]]
+[[ "$(jq -r '.version' <<<"$repaired_state")" == 1.2.3 ]]
+[[ "$(cat "$repair_fetch_log")" == 'example/tool|v1.2.3' ]]
+binary_reports_semver "$(jq -r '.staged_path' <<<"$repaired_state")" 1.2.3
+
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: "v9.9.9",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/mismatch-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$repair_archive_root/tool")" \
+    >"$fixture/mismatch.stdout" 2>"$fixture/mismatch.stderr"; then
+  printf 'mismatched tagged release metadata was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'recorded GitHub release identity did not match' \
+  "$fixture/mismatch.stderr"
+
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    '{
+      tag_name: "v1.2.3",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/checksum-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$repair_archive_root/tool")" \
+    >"$fixture/checksum.stdout" 2>"$fixture/checksum.stderr"; then
+  printf 'wrong recorded GitHub checksum was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'checksum mismatch for tool-1.2.3.tar.gz' \
+  "$fixture/checksum.stderr"
+[[ ! -e "$fixture/checksum-stage/tool" ]]
+
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: "v1.2.3",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/artifact-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    0000000000000000000000000000000000000000000000000000000000000000 \
+    >"$fixture/artifact.stdout" 2>"$fixture/artifact.stderr"; then
+  printf 'wrong installed GitHub artifact hash was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'recorded GitHub binary artifact did not match' \
+  "$fixture/artifact.stderr"
+unset -f fetch_github_release_tag curl
 
 printf '6.8.0-generic\n' >"$fixture/linux-osrelease"
 printf '4.4.0-Microsoft\n' >"$fixture/wsl1-osrelease"

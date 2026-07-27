@@ -38,6 +38,9 @@ for script in "$ROOT"/bin/orichum* "$ROOT/install.sh" "$ROOT/doctor.sh"; do
   [[ -x "$script" ]]
   bash -n "$script"
 done
+rg -Fq \
+  'Usage: ./install.sh [--upgrade | --uninstall [--purge]]' \
+  "$ROOT/install.sh"
 
 install -d \
   "$fixture/fake-bin" \
@@ -330,7 +333,17 @@ for required_contract in \
     'ubuntu:24.04' \
     '--privileged' \
     'loginctl enable-linger orichum' \
-    'Verify idempotent upgrade'; do
+    'Verify fast repeat and explicit upgrade' \
+    'repeat_started="$(python3 -c' \
+    'test "$repeat_ms" -lt 10000' \
+    'orichum-fast.log' \
+    'Fast readiness checks passed.' \
+    '^Controller plugin[[:space:]]+reused' \
+    './install.sh --upgrade' \
+    'orichum-upgrade.log' \
+    '^Controller plugin[[:space:]]+upgraded' \
+    '.components.routing | not' \
+    'Running Orichum doctor'; do
   rg -Fq -- "$required_contract" "$amd64_workflow"
 done
 if rg -q '^  push:' "$amd64_workflow"; then
@@ -398,7 +411,17 @@ for required_contract in \
     '--require-tool graph_stats' \
     'graphify_command="$(' \
     'run-graph-session-fixture' \
-    'Verify idempotent upgrade' \
+    'Verify fast repeat and explicit upgrade' \
+    'repeat_started="$(python3 -c' \
+    'test "$repeat_ms" -lt 10000' \
+    'orichum-fast.log' \
+    'Fast readiness checks passed.' \
+    '^Controller plugin[[:space:]]+reused' \
+    './install.sh --upgrade' \
+    'orichum-upgrade.log' \
+    '^Controller plugin[[:space:]]+upgraded' \
+    '.components.routing | not' \
+    'Running Orichum doctor' \
     'Clean up launch agents'; do
   rg -Fq -- "$required_contract" "$macos_workflow"
 done
@@ -434,5 +457,19 @@ case "$macos_secret_scan_rc" in
     exit 1
     ;;
 esac
+
+for installer_document in \
+    "$ROOT/README.md" \
+    "$ROOT/docs/installation.md" \
+    "$ROOT/docs/cli-reference.md"; do
+  rg -Fq './install.sh --upgrade' "$installer_document"
+done
+for installation_contract in \
+    'Fast reconciliation' \
+    'under 10 seconds' \
+    'state/install-state.json' \
+    'identities and digests, not secrets'; do
+  rg -Fq "$installation_contract" "$ROOT/docs/installation.md"
+done
 
 printf 'PASS: Orichum command and control-plane smoke\n'

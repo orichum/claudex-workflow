@@ -3,6 +3,22 @@
 Run `orichum COMMAND --help` for the authoritative options installed on the
 current machine.
 
+Installer modes are separate from the `orichum` command:
+
+```bash
+./install.sh
+# Install completely when fresh; otherwise reconcile verified local state.
+
+./install.sh --upgrade
+# Check upstream releases, upgrade managed tools, and run the full doctor.
+
+./install.sh --uninstall
+# Remove managed runtimes while preserving accounts, sessions, and project data.
+
+./install.sh --uninstall --purge
+# Also permanently remove Orichum's saved configuration and private data.
+```
+
 | Command | Purpose |
 |---|---|
 | `orichum` / `orichum run` | Start a project-aware session |

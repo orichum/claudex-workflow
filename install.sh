@@ -6,31 +6,27 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 
-case "$#" in
-  0) ;;
-  1)
-    [[ "$1" == --uninstall ]] || {
-      printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
-      exit 2
-    }
+install_usage() {
+  printf 'Usage: ./install.sh [--upgrade | --uninstall [--purge]]\n' >&2
+}
+
+INSTALL_MODE="$(parse_install_mode "$@")" || {
+  install_usage
+  exit 2
+}
+case "$INSTALL_MODE" in
+  fast|upgrade) ;;
+  uninstall)
     # shellcheck source=lib/uninstall.sh
     source "$WORKFLOW_ROOT/lib/uninstall.sh"
     orichum_uninstall false
     exit
     ;;
-  2)
-    [[ "$1" == --uninstall && "$2" == --purge ]] || {
-      printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
-      exit 2
-    }
+  purge)
     # shellcheck source=lib/uninstall.sh
     source "$WORKFLOW_ROOT/lib/uninstall.sh"
     orichum_uninstall true
     exit
-    ;;
-  *)
-    printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
-    exit 2
     ;;
 esac
 
@@ -253,12 +249,112 @@ preflight_private_tool_layout "$WORKFLOW_DATA_ROOT" || \
 install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state" "$ORICHUM_CONFIG_ROOT"
 acquire_workflow_lock "$WORKFLOW_DATA_ROOT/state/install.lock"
+installer_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-install.XXXXXX")"
+register_cleanup_path "$installer_temp"
+snapshot_dir="$installer_temp/snapshots"
+install -d -m 0700 "$snapshot_dir"
+install_state_path="$WORKFLOW_DATA_ROOT/state/install-state.json"
+install_state_platform="$platform:$cliproxy_arch"
+prior_install_state="$installer_temp/prior-install-state.json"
+prior_install_state_verified=false
+install_state_read_status=0
+python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
+  read "$install_state_path" "$install_state_platform" \
+  >"$prior_install_state" 2>/dev/null || install_state_read_status=$?
+if [[ "$install_state_read_status" -eq 0 ]]; then
+  chmod 0600 "$prior_install_state"
+  prior_install_state_verified=true
+  snapshot_path "$install_state_path" "$snapshot_dir" install-state
+else
+  rm -f -- "$prior_install_state"
+fi
 control_plane_journal="$WORKFLOW_DATA_ROOT/state/install-control-plane"
-recover_installed_control_plane \
-  python3 "$WORKFLOW_ROOT" \
-  "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
-  "$WORKFLOW_LOCK_FD" || \
-  workflow_die "unfinished Orichum control-plane activation could not be recovered"
+control_plane_recovery_needed=false
+if [[ -e "$control_plane_journal" || -L "$control_plane_journal" ]]; then
+  control_plane_recovery_needed=true
+fi
+if [[ "$control_plane_recovery_needed" == true ]]; then
+  recover_installed_control_plane \
+    python3 "$WORKFLOW_ROOT" \
+    "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
+    "$WORKFLOW_LOCK_FD" || \
+    workflow_die \
+      "unfinished Orichum control-plane activation could not be recovered"
+fi
+
+install_contract_fingerprint() {
+  python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
+    fingerprint "$WORKFLOW_ROOT" "$@"
+}
+python_input_sha="$(
+  install_contract_fingerprint lib/workflow.sh
+)" || workflow_die "Python installer input fingerprint failed"
+python_probe_sha="$(
+  install_contract_fingerprint \
+    lib/workflow.sh integrations/common/route_proxy.py
+)" || workflow_die "Python probe fingerprint failed"
+cliproxy_input_sha="$(
+  install_contract_fingerprint install.sh lib/workflow.sh
+)" || workflow_die "CLIProxyAPI installer input fingerprint failed"
+cliproxy_probe_sha="$cliproxy_input_sha"
+claudex_input_sha="$cliproxy_input_sha"
+claudex_probe_sha="$(
+  install_contract_fingerprint \
+    install.sh lib/workflow.sh integrations/common/route_proxy.py
+)" || workflow_die "Claudex probe fingerprint failed"
+leanctx_input_sha="$(
+  install_contract_fingerprint \
+    install.sh lib/workflow.sh \
+    integrations/common/leanctx_contract.py \
+    integrations/common/mcp_probe.py
+)" || workflow_die "LeanCTX installer input fingerprint failed"
+leanctx_probe_sha="$(
+  install_contract_fingerprint \
+    lib/workflow.sh integrations/common/leanctx_contract.py \
+    integrations/common/mcp_probe.py
+)" || workflow_die "LeanCTX probe fingerprint failed"
+empty_artifact_sha="$(printf '0%.0s' {1..64})"
+controller_plugin_input_sha="$(
+  controller_plugin_fingerprint \
+    "$WORKFLOW_ROOT" "$WORKFLOW_ROOT" python3
+)" || workflow_die "controller plugin input fingerprint failed"
+controller_plugin_probe_sha="$(
+  install_contract_fingerprint \
+    bin/orichum-plugin controller/plugin/hooks/hooks.json
+)" || workflow_die "controller plugin probe fingerprint failed"
+mempalace_input_sha="$(
+  printf 'pypi:mempalace\n' | sha256_text
+)"
+mempalace_probe_sha="$(
+  printf '%s\n' \
+    "$(sha256_file "$WORKFLOW_ROOT/integrations/common/mcp_probe.py")" \
+    mempalace_get_taxonomy mempalace_search mempalace_checkpoint | \
+    sha256_text
+)"
+graphify_input_sha="$(
+  printf 'pypi:graphifyy[mcp,terraform]\n' | sha256_text
+)"
+graphify_probe_sha="$(
+  printf '%s\n' \
+    "$(sha256_file "$WORKFLOW_ROOT/integrations/common/mcp_probe.py")" \
+    "$(sha256_file "$WORKFLOW_ROOT/lib/workflow.sh")" \
+    query_graph graph_stats | sha256_text
+)"
+routing_probe_sha="$(
+  install_contract_fingerprint \
+    discover-models.sh integrations/common/model_routing.py \
+    integrations/common/route_proxy.py
+)" || workflow_die "routing probe fingerprint failed"
+controller_plugin_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  controller_plugin_decision="$(
+    decide_install_component \
+      "$prior_install_state" controllerPlugin \
+      1 orichum:controller-plugin \
+      "$controller_plugin_input_sha" \
+      "$controller_plugin_input_sha" "$controller_plugin_probe_sha"
+  )"
+fi
 
 (
   cd "$WORKFLOW_ROOT"
@@ -275,6 +371,284 @@ load_control_plane(default_config_paths(Path(sys.argv[1])))
 PY
 ) || workflow_die "source Orichum control plane is invalid"
 
+attempt_verified_fast_install() (
+  [[ "$INSTALL_MODE" == fast && \
+     "$prior_install_state_verified" == true && \
+     "$control_plane_recovery_needed" == false && \
+     "$controller_plugin_decision" == reused ]] || return 1
+
+  local python_entrypoint python_identity python_version python_runtime
+  local python_artifact cliproxy_artifact claudex_artifact leanctx_artifact
+  local mempalace_identity mempalace_version mempalace_artifact
+  local graphify_identity graphify_version graphify_artifact
+  local cliproxy_service route_service
+  local cliproxy_port claudex_port route_port
+  local route_runtime routing_input routing_artifact
+  local management_key_file management_key
+  local binary_identity_file mempalace_identity_file graphify_identity_file
+  local binary_identity_pid mempalace_identity_pid graphify_identity_pid
+  local config_verify_pid runtime_verify_pid verification_ready
+
+  cleanup_fast_verifiers() {
+    local verifier_pid
+    for verifier_pid in \
+        "${config_verify_pid:-}" "${runtime_verify_pid:-}" \
+        "${binary_identity_pid:-}" "${mempalace_identity_pid:-}" \
+        "${graphify_identity_pid:-}"; do
+      [[ "$verifier_pid" =~ ^[1-9][0-9]*$ ]] || continue
+      if kill -0 "$verifier_pid" 2>/dev/null; then
+        kill "$verifier_pid" 2>/dev/null || true
+      fi
+      wait "$verifier_pid" 2>/dev/null || true
+    done
+  }
+  trap cleanup_fast_verifiers EXIT
+
+  verify_committed_control_plane \
+    "$INSTALLED_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" &
+  config_verify_pid=$!
+  ORICHUM_CONFIG_HOME="$INSTALLED_CONFIG_ROOT" \
+  ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT/bin/orichum-runtime-ready" \
+      "$WORKFLOW_DATA_ROOT" &
+  runtime_verify_pid=$!
+
+  python_entrypoint="$(orichum_python_entrypoint "$WORKFLOW_DATA_ROOT")"
+  python_identity="$(
+    validate_orichum_python \
+      "$WORKFLOW_DATA_ROOT" "$python_entrypoint" 2>/dev/null
+  )" || return 1
+  IFS=$'\t' read -r python_version python_runtime <<<"$python_identity"
+  python_artifact="$(sha256_file "$python_runtime")" || return 1
+  ORICHUM_PYTHON="$python_entrypoint"
+  ORICHUM_PYTHON_VALIDATED="$python_entrypoint"
+  export ORICHUM_PYTHON ORICHUM_PYTHON_VALIDATED
+  export ORICHUM_INSTALL_BOOTSTRAP=false
+
+  UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/tools/uv"
+  UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/tools/bin"
+  export UV_TOOL_DIR UV_TOOL_BIN_DIR
+  binary_identity_file="$installer_temp/fast-binaries"
+  mempalace_identity_file="$installer_temp/fast-mempalace"
+  graphify_identity_file="$installer_temp/fast-graphify"
+  (
+    managed_executable_is_safe \
+      "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" &&
+    managed_executable_is_safe \
+      "$WORKFLOW_DATA_ROOT/bin/claudex" &&
+    managed_executable_is_safe \
+      "$WORKFLOW_DATA_ROOT/bin/lean-ctx" &&
+    printf '%s\t%s\t%s\n' \
+      "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api")" \
+      "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex")" \
+      "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/lean-ctx")"
+  ) >"$binary_identity_file" &
+  binary_identity_pid=$!
+  private_uv_tool_identity \
+      "$WORKFLOW_DATA_ROOT" mempalace mempalace \
+      mempalace mempalace-mcp \
+      >"$mempalace_identity_file" 2>/dev/null &
+  mempalace_identity_pid=$!
+  private_uv_tool_identity \
+      "$WORKFLOW_DATA_ROOT" graphifyy graphifyy \
+      graphify graphify-mcp \
+      >"$graphify_identity_file" 2>/dev/null &
+  graphify_identity_pid=$!
+  verification_ready=true
+  wait "$binary_identity_pid" || verification_ready=false
+  binary_identity_pid=
+  wait "$mempalace_identity_pid" || verification_ready=false
+  mempalace_identity_pid=
+  wait "$graphify_identity_pid" || verification_ready=false
+  graphify_identity_pid=
+  [[ "$verification_ready" == true ]] || return 1
+  IFS=$'\t' read -r \
+    cliproxy_artifact claudex_artifact leanctx_artifact \
+    <"$binary_identity_file" || return 1
+  mempalace_identity="$(<"$mempalace_identity_file")"
+  IFS=$'\t' read -r mempalace_version mempalace_artifact \
+    <<<"$mempalace_identity"
+  graphify_identity="$(<"$graphify_identity_file")"
+  IFS=$'\t' read -r graphify_version graphify_artifact \
+    <<<"$graphify_identity"
+
+  if [[ "$platform" == darwin ]]; then
+    cliproxy_service="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+  else
+    cliproxy_service="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-cliproxy.service"
+  fi
+  IFS=$'\t' read -r route_service _ _ \
+    < <(claudex_proxy_service_identity "$platform") || return 1
+  IFS=$'\t' read -r cliproxy_port claudex_port route_port \
+    < <(read_service_ports "$WORKFLOW_DATA_ROOT") || return 1
+  valid_service_port "$cliproxy_port" || return 1
+  valid_service_port "$claudex_port" || return 1
+  valid_service_port "$route_port" || return 1
+
+  [[ -L "$USER_BIN_DIR/orichum" && \
+     "$(readlink "$USER_BIN_DIR/orichum")" == \
+       "$WORKFLOW_ROOT/bin/orichum" ]] || return 1
+  [[ -L "$WORKFLOW_DATA_ROOT/bin/orichum-route-proxy" && \
+     "$(readlink "$WORKFLOW_DATA_ROOT/bin/orichum-route-proxy")" == \
+       "$WORKFLOW_ROOT/bin/orichum-route-proxy" ]] || return 1
+  cmp -s "$WORKFLOW_ROOT/controller/settings.json" \
+    "$WORKFLOW_DATA_ROOT/claude-config/settings.json" || return 1
+
+  management_key_file="$WORKFLOW_DATA_ROOT/cliproxy-management.key"
+  [[ -f "$management_key_file" && ! -L "$management_key_file" && \
+     "$(path_uid "$management_key_file")" == "$(id -u)" && \
+     "$(path_mode "$management_key_file")" == 600 ]] || return 1
+  management_key="$(tr -d '\r\n' <"$management_key_file")"
+  (( ${#management_key} >= 32 && ${#management_key} <= 256 )) || return 1
+  [[ "$management_key" =~ ^[A-Za-z0-9._~-]+$ ]] || return 1
+
+  route_runtime="$(
+    verified_route_runtime_digest \
+      "$WORKFLOW_ROOT" "$python_runtime" "$python_version" \
+      "$installer_temp/fast-route-runtime"
+  )" || return 1
+  routing_input="$(
+    verified_routing_input_fingerprint \
+      "$installer_temp/fast-routing-input" \
+      "$cliproxy_artifact" "$claudex_artifact" "$route_runtime" \
+      "$cliproxy_port" "$claudex_port" "$route_port" \
+      "$INSTALLED_CONFIG_ROOT/accounts.json" \
+      "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
+      "$INSTALLED_CONFIG_ROOT/plugins.json" \
+      "$INSTALLED_CONFIG_ROOT/projects.json" \
+      "$INSTALLED_CONFIG_ROOT/providers.json" \
+      "$INSTALLED_CONFIG_ROOT/runtime.json" \
+      "$INSTALLED_CONFIG_ROOT/controller-policy.md" \
+      "$WORKFLOW_ROOT/config/model-stacks.json" \
+      "$WORKFLOW_ROOT/config/plugins.json" \
+      "$WORKFLOW_ROOT/config/projects.json" \
+      "$WORKFLOW_ROOT/config/providers.json" \
+      "$WORKFLOW_ROOT/config/runtime.json" \
+      "$WORKFLOW_ROOT/config/controller-policy.md" \
+      "$WORKFLOW_DATA_ROOT/claude-config/settings.json" \
+      "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
+      "$cliproxy_service" "$route_service"
+  )" || return 1
+  routing_artifact="$(
+    verified_routing_runtime_artifact \
+      "$WORKFLOW_DATA_ROOT" "$INSTALLED_CONFIG_ROOT" \
+      "$cliproxy_service" "$route_service" \
+      "$installer_temp/fast-routing-artifact"
+  )" || return 1
+
+  jq -e \
+    --arg python_version "$python_version" \
+    --arg python_artifact "$python_artifact" \
+    --arg python_input "$python_input_sha" \
+    --arg python_probe "$python_probe_sha" \
+    --arg cliproxy_artifact "$cliproxy_artifact" \
+    --arg cliproxy_input "$cliproxy_input_sha" \
+    --arg cliproxy_probe "$cliproxy_probe_sha" \
+    --arg claudex_artifact "$claudex_artifact" \
+    --arg claudex_input "$claudex_input_sha" \
+    --arg claudex_probe "$claudex_probe_sha" \
+    --arg leanctx_artifact "$leanctx_artifact" \
+    --arg leanctx_input "$leanctx_input_sha" \
+    --arg leanctx_probe "$leanctx_probe_sha" \
+    --arg mempalace_version "$mempalace_version" \
+    --arg mempalace_artifact "$mempalace_artifact" \
+    --arg mempalace_input "$mempalace_input_sha" \
+    --arg mempalace_probe "$mempalace_probe_sha" \
+    --arg graphify_version "$graphify_version" \
+    --arg graphify_artifact "$graphify_artifact" \
+    --arg graphify_input "$graphify_input_sha" \
+    --arg graphify_probe "$graphify_probe_sha" \
+    --arg controller_input "$controller_plugin_input_sha" \
+    --arg controller_probe "$controller_plugin_probe_sha" \
+    --arg routing_artifact "$routing_artifact" \
+    --arg routing_input "$routing_input" \
+    --arg routing_probe "$routing_probe_sha" '
+      .components as $c |
+      ($c | keys) == [
+        "claudex", "cliproxy", "controllerPlugin", "graphify",
+        "leanctx", "mempalace", "python", "routing"
+      ] and
+      $c.python == {
+        version: $python_version,
+        sourceIdentity: ("python:" + $python_version),
+        artifactSha256: $python_artifact,
+        inputSha256: $python_input,
+        probeSha256: $python_probe
+      } and
+      ($c.cliproxy.sourceIdentity |
+        startswith("github:router-for-me/CLIProxyAPI@")) and
+      $c.cliproxy.artifactSha256 == $cliproxy_artifact and
+      $c.cliproxy.inputSha256 == $cliproxy_input and
+      $c.cliproxy.probeSha256 == $cliproxy_probe and
+      ($c.claudex.sourceIdentity |
+        startswith("github:StringKe/claudex@")) and
+      $c.claudex.artifactSha256 == $claudex_artifact and
+      $c.claudex.inputSha256 == $claudex_input and
+      $c.claudex.probeSha256 == $claudex_probe and
+      ($c.leanctx.sourceIdentity |
+        startswith("github:yvgude/lean-ctx@")) and
+      $c.leanctx.artifactSha256 == $leanctx_artifact and
+      $c.leanctx.inputSha256 == $leanctx_input and
+      $c.leanctx.probeSha256 == $leanctx_probe and
+      $c.mempalace == {
+        version: $mempalace_version,
+        sourceIdentity: ("pypi:mempalace@" + $mempalace_version),
+        artifactSha256: $mempalace_artifact,
+        inputSha256: $mempalace_input,
+        probeSha256: $mempalace_probe
+      } and
+      $c.graphify == {
+        version: $graphify_version,
+        sourceIdentity: (
+          "pypi:graphifyy[mcp,terraform]@" + $graphify_version
+        ),
+        artifactSha256: $graphify_artifact,
+        inputSha256: $graphify_input,
+        probeSha256: $graphify_probe
+      } and
+      $c.controllerPlugin == {
+        version: "1",
+        sourceIdentity: "orichum:controller-plugin",
+        artifactSha256: $controller_input,
+        inputSha256: $controller_input,
+        probeSha256: $controller_probe
+      } and
+      $c.routing == {
+        version: "1",
+        sourceIdentity: "orichum:routing",
+        artifactSha256: $routing_artifact,
+        inputSha256: $routing_input,
+        probeSha256: $routing_probe
+      }
+    ' "$prior_install_state" >/dev/null || return 1
+
+  verification_ready=true
+  wait "$config_verify_pid" || verification_ready=false
+  config_verify_pid=
+  wait "$runtime_verify_pid" || verification_ready=false
+  runtime_verify_pid=
+  [[ "$verification_ready" == true ]] || return 1
+
+  print_component_status_table \
+    reused reused reused reused reused reused reused reused
+  printf 'Verified Orichum installation is current for %s.\n' "$platform"
+  print_install_summary \
+    "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$USER_BIN_DIR" \
+    "$WORKFLOW_DATA_ROOT/bin/claudex" \
+    "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" \
+    "$UV_TOOL_BIN_DIR/mempalace-mcp" \
+    "$UV_TOOL_BIN_DIR/graphify-mcp" \
+    "$cliproxy_service" "$cliproxy_port" reused \
+    "$route_service" "$claudex_port" "$route_port" reused \
+    "$python_entrypoint" "$python_version" "$python_runtime" reused \
+    "$WORKFLOW_DATA_ROOT/bin/lean-ctx"
+  printf '\nFast readiness checks passed.\n'
+)
+
+if attempt_verified_fast_install; then
+  exit 0
+fi
+
 while IFS= read -r configured_palace; do
   case "$configured_palace" in
     "~/"*) resolved_palace="$HOME/${configured_palace#\~/}" ;;
@@ -284,13 +658,16 @@ while IFS= read -r configured_palace; do
   install -d -m 0700 "$resolved_palace"
 done < <(jq -er '.contexts[].memoryPalace' "$WORKFLOW_ROOT/config/projects.json")
 
-validation_config="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin.XXXXXX")"
-register_cleanup_path "$validation_config"
-chmod 0700 "$validation_config"
-CLAUDE_CONFIG_DIR="$validation_config" \
-  claude plugin validate --strict "$WORKFLOW_ROOT/controller/plugin" >/dev/null || \
-  workflow_die "controller plugin validation failed"
-rm -rf -- "$validation_config"
+if [[ "$controller_plugin_decision" != reused ]]; then
+  validation_config="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin.XXXXXX")"
+  register_cleanup_path "$validation_config"
+  chmod 0700 "$validation_config"
+  CLAUDE_CONFIG_DIR="$validation_config" \
+    claude plugin validate --strict \
+      "$WORKFLOW_ROOT/controller/plugin" >/dev/null || \
+    workflow_die "controller plugin validation failed"
+  rm -rf -- "$validation_config"
+fi
 
 install -d -m 0755 "$USER_BIN_DIR"
 install -d -m 0700 "$WORKFLOW_DATA_ROOT"
@@ -305,12 +682,45 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/tools/uv"
 chmod 0700 "$WORKFLOW_DATA_ROOT/bin"
 
-installer_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-install.XXXXXX")"
-register_cleanup_path "$installer_temp"
-snapshot_dir="$installer_temp/snapshots"
-install -d -m 0700 "$snapshot_dir"
 python_entrypoint="$(orichum_python_entrypoint "$WORKFLOW_DATA_ROOT")"
 snapshot_path "$python_entrypoint" "$snapshot_dir" orichum-python
+python_recorded_version=
+python_recorded_source=
+python_recorded_artifact="$empty_artifact_sha"
+python_current_artifact="$empty_artifact_sha"
+python_resolve_upstream=true
+python_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  python_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" python version 2>/dev/null || true
+  )"
+  python_recorded_source="$(
+    install_state_component_field \
+      "$prior_install_state" python sourceIdentity 2>/dev/null || true
+  )"
+  python_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" python artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if python_identity="$(
+      validate_orichum_python \
+        "$WORKFLOW_DATA_ROOT" "$python_entrypoint" 2>/dev/null
+    )"; then
+    IFS=$'\t' read -r _ python_current_path <<<"$python_identity"
+    python_current_artifact="$(sha256_file "$python_current_path")"
+  fi
+  python_decision="$(
+    decide_install_component \
+      "$prior_install_state" python \
+      "$python_recorded_version" "$python_recorded_source" \
+      "$python_current_artifact" "$python_input_sha" "$python_probe_sha"
+  )"
+  if [[ "$INSTALL_MODE" == fast ]]; then
+    python_resolve_upstream=false
+  fi
+fi
 python_transaction_active=false
 python_candidate_generation=
 rollback_python_activation() {
@@ -328,7 +738,9 @@ WORKFLOW_TRANSACTION_ACTIVE=true
 IFS=$'\t' read -r \
   orichum_python_action orichum_python_version orichum_python_candidate \
   python_candidate_generation < <(
-    install_or_reuse_orichum_python "$WORKFLOW_DATA_ROOT"
+    install_or_reuse_orichum_python \
+      "$WORKFLOW_DATA_ROOT" "$python_resolve_upstream" \
+      "$python_recorded_version" "$python_recorded_artifact"
   ) || workflow_die "private Orichum Python could not be provisioned"
 (
   cd "$WORKFLOW_ROOT"
@@ -346,9 +758,14 @@ for source in sorted((root / "integrations" / "common").glob("*.py")):
     compile(source.read_text(encoding="utf-8"), str(source), "exec")
 PY
 ) || workflow_die "private Orichum Python failed module validation"
-preflight_orichum_python_runtime \
-  "$orichum_python_candidate" "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" || \
-  workflow_die "private Orichum Python failed recovery-proxy preflight"
+if [[ "$python_decision" != reused ]]; then
+  preflight_orichum_python_runtime \
+    "$orichum_python_candidate" "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" || \
+    workflow_die "private Orichum Python failed recovery-proxy preflight"
+  if [[ "$orichum_python_action" == reused ]]; then
+    orichum_python_action=repaired
+  fi
+fi
 activate_orichum_python \
   "$WORKFLOW_DATA_ROOT" "$orichum_python_candidate" || \
   workflow_die "private Orichum Python could not be activated"
@@ -430,17 +847,135 @@ chmod 0755 "$WORKFLOW_ROOT/controller/plugin/scripts/"*.sh
 
 export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"
 
-cliproxy_state="$(stage_latest_github_binary \
+cliproxy_recorded_version=
+cliproxy_recorded_source=
+cliproxy_recorded_artifact="$empty_artifact_sha"
+cliproxy_current_artifact="$empty_artifact_sha"
+cliproxy_resolve_upstream=true
+cliproxy_decision=upgraded
+claudex_recorded_version=
+claudex_recorded_source=
+claudex_recorded_artifact="$empty_artifact_sha"
+claudex_current_artifact="$empty_artifact_sha"
+claudex_resolve_upstream=true
+claudex_decision=upgraded
+leanctx_recorded_version=
+leanctx_recorded_source=
+leanctx_recorded_artifact="$empty_artifact_sha"
+leanctx_current_artifact="$empty_artifact_sha"
+leanctx_resolve_upstream=true
+leanctx_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  cliproxy_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" cliproxy version 2>/dev/null || true
+  )"
+  cliproxy_recorded_source="$(
+    install_state_component_field \
+      "$prior_install_state" cliproxy sourceIdentity 2>/dev/null || true
+  )"
+  cliproxy_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" cliproxy artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if managed_executable_is_safe \
+      "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"; then
+    cliproxy_current_artifact="$(
+      sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"
+    )"
+  fi
+  cliproxy_decision="$(
+    decide_install_component \
+      "$prior_install_state" cliproxy \
+      "$cliproxy_recorded_version" "$cliproxy_recorded_source" \
+      "$cliproxy_current_artifact" \
+      "$cliproxy_input_sha" "$cliproxy_probe_sha"
+  )"
+  if [[ "$INSTALL_MODE" == fast && \
+        "$cliproxy_decision" != upgraded ]]; then
+    cliproxy_resolve_upstream=false
+  fi
+
+  claudex_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" claudex version 2>/dev/null || true
+  )"
+  claudex_recorded_source="$(
+    install_state_component_field \
+      "$prior_install_state" claudex sourceIdentity 2>/dev/null || true
+  )"
+  claudex_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" claudex artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if managed_executable_is_safe "$WORKFLOW_DATA_ROOT/bin/claudex"; then
+    claudex_current_artifact="$(
+      sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex"
+    )"
+  fi
+  claudex_decision="$(
+    decide_install_component \
+      "$prior_install_state" claudex \
+      "$claudex_recorded_version" "$claudex_recorded_source" \
+      "$claudex_current_artifact" "$claudex_input_sha" "$claudex_probe_sha"
+  )"
+  if [[ "$INSTALL_MODE" == fast && \
+        "$claudex_decision" != upgraded ]]; then
+    claudex_resolve_upstream=false
+  fi
+
+  leanctx_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" leanctx version 2>/dev/null || true
+  )"
+  leanctx_recorded_source="$(
+    install_state_component_field \
+      "$prior_install_state" leanctx sourceIdentity 2>/dev/null || true
+  )"
+  leanctx_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" leanctx artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if managed_executable_is_safe "$WORKFLOW_DATA_ROOT/bin/lean-ctx"; then
+    leanctx_current_artifact="$(
+      sha256_file "$WORKFLOW_DATA_ROOT/bin/lean-ctx"
+    )"
+  fi
+  leanctx_decision="$(
+    decide_install_component \
+      "$prior_install_state" leanctx \
+      "$leanctx_recorded_version" "$leanctx_recorded_source" \
+      "$leanctx_current_artifact" "$leanctx_input_sha" "$leanctx_probe_sha"
+  )"
+  if [[ "$INSTALL_MODE" == fast && \
+        "$leanctx_decision" != upgraded ]]; then
+    leanctx_resolve_upstream=false
+  fi
+fi
+
+cliproxy_state="$(stage_github_binary \
   router-for-me/CLIProxyAPI 'CLIProxyAPI_' "_${cliproxy_os}_${cliproxy_arch}.tar.gz" \
-  cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$installer_temp/cliproxy")"
+  cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" \
+  "$installer_temp/cliproxy" "$cliproxy_resolve_upstream" \
+  "$cliproxy_recorded_version" "$cliproxy_recorded_source" \
+  "$cliproxy_recorded_artifact")"
 cliproxy_version="$(jq -r '.version' <<<"$cliproxy_state")"
-claudex_state="$(stage_latest_github_binary \
+claudex_state="$(stage_github_binary \
   StringKe/claudex 'claudex-v' "-${claudex_arch}-${claudex_os}.tar.gz" \
-  claudex "$WORKFLOW_DATA_ROOT/bin/claudex" "$installer_temp/claudex")"
+  claudex "$WORKFLOW_DATA_ROOT/bin/claudex" \
+  "$installer_temp/claudex" "$claudex_resolve_upstream" \
+  "$claudex_recorded_version" "$claudex_recorded_source" \
+  "$claudex_recorded_artifact")"
 claudex_version="$(jq -r '.version' <<<"$claudex_state")"
-leanctx_state="$(stage_latest_github_binary \
+leanctx_state="$(stage_github_binary \
   yvgude/lean-ctx 'lean-ctx-' "$leanctx_release_asset_suffix" \
-  lean-ctx "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$installer_temp/leanctx")"
+  lean-ctx "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
+  "$installer_temp/leanctx" "$leanctx_resolve_upstream" \
+  "$leanctx_recorded_version" "$leanctx_recorded_source" \
+  "$leanctx_recorded_artifact")"
 leanctx_version="$(jq -r '.version' <<<"$leanctx_state")"
 cliproxy_binary_changed="$(jq -r '.changed' <<<"$cliproxy_state")"
 claudex_binary_changed="$(jq -r '.changed' <<<"$claudex_state")"
@@ -450,10 +985,12 @@ if [[ "$leanctx_binary_changed" == true ]]; then
 else
   leanctx_candidate="$WORKFLOW_DATA_ROOT/bin/lean-ctx"
 fi
-probe_leanctx_capabilities \
-  "$leanctx_candidate" "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
-  "$installer_temp" || \
-  workflow_die "LeanCTX failed the bounded headless MCP capability probe"
+if [[ "$leanctx_decision" != reused ]]; then
+  probe_leanctx_capabilities \
+    "$leanctx_candidate" "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
+    "$installer_temp" || \
+    workflow_die "LeanCTX failed the bounded headless MCP capability probe"
+fi
 desired_cliproxy_config="$installer_temp/cliproxy.yaml"
 
 if [[ "$platform" == darwin ]]; then
@@ -852,28 +1389,10 @@ while time.monotonic() < deadline:
 raise SystemExit("management PATCH did not persist exact fields")
 PY
 )
-probe_cliproxy_management || workflow_die \
-  "CLIProxyAPI failed the required management PATCH/readback capability probe"
 route_proxy_runtime_digest="$(
-  "$ORICHUM_PYTHON" -I -B - \
-    "$orichum_python_candidate" "$orichum_python_version" \
-    "$WORKFLOW_ROOT/integrations/common" <<'PY'
-import hashlib
-from pathlib import Path
-import sys
-
-digest = hashlib.sha256()
-for value in sys.argv[1:3]:
-    digest.update(value.encode("utf-8"))
-    digest.update(b"\0")
-root = Path(sys.argv[3])
-for path in sorted(root.glob("*.py")):
-    digest.update(path.name.encode("utf-8"))
-    digest.update(b"\0")
-    digest.update(path.read_bytes())
-    digest.update(b"\0")
-print(digest.hexdigest())
-PY
+  verified_route_runtime_digest \
+    "$WORKFLOW_ROOT" "$orichum_python_candidate" \
+    "$orichum_python_version" "$installer_temp/route-runtime"
 )" || workflow_die "Orichum route runtime could not be fingerprinted"
 [[ "$route_proxy_runtime_digest" =~ ^[a-f0-9]{64}$ ]] || \
   workflow_die "Orichum route runtime fingerprint is invalid"
@@ -900,6 +1419,13 @@ cliproxy_config_changed="$(file_change_state \
 cliproxy_service_changed="$(file_change_state "$desired_service_file" "$service_file")"
 claudex_proxy_service_changed="$(file_change_state \
   "$claudex_proxy_desired_service_file" "$claudex_proxy_service_file")"
+if [[ "$cliproxy_decision" != reused || \
+      "$cliproxy_binary_changed" == true || \
+      "$cliproxy_config_changed" == changed || \
+      "$cliproxy_service_changed" == changed ]]; then
+  probe_cliproxy_management || workflow_die \
+    "CLIProxyAPI failed the required management PATCH/readback capability probe"
+fi
 claudex_proxy_port_changed=false
 if [[ "$ROUTE_PROXY_LISTEN_PORT" != "$PRIOR_ROUTE_PROXY_PORT" ]]; then
   claudex_proxy_port_changed=true
@@ -962,6 +1488,7 @@ endpoint_transaction_active=true
 orichum_launcher_mutated=false
 private_tools_transaction_active=false
 leanctx_transaction_active=false
+install_state_transaction_active=false
 if [[ "$leanctx_binary_changed" == true ]]; then
   leanctx_transaction_active=true
 fi
@@ -974,6 +1501,9 @@ restore_claudex_proxy_service() {
     "$snapshot_dir" claudex-proxy-service || recovery_ready=false
   snapshot_path_matches "$claudex_proxy_service_file" \
     "$snapshot_dir" claudex-proxy-service || recovery_ready=false
+  claudex_proxy_service_is_owned \
+    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT" || recovery_ready=false
 
   if [[ "$recovery_ready" != true ]] || \
      [[ "${claudex_proxy_recovery_prerequisites_ready:-false}" != true ]]; then
@@ -986,7 +1516,6 @@ restore_claudex_proxy_service() {
       2>/dev/null || true)"
     [[ -n "$restored_model" ]] || return 1
     if [[ "${claudex_proxy_runtime_mutated:-false}" == true ]]; then
-      claudex_proxy_loaded_target_is_expected || return 1
       if [[ "$platform" == darwin ]]; then
         launchctl enable \
           "gui/$(id -u)/$claudex_proxy_service_label" \
@@ -997,6 +1526,7 @@ restore_claudex_proxy_service() {
             >/dev/null 2>&1 || recovery_ready=false
         fi
       else
+        claudex_proxy_loaded_target_is_expected || return 1
         systemctl --user daemon-reload \
           >/dev/null 2>&1 || recovery_ready=false
         if [[ "$recovery_ready" == true ]]; then
@@ -1134,6 +1664,26 @@ rollback_install_transaction() {
       "$snapshot_dir" orichum-launcher || rollback_ready=false
   fi
 
+  if [[ "${install_state_transaction_active:-false}" == true ]]; then
+    if [[ "$rollback_ready" == true && \
+          "$prior_install_state_verified" == true ]]; then
+      restore_snapshot "$install_state_path" \
+        "$snapshot_dir" install-state || rollback_ready=false
+      snapshot_path_matches "$install_state_path" \
+        "$snapshot_dir" install-state || rollback_ready=false
+    else
+      if [[ -e "$install_state_path" || -L "$install_state_path" ]]; then
+        if [[ -f "$install_state_path" && \
+              ! -L "$install_state_path" && \
+              "$(path_uid "$install_state_path")" == "$(id -u)" ]]; then
+          rm -f -- "$install_state_path" || rollback_ready=false
+        else
+          rollback_ready=false
+        fi
+      fi
+    fi
+  fi
+
   [[ "$rollback_ready" == true ]]
 }
 
@@ -1155,38 +1705,201 @@ if [[ -n "$prior_model_generation" ]]; then
     workflow_die "prior model configuration could not be snapshotted"
 fi
 
-private_tools_transaction_active=true
-uv tool install --upgrade mempalace
-if ! mempalace_mcp="$(command -v mempalace-mcp)"; then
-  workflow_die "Mempalace installation did not provide mempalace-mcp"
+routing_input_descriptor="$installer_temp/routing-input"
+cliproxy_desired_artifact="$(
+  if [[ "$cliproxy_binary_changed" == true ]]; then
+    sha256_file "$(jq -r '.staged_path' <<<"$cliproxy_state")"
+  else
+    sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"
+  fi
+)"
+claudex_desired_artifact="$(
+  if [[ "$claudex_binary_changed" == true ]]; then
+    sha256_file "$(jq -r '.staged_path' <<<"$claudex_state")"
+  else
+    sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex"
+  fi
+)"
+routing_input_sha="$(
+  verified_routing_input_fingerprint \
+    "$routing_input_descriptor" \
+    "$cliproxy_desired_artifact" "$claudex_desired_artifact" \
+    "$route_proxy_runtime_digest" \
+    "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
+    "$candidate_config_root/accounts.json" \
+    "$candidate_config_root/model-stacks.json" \
+    "$candidate_config_root/plugins.json" \
+    "$candidate_config_root/projects.json" \
+    "$candidate_config_root/providers.json" \
+    "$candidate_config_root/runtime.json" \
+    "$candidate_config_root/controller-policy.md" \
+    "$WORKFLOW_ROOT/config/model-stacks.json" \
+    "$WORKFLOW_ROOT/config/plugins.json" \
+    "$WORKFLOW_ROOT/config/projects.json" \
+    "$WORKFLOW_ROOT/config/providers.json" \
+    "$WORKFLOW_ROOT/config/runtime.json" \
+    "$WORKFLOW_ROOT/config/controller-policy.md" \
+    "$WORKFLOW_ROOT/controller/settings.json" \
+    "$desired_cliproxy_config" \
+    "$desired_service_file" "$claudex_proxy_desired_service_file"
+)" || workflow_die "routing input fingerprint failed"
+
+routing_runtime_artifact() {
+  verified_routing_runtime_artifact \
+    "$WORKFLOW_DATA_ROOT" "$INSTALLED_CONFIG_ROOT" \
+    "$service_file" "$claudex_proxy_service_file" \
+    "$installer_temp/routing-artifact"
+}
+routing_current_artifact="$empty_artifact_sha"
+if observed_routing_artifact="$(routing_runtime_artifact 2>/dev/null)"; then
+  routing_current_artifact="$observed_routing_artifact"
 fi
-install -d -m 0700 "$installer_temp/mempalace-probe"
-if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
-  "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
-  --timeout 30 \
-  --require-tool mempalace_get_taxonomy \
-  --require-tool mempalace_search \
-  --require-tool mempalace_checkpoint \
-  -- "$mempalace_mcp" --palace "$installer_temp/mempalace-probe"; then
-  workflow_die "Mempalace MCP failed protocol readiness checks"
+routing_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  routing_decision="$(
+    decide_install_component \
+      "$prior_install_state" routing \
+      1 orichum:routing "$routing_current_artifact" \
+      "$routing_input_sha" "$routing_probe_sha"
+  )"
+  if [[ "$routing_decision" == reused && \
+        ( "$cliproxy_listener_owned" != true || \
+          "$cliproxy_ready_before" != true || \
+          "$claudex_proxy_listener_owned" != true ) ]]; then
+    routing_decision=repaired
+  fi
 fi
 
-uv tool install --upgrade 'graphifyy[mcp,terraform]'
-if ! graphify_binary="$(command -v graphify)"; then
-  workflow_die "Graphify installation did not provide graphify"
+mempalace_recorded_version=
+mempalace_recorded_artifact="$empty_artifact_sha"
+mempalace_current_version=
+mempalace_current_artifact="$empty_artifact_sha"
+mempalace_decision=upgraded
+graphify_recorded_version=
+graphify_recorded_artifact="$empty_artifact_sha"
+graphify_current_version=
+graphify_current_artifact="$empty_artifact_sha"
+graphify_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  mempalace_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" mempalace version 2>/dev/null || true
+  )"
+  mempalace_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" mempalace artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if mempalace_identity="$(
+      private_uv_tool_identity \
+        "$WORKFLOW_DATA_ROOT" mempalace mempalace \
+        mempalace mempalace-mcp 2>/dev/null
+    )"; then
+    IFS=$'\t' read -r \
+      mempalace_current_version mempalace_current_artifact \
+      <<<"$mempalace_identity"
+  fi
+  mempalace_decision="$(
+    decide_install_component \
+      "$prior_install_state" mempalace \
+      "$mempalace_recorded_version" \
+      "pypi:mempalace@$mempalace_recorded_version" \
+      "$mempalace_current_artifact" \
+      "$mempalace_input_sha" "$mempalace_probe_sha"
+  )"
+
+  graphify_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" graphify version 2>/dev/null || true
+  )"
+  graphify_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" graphify artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if graphify_identity="$(
+      private_uv_tool_identity \
+        "$WORKFLOW_DATA_ROOT" graphifyy graphifyy \
+        graphify graphify-mcp 2>/dev/null
+    )"; then
+    IFS=$'\t' read -r graphify_current_version graphify_current_artifact \
+      <<<"$graphify_identity"
+  fi
+  graphify_decision="$(
+    decide_install_component \
+      "$prior_install_state" graphify \
+      "$graphify_recorded_version" \
+      "pypi:graphifyy[mcp,terraform]@$graphify_recorded_version" \
+      "$graphify_current_artifact" \
+      "$graphify_input_sha" "$graphify_probe_sha"
+  )"
 fi
-if ! graphify_mcp="$(command -v graphify-mcp)"; then
-  workflow_die "Graphify installation did not provide graphify-mcp"
+
+if [[ "$mempalace_decision" == upgraded ]]; then
+  private_tools_transaction_active=true
+  uv tool install --upgrade mempalace
+elif [[ "$mempalace_decision" == repaired && \
+        ( "$mempalace_current_version" != "$mempalace_recorded_version" || \
+          "$mempalace_current_artifact" != \
+            "$mempalace_recorded_artifact" ) ]]; then
+  private_tools_transaction_active=true
+  uv tool install --force "mempalace==$mempalace_recorded_version"
 fi
-reconcile_graphify_storage \
-  "$WORKFLOW_DATA_ROOT" "$graphify_binary" "$graphify_mcp" \
-  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$installer_temp" || \
-  workflow_die \
-    "Graphify failed absolute-output, extract, update, or MCP capability checks"
-graphify_doctor_diagnostics \
-  "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_ROOT" \
-  "$ORICHUM_PYTHON" "$graphify_binary" || \
-  printf 'NOTICE: repository graph upgrade diagnostics were unavailable\n' >&2
+mempalace_identity="$(
+  private_uv_tool_identity \
+    "$WORKFLOW_DATA_ROOT" mempalace mempalace \
+    mempalace mempalace-mcp
+)" || workflow_die "Mempalace private installation is unsafe"
+IFS=$'\t' read -r mempalace_version mempalace_artifact \
+  <<<"$mempalace_identity"
+mempalace_mcp="$UV_TOOL_BIN_DIR/mempalace-mcp"
+if [[ "$mempalace_decision" != reused ]]; then
+  install -d -m 0700 "$installer_temp/mempalace-probe"
+  if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
+    "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+    --timeout 30 \
+    --require-tool mempalace_get_taxonomy \
+    --require-tool mempalace_search \
+    --require-tool mempalace_checkpoint \
+    -- "$mempalace_mcp" --palace "$installer_temp/mempalace-probe"; then
+    workflow_die "Mempalace MCP failed protocol readiness checks"
+  fi
+fi
+
+if [[ "$graphify_decision" == upgraded ]]; then
+  private_tools_transaction_active=true
+  uv tool install --upgrade 'graphifyy[mcp,terraform]'
+elif [[ "$graphify_decision" == repaired && \
+        ( "$graphify_current_version" != "$graphify_recorded_version" || \
+          "$graphify_current_artifact" != "$graphify_recorded_artifact" ) ]]; then
+  private_tools_transaction_active=true
+  uv tool install --force \
+    "graphifyy[mcp,terraform]==$graphify_recorded_version"
+fi
+graphify_identity="$(
+  private_uv_tool_identity \
+    "$WORKFLOW_DATA_ROOT" graphifyy graphifyy \
+    graphify graphify-mcp
+)" || workflow_die "Graphify private installation is unsafe"
+IFS=$'\t' read -r graphify_version graphify_artifact \
+  <<<"$graphify_identity"
+graphify_binary="$UV_TOOL_BIN_DIR/graphify"
+graphify_mcp="$UV_TOOL_BIN_DIR/graphify-mcp"
+if [[ "$graphify_decision" != reused ]]; then
+  reconcile_graphify_storage \
+    "$WORKFLOW_DATA_ROOT" "$graphify_binary" "$graphify_mcp" \
+    "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$installer_temp" || \
+    workflow_die \
+      "Graphify failed absolute-output, extract, update, or MCP capability checks"
+fi
+if [[ "$INSTALL_MODE" == upgrade || \
+      "$prior_install_state_verified" != true ]]; then
+  graphify_doctor_diagnostics \
+    "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_ROOT" \
+    "$ORICHUM_PYTHON" "$graphify_binary" || \
+    printf 'NOTICE: repository graph upgrade diagnostics were unavailable\n' \
+      >&2
+fi
 
 preflight_claudex_proxy() (
   local preflight_port preflight_pid= preflight_ready=false
@@ -1375,10 +2088,15 @@ done
 
 source "$WORKFLOW_ROOT/discover-models.sh"
 model_discovery_succeeded=true
+model_discovery_performed=false
+routing_action="$routing_decision"
 discovery_entrypoint=discover_models_main_core
 model_discovery_status=0
-CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint" || \
-  model_discovery_status=$?
+if [[ "$routing_decision" != reused ]]; then
+  model_discovery_performed=true
+  CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint" || \
+    model_discovery_status=$?
+fi
 if [[ "$model_discovery_status" -ne 0 ]]; then
   model_discovery_succeeded=false
   if [[ -z "$prior_model_generation" ]] && \
@@ -1389,10 +2107,16 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
       "$WORKFLOW_ROOT" >&2
   elif [[ -n "$prior_model_generation" ]] && \
        [[ "$ports_changed" == false ]] && \
+       [[ "$cliproxy_binary_changed" == false ]] && \
+       [[ "$cliproxy_config_changed" == unchanged ]] && \
+       [[ "$cliproxy_service_changed" == unchanged ]] && \
+       [[ "$cliproxy_listener_owned" == true ]] && \
+       [[ "$cliproxy_ready_before" == true ]] && \
        [[ "$claudex_binary_changed" == false ]] && \
        [[ "$claudex_proxy_service_changed" == unchanged ]] && \
        [[ "$claudex_proxy_listener_owned" == true ]]; then
     printf 'WARNING: model discovery failed; unchanged healthy proxy state was retained.\n' >&2
+    routing_action=reused
   else
     workflow_die \
       "model discovery failed while persistent proxy reconciliation was required"
@@ -1408,9 +2132,22 @@ if [[ "$model_discovery_succeeded" == true || \
   active_controller_model="$(claudex_config_default_model \
     "$active_claudex_config")" || \
     workflow_die "active Claudex controller model could not be resolved"
-  preflight_claudex_translation_proxy "$active_claudex_config" || \
-    workflow_die \
-      "Claudex translation proxy failed isolated bind and catalogue preflight"
+  claudex_model_config_changed=true
+  if [[ -n "$prior_model_generation_snapshot" && \
+        -f "$prior_model_generation_snapshot/claudex.toml" ]] && \
+     cmp -s "$active_claudex_config" \
+       "$prior_model_generation_snapshot/claudex.toml"; then
+    claudex_model_config_changed=false
+  fi
+  if [[ "$claudex_decision" != reused || \
+        "$claudex_binary_changed" == true || \
+        "$claudex_model_config_changed" == true || \
+        "$claudex_proxy_service_changed" == changed || \
+        "$claudex_proxy_port_changed" == true ]]; then
+    preflight_claudex_translation_proxy "$active_claudex_config" || \
+      workflow_die \
+        "Claudex translation proxy failed isolated bind and catalogue preflight"
+  fi
 
   if [[ "$claudex_proxy_service_owned" != true ]] || \
      ! claudex_proxy_runtime_is_owned \
@@ -1513,11 +2250,164 @@ verify_committed_control_plane \
   workflow_die "committed Orichum control plane is invalid"
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
-ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
-ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
-  "$WORKFLOW_ROOT/bin/orichum-plugin" sync || \
-  workflow_die \
-    "services are healthy, but declared Claude plugins could not be synchronized; rerun the installer after correcting the plugin error"
+routing_input_sha="$(
+  verified_routing_input_fingerprint \
+    "$routing_input_descriptor" \
+    "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api")" \
+    "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex")" \
+    "$route_proxy_runtime_digest" \
+    "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
+    "$INSTALLED_CONFIG_ROOT/accounts.json" \
+    "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
+    "$INSTALLED_CONFIG_ROOT/plugins.json" \
+    "$INSTALLED_CONFIG_ROOT/projects.json" \
+    "$INSTALLED_CONFIG_ROOT/providers.json" \
+    "$INSTALLED_CONFIG_ROOT/runtime.json" \
+    "$INSTALLED_CONFIG_ROOT/controller-policy.md" \
+    "$WORKFLOW_ROOT/config/model-stacks.json" \
+    "$WORKFLOW_ROOT/config/plugins.json" \
+    "$WORKFLOW_ROOT/config/projects.json" \
+    "$WORKFLOW_ROOT/config/providers.json" \
+    "$WORKFLOW_ROOT/config/runtime.json" \
+    "$WORKFLOW_ROOT/config/controller-policy.md" \
+    "$WORKFLOW_DATA_ROOT/claude-config/settings.json" \
+    "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
+    "$service_file" "$claudex_proxy_service_file"
+)" || workflow_die "committed routing input fingerprint failed"
+if [[ "$controller_plugin_decision" != reused ]]; then
+  ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
+  ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT/bin/orichum-plugin" sync || \
+    workflow_die \
+      "services are healthy, but declared Claude plugins could not be synchronized; rerun the installer after correcting the plugin error"
+fi
+if [[ "$claudex_proxy_action" != pending-provider-login ]]; then
+  ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
+  ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT/bin/orichum-runtime-ready" \
+      "$WORKFLOW_DATA_ROOT" || \
+    workflow_die "focused Orichum runtime readiness failed"
+fi
+install_state_prior_components="$installer_temp/prior-components.json"
+if [[ "$prior_install_state_verified" == true ]]; then
+  jq -e '.components' "$prior_install_state" \
+    >"$install_state_prior_components" || \
+    workflow_die "verified installer component state could not be read"
+else
+  printf '{}\n' >"$install_state_prior_components"
+fi
+chmod 0600 "$install_state_prior_components"
+install_state_components="$installer_temp/install-state-components.json"
+jq -n \
+  --slurpfile prior "$install_state_prior_components" \
+  --arg python_version "$orichum_python_version" \
+  --arg python_artifact "$(sha256_file "$ORICHUM_PYTHON")" \
+  --arg python_input "$python_input_sha" \
+  --arg python_probe "$python_probe_sha" \
+  --arg cliproxy_version "$cliproxy_version" \
+  --arg cliproxy_tag "$(jq -r '.tag' <<<"$cliproxy_state")" \
+  --arg cliproxy_artifact \
+    "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api")" \
+  --arg cliproxy_input "$cliproxy_input_sha" \
+  --arg cliproxy_probe "$cliproxy_probe_sha" \
+  --arg claudex_version "$claudex_version" \
+  --arg claudex_tag "$(jq -r '.tag' <<<"$claudex_state")" \
+  --arg claudex_artifact \
+    "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex")" \
+  --arg claudex_input "$claudex_input_sha" \
+  --arg claudex_probe "$claudex_probe_sha" \
+  --arg leanctx_version "$leanctx_version" \
+  --arg leanctx_tag "$(jq -r '.tag' <<<"$leanctx_state")" \
+  --arg leanctx_artifact \
+    "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/lean-ctx")" \
+  --arg leanctx_input "$leanctx_input_sha" \
+  --arg leanctx_probe "$leanctx_probe_sha" \
+  --arg mempalace_version "$mempalace_version" \
+  --arg mempalace_artifact "$mempalace_artifact" \
+  --arg mempalace_input "$mempalace_input_sha" \
+  --arg mempalace_probe "$mempalace_probe_sha" \
+  --arg graphify_version "$graphify_version" \
+  --arg graphify_artifact "$graphify_artifact" \
+  --arg graphify_input "$graphify_input_sha" \
+  --arg graphify_probe "$graphify_probe_sha" \
+  --arg controller_plugin_input "$controller_plugin_input_sha" \
+  --arg controller_plugin_probe "$controller_plugin_probe_sha" \
+  '$prior[0] + {
+    python: {
+      version: $python_version,
+      sourceIdentity: ("python:" + $python_version),
+      artifactSha256: $python_artifact,
+      inputSha256: $python_input,
+      probeSha256: $python_probe
+    },
+    cliproxy: {
+      version: $cliproxy_version,
+      sourceIdentity: (
+        "github:router-for-me/CLIProxyAPI@" + $cliproxy_tag
+      ),
+      artifactSha256: $cliproxy_artifact,
+      inputSha256: $cliproxy_input,
+      probeSha256: $cliproxy_probe
+    },
+    claudex: {
+      version: $claudex_version,
+      sourceIdentity: ("github:StringKe/claudex@" + $claudex_tag),
+      artifactSha256: $claudex_artifact,
+      inputSha256: $claudex_input,
+      probeSha256: $claudex_probe
+    },
+    leanctx: {
+      version: $leanctx_version,
+      sourceIdentity: ("github:yvgude/lean-ctx@" + $leanctx_tag),
+      artifactSha256: $leanctx_artifact,
+      inputSha256: $leanctx_input,
+      probeSha256: $leanctx_probe
+    },
+    mempalace: {
+      version: $mempalace_version,
+      sourceIdentity: ("pypi:mempalace@" + $mempalace_version),
+      artifactSha256: $mempalace_artifact,
+      inputSha256: $mempalace_input,
+      probeSha256: $mempalace_probe
+    },
+    graphify: {
+      version: $graphify_version,
+      sourceIdentity: (
+        "pypi:graphifyy[mcp,terraform]@" + $graphify_version
+      ),
+      artifactSha256: $graphify_artifact,
+      inputSha256: $graphify_input,
+      probeSha256: $graphify_probe
+    },
+    controllerPlugin: {
+      version: "1",
+      sourceIdentity: "orichum:controller-plugin",
+      artifactSha256: $controller_plugin_input,
+      inputSha256: $controller_plugin_input,
+      probeSha256: $controller_plugin_probe
+    }
+  }' >"$install_state_components" || \
+  workflow_die "candidate installer state could not be built"
+chmod 0600 "$install_state_components"
+if [[ "$model_discovery_succeeded" == true ]]; then
+  routing_verified_artifact="$(routing_runtime_artifact)" || \
+    workflow_die "verified routing artifact could not be fingerprinted"
+  routing_state_candidate="$installer_temp/routing-state-components.json"
+  jq \
+    --arg artifact "$routing_verified_artifact" \
+    --arg input "$routing_input_sha" \
+    --arg probe "$routing_probe_sha" \
+    '.routing = {
+      version: "1",
+      sourceIdentity: "orichum:routing",
+      artifactSha256: $artifact,
+      inputSha256: $input,
+      probeSha256: $probe
+    }' "$install_state_components" >"$routing_state_candidate" || \
+    workflow_die "candidate routing state could not be built"
+  chmod 0600 "$routing_state_candidate"
+  mv -f "$routing_state_candidate" "$install_state_components"
+fi
 if [[ "$model_discovery_succeeded" == true ]]; then
   prune_model_config_generations "$WORKFLOW_DATA_ROOT" || \
     printf 'WARNING: stale model configuration could not be pruned.\n' >&2
@@ -1530,6 +2420,11 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     cliproxy_action=installed
   fi
 fi
+print_component_status_table \
+  "$python_decision" "$cliproxy_decision" "$claudex_decision" \
+  "$leanctx_decision" "$mempalace_decision" "$graphify_decision" \
+  "$routing_action" "$controller_plugin_decision" || \
+  workflow_die "component reconciliation status is invalid"
 printf 'Installed Orichum with Claudex %s, CLIProxyAPI %s, and LeanCTX %s for %s.\n' \
   "$claudex_version" "$cliproxy_version" "$leanctx_version" "$platform"
 print_install_summary \
@@ -1547,12 +2442,20 @@ print_install_summary \
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"
-else
+elif [[ "$INSTALL_MODE" == upgrade || \
+        "$prior_install_state_verified" != true ]]; then
   printf '\nRunning Orichum doctor...\n'
   ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
   ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
     "$USER_BIN_DIR/orichum" doctor
+else
+  printf '\nFast readiness checks passed.\n'
 fi
+install_state_transaction_active=true
+python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
+  write "$install_state_path" "$install_state_platform" \
+  "$install_state_components" || \
+  workflow_die "verified installer state could not be published"
 finalize_installed_control_plane \
   "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$control_plane_journal" \
   "$WORKFLOW_LOCK_FD" || \
@@ -1565,4 +2468,5 @@ private_tools_transaction_active=false
 leanctx_transaction_active=false
 python_transaction_active=false
 config_transaction_active=false
+install_state_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false

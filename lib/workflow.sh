@@ -5,6 +5,94 @@ workflow_die() {
   return 1
 }
 
+parse_install_mode() {
+  case "$#" in
+    0) printf 'fast\n' ;;
+    1)
+      case "$1" in
+        --upgrade) printf 'upgrade\n' ;;
+        --uninstall) printf 'uninstall\n' ;;
+        *) return 2 ;;
+      esac
+      ;;
+    2)
+      [[ "$1" == --uninstall && "$2" == --purge ]] || return 2
+      printf 'purge\n'
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+component_state_matches() {
+  local manifest="$1"
+  local name="$2"
+  local version="$3"
+  local source_identity="$4"
+  local artifact_sha="$5"
+  local input_sha="$6"
+  local probe_sha="$7"
+  jq -e \
+    --arg name "$name" \
+    --arg version "$version" \
+    --arg source_identity "$source_identity" \
+    --arg artifact_sha "$artifact_sha" \
+    --arg input_sha "$input_sha" \
+    --arg probe_sha "$probe_sha" \
+    '.components[$name] == {
+      version: $version,
+      sourceIdentity: $source_identity,
+      artifactSha256: $artifact_sha,
+      inputSha256: $input_sha,
+      probeSha256: $probe_sha
+    }' "$manifest" >/dev/null
+}
+
+decide_install_component() {
+  local manifest="$1"
+  local name="$2"
+  shift 2
+  if [[ "${INSTALL_MODE:-fast}" == upgrade ]]; then
+    printf 'upgraded\n'
+  elif component_state_matches "$manifest" "$name" "$@"; then
+    printf 'reused\n'
+  elif jq -e --arg name "$name" \
+      '.components[$name] != null' "$manifest" >/dev/null 2>&1; then
+    printf 'repaired\n'
+  else
+    printf 'upgraded\n'
+  fi
+}
+
+install_state_component_field() {
+  local manifest="$1"
+  local name="$2"
+  local field="$3"
+  jq -er --arg name "$name" --arg field "$field" \
+    '.components[$name][$field]' "$manifest"
+}
+
+print_component_status_table() {
+  (($# == 8)) || return 2
+  local value
+  for value in "$@"; do
+    case "$value" in
+      reused|repaired|upgraded) ;;
+      *) return 2 ;;
+    esac
+  done
+  printf '\n%-20s  %-9s\n' COMPONENT STATUS
+  printf '%-20s  %-9s\n' '--------------------' '---------'
+  printf '%-20s  %-9s\n' \
+    Python "$1" \
+    CLIProxyAPI "$2" \
+    Claudex "$3" \
+    LeanCTX "$4" \
+    Mempalace "$5" \
+    Graphify "$6" \
+    Routing "$7" \
+    'Controller plugin' "$8"
+}
+
 linux_environment_kind() {
   local osrelease_path="${1:-/proc/sys/kernel/osrelease}"
   if rg -qi microsoft "$osrelease_path" 2>/dev/null; then
@@ -202,10 +290,14 @@ python_version_is_at_least() {
 
 install_or_reuse_orichum_python() (
   local data_root="$1"
+  local resolve_upstream="${2:-true}"
+  local recorded_version="${3:-}"
+  local expected_artifact_sha="${4:-}"
   local private_root entrypoint prior_identity prior_version=
   local available_json latest_version stage_root stage_root_real candidate
   local candidate_real
   local relative generation_name generation destination identity version action
+  local force_repair=false
   private_root="$(orichum_python_root "$data_root")" || return 1
   entrypoint="$(orichum_python_entrypoint "$data_root")" || return 1
   install -d -m 0700 \
@@ -213,39 +305,62 @@ install_or_reuse_orichum_python() (
   if prior_identity="$(validate_orichum_python "$data_root" "$entrypoint" 2>/dev/null)"; then
     IFS=$'\t' read -r prior_version candidate_real <<<"$prior_identity"
   fi
-  if ! available_json="$(
-      uv python list --only-downloads --output-format json \
-        --no-config 3.14
-    )"; then
-    if [[ -n "$prior_version" ]]; then
+  if [[ "$resolve_upstream" == false && \
+        "$recorded_version" =~ ^3\.14\.[0-9]+$ ]]; then
+    if [[ "$prior_version" == "$recorded_version" ]] && \
+       {
+         [[ -z "$expected_artifact_sha" ]] || \
+           [[ "$(sha256_file "$candidate_real")" == "$expected_artifact_sha" ]]
+       }; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0
     fi
-    workflow_die "uv could not resolve the latest private CPython 3.14"
-    return 1
+    [[ "$expected_artifact_sha" =~ ^[a-f0-9]{64}$ ]] || {
+      workflow_die "recorded private CPython artifact hash is invalid"
+      return 1
+    }
+    force_repair=true
   fi
-  latest_version="$(
-    jq -er '
-      [
-        .[]
-        | select(
-            .version_parts.major == 3 and
-            .version_parts.minor == 14
-          )
-      ]
-      | sort_by([
-          .version_parts.major,
-          .version_parts.minor,
-          .version_parts.patch
-        ])
-      | last
-      | .version
-    ' <<<"$available_json"
-  )" || {
-    workflow_die "uv returned no downloadable CPython 3.14 runtime"
-    return 1
-  }
-  if [[ -n "$prior_version" ]] && \
+  if [[ "$resolve_upstream" == false && \
+        "$recorded_version" =~ ^3\.14\.[0-9]+$ ]]; then
+    latest_version="$recorded_version"
+  else
+    if ! available_json="$(
+        uv python list --only-downloads --output-format json \
+          --no-config 3.14
+      )"; then
+      if [[ "$resolve_upstream" == true && \
+            -n "$prior_version" && \
+            "${INSTALL_MODE:-fast}" != upgrade ]]; then
+        printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
+        return 0
+      fi
+      workflow_die "uv could not resolve the latest private CPython 3.14"
+      return 1
+    fi
+    latest_version="$(
+      jq -er '
+        [
+          .[]
+          | select(
+              .version_parts.major == 3 and
+              .version_parts.minor == 14
+            )
+        ]
+        | sort_by([
+            .version_parts.major,
+            .version_parts.minor,
+            .version_parts.patch
+          ])
+        | last
+        | .version
+      ' <<<"$available_json"
+    )" || {
+      workflow_die "uv returned no downloadable CPython 3.14 runtime"
+      return 1
+    }
+  fi
+  if [[ "$force_repair" != true && -n "$prior_version" ]] && \
      python_version_is_at_least "$prior_version" "$latest_version"; then
     printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
     return 0
@@ -257,7 +372,9 @@ install_or_reuse_orichum_python() (
   trap 'rm -rf -- "$stage_root"' EXIT
   if ! uv python install --install-dir "$stage_root" \
       --no-bin --no-config "$latest_version" 1>&2; then
-    if [[ -n "$prior_version" ]]; then
+    if [[ "$resolve_upstream" == true && \
+          -n "$prior_version" && \
+          "${INSTALL_MODE:-fast}" != upgrade ]]; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0
     fi
@@ -289,6 +406,9 @@ install_or_reuse_orichum_python() (
   }
   generation="$stage_root_real/$generation_name"
   destination="$private_root/$generation_name"
+  if [[ "$force_repair" == true ]]; then
+    destination="$private_root/${generation_name}.repair.$$.$RANDOM"
+  fi
   if [[ -e "$destination" || -L "$destination" ]]; then
     candidate="$destination/${relative#*/}"
     if identity="$(validate_orichum_python \
@@ -316,7 +436,14 @@ install_or_reuse_orichum_python() (
     fi
   fi
   IFS=$'\t' read -r version candidate_real <<<"$identity"
-  if [[ -z "$prior_version" ]]; then
+  if [[ "$force_repair" == true ]]; then
+    if [[ "$(sha256_file "$candidate_real")" != "$expected_artifact_sha" ]]; then
+      remove_orichum_python_generation "$data_root" "$generation" || true
+      workflow_die "repaired private CPython artifact did not match"
+      return 1
+    fi
+    action=repaired
+  elif [[ -z "$prior_version" ]]; then
     action=installed
   elif [[ "$prior_version" == "$version" ]]; then
     action=reused
@@ -2075,6 +2202,7 @@ private_tool_layout_is_owned() {
   local tool_dir="$2"
   local bin_dir="$3"
   local data_physical tools_physical tool_physical bin_physical
+  local component component_mode current_uid
   [[ "$data_root" == /* && "$data_root" != / ]] && \
     [[ "$tool_dir" == "$data_root/tools/uv" ]] && \
     [[ "$bin_dir" == "$data_root/tools/bin" ]] || return 1
@@ -2090,7 +2218,416 @@ private_tool_layout_is_owned() {
   bin_physical="$(cd -P -- "$bin_dir" && pwd)" || return 1
   [[ "$tools_physical" == "$data_physical/tools" ]] && \
     [[ "$tool_physical" == "$data_physical/tools/uv" ]] && \
-    [[ "$bin_physical" == "$data_physical/tools/bin" ]]
+    [[ "$bin_physical" == "$data_physical/tools/bin" ]] || return 1
+  current_uid="$(id -u)"
+  for component in \
+      "$data_root" "$data_root/tools" "$tool_dir" "$bin_dir"; do
+    [[ "$(path_uid "$component")" == "$current_uid" ]] || return 1
+    component_mode="$(path_mode "$component")" || return 1
+    (( (8#$component_mode & 0022) == 0 )) || return 1
+  done
+}
+
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+private_uv_tool_identity() {
+  local data_root="$1"
+  local environment="$2"
+  local distribution="$3"
+  shift 3
+  local tool_dir="$data_root/tools/uv"
+  local bin_dir="$data_root/tools/bin"
+  local environment_dir="$tool_dir/$environment"
+  local environment_bin="$environment_dir/bin"
+  local entrypoint link_path target_path target_mode version payload=
+  local current_uid
+  private_tool_layout_is_owned \
+    "$data_root" "$tool_dir" "$bin_dir" || return 1
+  current_uid="$(id -u)"
+  [[ "$environment" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && \
+     "$distribution" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
+  [[ -d "$environment_dir" && ! -L "$environment_dir" && \
+     -d "$environment_bin" && ! -L "$environment_bin" && \
+     "$(path_uid "$environment_dir")" == "$current_uid" && \
+     "$(path_uid "$environment_bin")" == "$current_uid" ]] || return 1
+  target_mode="$(path_mode "$environment_dir")" || return 1
+  (( (8#$target_mode & 0022) == 0 )) || return 1
+  target_mode="$(path_mode "$environment_bin")" || return 1
+  (( (8#$target_mode & 0022) == 0 )) || return 1
+  version="$(
+    workflow_python -I -B - "$environment_dir" "$distribution" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+root = Path(sys.argv[1]).absolute()
+distribution = sys.argv[2]
+expected = re.sub(r"[-_.]+", "-", distribution).lower()
+uid = os.getuid()
+
+
+def safe_directory(path: Path) -> None:
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+
+
+safe_directory(root)
+if root.resolve(strict=True) != root:
+    raise SystemExit(1)
+library = root / "lib"
+safe_directory(library)
+matches: list[str] = []
+for metadata in library.glob(
+    "python*/site-packages/*.dist-info/METADATA"
+):
+    metadata_identity = re.sub(
+        r"[-_.]+", "-", metadata.parent.name
+    ).lower()
+    if not metadata_identity.startswith(expected + "-"):
+        continue
+    relative = metadata.relative_to(root)
+    current = root
+    for part in relative.parts[:-1]:
+        current /= part
+        safe_directory(current)
+    observed = os.lstat(metadata)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+        or observed.st_size > 64 * 1024
+        or metadata.resolve(strict=True) != metadata
+    ):
+        raise SystemExit(1)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(metadata, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != uid
+            or (opened.st_dev, opened.st_ino)
+            != (observed.st_dev, observed.st_ino)
+        ):
+            raise SystemExit(1)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(
+                descriptor, min(65536, 64 * 1024 + 1 - size)
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > 64 * 1024:
+                raise SystemExit(1)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_uid,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    name = version = None
+    for line in payload.decode("utf-8", "strict").splitlines():
+        if not line:
+            break
+        if line.startswith("Name: ") and name is None:
+            name = line[6:]
+        elif line.startswith("Version: ") and version is None:
+            version = line[9:]
+    if name is not None and (
+        re.sub(r"[-_.]+", "-", name).lower() == expected
+    ):
+        if version is None:
+            raise SystemExit(1)
+        matches.append(version)
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+PY
+  )" || return 1
+  [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || return 1
+  (($# > 0)) || return 1
+  for entrypoint in "$@"; do
+    [[ "$entrypoint" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+    link_path="$bin_dir/$entrypoint"
+    [[ -L "$link_path" && "$(path_uid "$link_path")" == "$current_uid" ]] || \
+      return 1
+    target_path="$(workflow_physical_path "$link_path")" || return 1
+    [[ "$target_path" == "$environment_bin/$entrypoint" && \
+       -f "$target_path" && ! -L "$target_path" && \
+       -x "$target_path" && \
+       "$(path_uid "$target_path")" == "$current_uid" ]] || return 1
+    target_mode="$(path_mode "$target_path")" || return 1
+    (( (8#$target_mode & 0022) == 0 )) || return 1
+    payload+="$entrypoint:$(sha256_file "$target_path")"$'\n'
+  done
+  printf '%s\t%s\n' "$version" "$(printf '%s' "$payload" | sha256_text)"
+}
+
+controller_plugin_fingerprint() {
+  (($# == 3)) || return 2
+  local module_root="$1"
+  local content_root="$2"
+  local python_runtime="$3"
+  "$python_runtime" -I -B - "$module_root" "$content_root" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+module_root = Path(sys.argv[1]).absolute()
+content_root = Path(sys.argv[2]).absolute()
+sys.path.insert(0, str(module_root))
+from integrations.common.install_state import (  # noqa: E402
+    InstallStateError,
+    fingerprint_paths,
+)
+
+plugin_root = content_root / "controller" / "plugin"
+uid = os.getuid()
+paths: list[Path] = []
+try:
+    for directory, names, files in os.walk(
+        plugin_root, topdown=True, followlinks=False
+    ):
+        current = Path(directory)
+        observed = os.lstat(current)
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != uid
+            or stat.S_IMODE(observed.st_mode) & 0o022
+        ):
+            raise InstallStateError(
+                "controller plugin directory is unsafe"
+            )
+        for name in sorted(names):
+            child = current / name
+            child_state = os.lstat(child)
+            if (
+                stat.S_ISLNK(child_state.st_mode)
+                or not stat.S_ISDIR(child_state.st_mode)
+            ):
+                raise InstallStateError(
+                    "controller plugin entry is unsafe"
+                )
+        names[:] = sorted(
+            name for name in names if name != "__pycache__"
+        )
+        for name in sorted(files):
+            child = current / name
+            child_state = os.lstat(child)
+            if (
+                stat.S_ISLNK(child_state.st_mode)
+                or not stat.S_ISREG(child_state.st_mode)
+            ):
+                raise InstallStateError(
+                    "controller plugin entry is unsafe"
+                )
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            paths.append(child.relative_to(content_root))
+    paths.append(Path("config/plugins.json"))
+    print(fingerprint_paths(content_root, paths))
+except (InstallStateError, OSError, RuntimeError, ValueError) as error:
+    print(f"ERROR: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+verified_route_runtime_digest() {
+  (($# == 4)) || return 2
+  local workflow_root="$1"
+  local python_runtime="$2"
+  local python_version="$3"
+  local descriptor="$4"
+  "$python_runtime" -I -B - \
+    "$workflow_root/integrations/common" "$python_runtime" \
+    "$python_version" "$descriptor" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+runtime = Path(sys.argv[2])
+version = sys.argv[3]
+descriptor = Path(sys.argv[4])
+uid = os.getuid()
+digest = hashlib.sha256()
+
+
+def add_file(label: str, path: Path) -> None:
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    digest.update(label.encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+
+
+add_file("python", runtime)
+digest.update(version.encode())
+digest.update(b"\0")
+for path in sorted(root.glob("*.py")):
+    add_file(path.name, path)
+value = digest.hexdigest()
+descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor.write_text(value + "\n", encoding="ascii")
+os.chmod(descriptor, 0o600)
+print(value)
+PY
+}
+
+verified_routing_input_fingerprint() {
+  (($# >= 8)) || return 2
+  local descriptor="$1"
+  local cliproxy_artifact="$2"
+  local claudex_artifact="$3"
+  local route_runtime="$4"
+  local cliproxy_port="$5"
+  local claudex_port="$6"
+  local route_port="$7"
+  shift 7
+  python3 -I -B - \
+    "$descriptor" "$cliproxy_artifact" "$claudex_artifact" \
+    "$route_runtime" "$cliproxy_port" "$claudex_port" "$route_port" \
+    "$@" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+descriptor = Path(sys.argv[1])
+values = sys.argv[2:8]
+paths = [Path(value) for value in sys.argv[8:]]
+uid = os.getuid()
+digest = hashlib.sha256()
+for label, value in zip(
+    ("cliproxy", "claudex", "route-runtime", "cliproxy-port",
+     "claudex-port", "route-port"),
+    values,
+):
+    digest.update(label.encode())
+    digest.update(b"=")
+    digest.update(value.encode())
+    digest.update(b"\0")
+for index, path in enumerate(paths):
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    digest.update(str(index).encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+value = digest.hexdigest()
+descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor.write_text(value + "\n", encoding="ascii")
+os.chmod(descriptor, 0o600)
+print(value)
+PY
+}
+
+verified_routing_runtime_artifact() {
+  (($# == 5)) || return 2
+  local data_root="$1"
+  local config_root="$2"
+  local cliproxy_service="$3"
+  local route_service="$4"
+  local descriptor="$5"
+  local active_claudex active_models active_effective
+  active_claudex="$(model_config_file "$data_root" claudex.toml)" || return 1
+  active_models="$(model_config_file "$data_root" models.json)" || return 1
+  active_effective="$(
+    model_config_file "$data_root" effective-models.json
+  )" || return 1
+  python3 -I -B - \
+    "$descriptor" \
+    "$data_root/cliproxy.yaml" \
+    "$cliproxy_service" "$route_service" \
+    "$active_claudex" "$active_models" "$active_effective" \
+    "$data_root/claude-config/settings.json" \
+    "$config_root/accounts.json" \
+    "$config_root/model-stacks.json" \
+    "$config_root/plugins.json" \
+    "$config_root/projects.json" \
+    "$config_root/providers.json" \
+    "$config_root/runtime.json" \
+    "$config_root/controller-policy.md" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+descriptor = Path(sys.argv[1])
+paths = [Path(value) for value in sys.argv[2:]]
+uid = os.getuid()
+digest = hashlib.sha256()
+for index, path in enumerate(paths):
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    digest.update(str(index).encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+value = digest.hexdigest()
+descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor.write_text(value + "\n", encoding="ascii")
+os.chmod(descriptor, 0o600)
+print(value)
+PY
 }
 
 migrate_legacy_private_tools() (
@@ -2748,7 +3285,7 @@ model_config_file() {
   local config_name="$2"
   local generation
   case "$config_name" in
-    models.json|claudex.toml) ;;
+    models.json|claudex.toml|effective-models.json) ;;
     *) workflow_die "unsupported model config file: $config_name"; return 1 ;;
   esac
   if generation="$(resolve_model_config_generation "$data_root")"; then
@@ -3609,6 +4146,19 @@ fetch_latest_github_release() {
   fi
 }
 
+fetch_github_release_tag() {
+  local repository="$1"
+  local tag="$2"
+  local output_file="$3"
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    gh api "repos/$repository/releases/tags/$tag" >"$output_file"
+  else
+    curl --fail --location --silent --show-error \
+      "https://api.github.com/repos/$repository/releases/tags/$tag" \
+      --output "$output_file"
+  fi
+}
+
 leanctx_release_suffix() {
   local platform="$1"
   local architecture="$2"
@@ -3699,20 +4249,60 @@ PY
     "$leanctx_binary"
 }
 
-stage_latest_github_binary() {
+stage_github_binary() {
   local repository="$1"
   local prefix="$2"
   local suffix="$3"
   local archive_binary="$4"
   local destination="$5"
   local staging_dir="$6"
+  local resolve_upstream="${7:-true}"
+  local recorded_version="${8:-}"
+  local source_identity="${9:-}"
+  local expected_artifact_sha="${10:-}"
   local metadata archive row url digest asset tag version actual_sha staged_binary
+  local expected_source_prefix expected_tag=
 
+  if [[ "$resolve_upstream" == false ]]; then
+    [[ "$recorded_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+      workflow_die "recorded GitHub binary version is invalid"
+      return 1
+    }
+    [[ "$expected_artifact_sha" =~ ^[a-f0-9]{64}$ ]] || {
+      workflow_die "recorded GitHub artifact hash is invalid"
+      return 1
+    }
+    expected_source_prefix="github:$repository@"
+    case "$source_identity" in
+      "$expected_source_prefix"*)
+        expected_tag="${source_identity#"$expected_source_prefix"}"
+        ;;
+      *)
+        workflow_die "recorded GitHub source identity is invalid"
+        return 1
+        ;;
+    esac
+    [[ "$expected_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || {
+      workflow_die "recorded GitHub release tag is unsafe"
+      return 1
+    }
+    if managed_executable_is_safe "$destination" && \
+       binary_reports_semver "$destination" "$recorded_version" && \
+       [[ "$(sha256_file "$destination")" == "$expected_artifact_sha" ]]; then
+      jq -cn --arg version "$recorded_version" --arg tag "$expected_tag" \
+        '{version: $version, tag: $tag, changed: false, staged_path: null}'
+      return 0
+    fi
+  fi
   install -d -m 0700 "$staging_dir"
   metadata="$staging_dir/release.json"
   archive="$staging_dir/release.tar.gz"
   staged_binary="$staging_dir/$archive_binary"
-  fetch_latest_github_release "$repository" "$metadata"
+  if [[ "$resolve_upstream" == false ]]; then
+    fetch_github_release_tag "$repository" "$expected_tag" "$metadata"
+  else
+    fetch_latest_github_release "$repository" "$metadata"
+  fi
   row="$(jq -er --arg prefix "$prefix" --arg suffix "$suffix" '
     [.assets[] | select(.name | startswith($prefix) and endswith($suffix))] |
     if length == 1 then .[0] else error("expected exactly one release asset") end |
@@ -3723,13 +4313,22 @@ stage_latest_github_binary() {
   version="$(jq -er '.tag_name | sub("^v"; "")' "$metadata")"
   [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
     workflow_die "GitHub release tag is unsafe"
+  if [[ "$resolve_upstream" == false && \
+        ( "$tag" != "$expected_tag" || "$version" != "$recorded_version" ) ]]; then
+    workflow_die "recorded GitHub release identity did not match"
+    return 1
+  fi
   if [[ "$digest" != sha256:* ]]; then
     workflow_die "GitHub did not publish a SHA-256 digest for $asset"
     return 1
   fi
 
   if managed_executable_is_safe "$destination" && \
-     binary_reports_semver "$destination" "$version"; then
+     binary_reports_semver "$destination" "$version" && \
+     {
+       [[ "$resolve_upstream" == true ]] || \
+         [[ "$(sha256_file "$destination")" == "$expected_artifact_sha" ]]
+     }; then
     jq -cn --arg version "$version" --arg tag "$tag" \
       '{version: $version, tag: $tag, changed: false, staged_path: null}'
     return 0
@@ -3745,6 +4344,11 @@ stage_latest_github_binary() {
   chmod 0755 "$staged_binary"
   if ! binary_reports_semver "$staged_binary" "$version"; then
     workflow_die "staged $asset did not report version $version"
+    return 1
+  fi
+  if [[ "$resolve_upstream" == false && \
+        "$(sha256_file "$staged_binary")" != "$expected_artifact_sha" ]]; then
+    workflow_die "recorded GitHub binary artifact did not match"
     return 1
   fi
   jq -cn --arg version "$version" --arg tag "$tag" \
