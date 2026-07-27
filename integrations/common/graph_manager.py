@@ -696,6 +696,8 @@ _LEGACY_GRAPHIFY_ENTRIES = frozenset(
     }
 )
 
+_IGNORABLE_LEGACY_METADATA = frozenset({".DS_Store"})
+
 
 def _recognized_legacy_entry(name: str) -> bool:
     return (
@@ -708,6 +710,17 @@ def _recognized_legacy_entry(name: str) -> bool:
             name,
         )
         is not None
+    )
+
+
+def _ignorable_legacy_metadata(
+    name: str,
+    observed: os.stat_result,
+) -> bool:
+    return (
+        name in _IGNORABLE_LEGACY_METADATA
+        and observed.st_uid == os.getuid()
+        and stat.S_ISREG(observed.st_mode)
     )
 
 
@@ -994,6 +1007,8 @@ def _copy_legacy_tree(source: Path, destination: Path) -> dict[str, str]:
             child_target = target / name
             if observed.st_uid != os.getuid() or stat.S_ISLNK(observed.st_mode):
                 raise GraphError("Legacy Graphify output is unsafe")
+            if _ignorable_legacy_metadata(name, observed):
+                continue
             if stat.S_ISDIR(observed.st_mode):
                 child_target.mkdir(mode=0o700)
                 child_descriptor = os.open(
@@ -1055,10 +1070,20 @@ def _copy_legacy_tree(source: Path, destination: Path) -> dict[str, str]:
             or root_observed.st_uid != os.getuid()
         ):
             raise GraphError("Legacy Graphify output is unsafe")
-        entries = set(os.listdir(root_descriptor))
-        if any(not _recognized_legacy_entry(name) for name in entries):
+        unknown = []
+        for name in sorted(os.listdir(root_descriptor)):
+            observed = os.stat(
+                name, dir_fd=root_descriptor, follow_symlinks=False
+            )
+            if (
+                not _recognized_legacy_entry(name)
+                and not _ignorable_legacy_metadata(name, observed)
+            ):
+                unknown.append(name)
+        if unknown:
             raise GraphError(
-                "Legacy Graphify output contains unknown entries"
+                "Legacy Graphify output contains unknown entries: "
+                + ", ".join(repr(name) for name in unknown)
             )
         destination.mkdir(mode=0o700)
         copy_directory(root_descriptor, destination, Path())
@@ -1436,14 +1461,22 @@ def sync_graphs(
             operation_progress = lambda action, i=index, item=repository: progress(
                 f"[graphify {i}/{total}] {action} {item.name}"
             )
-        results.append(
-            sync_graph(
-                repository,
-                data_root,
-                graphify=graphify,
-                progress=operation_progress,
-            )
+        result = sync_graph(
+            repository,
+            data_root,
+            graphify=graphify,
+            progress=operation_progress,
         )
+        if result.action == "migrated":
+            current = resolve_graph_target(repository, data_root)
+            if current.output_dir != result.output_dir:
+                result = sync_graph(
+                    repository,
+                    data_root,
+                    graphify=graphify,
+                    progress=operation_progress,
+                )
+        results.append(result)
     return tuple(results)
 
 

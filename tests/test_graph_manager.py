@@ -1552,6 +1552,66 @@ with counter.open("r+", encoding="ascii") as state:
             (first.graph_file,),
         )
 
+    def test_hook_cleanup_finishes_on_the_post_cleanup_graph_state(self):
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        target = self.target()
+        (legacy / "graph.json").write_text(
+            json.dumps({
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
+        self._git(
+            "config",
+            "merge.graphify.name",
+            "graphify graph.json union merge",
+        )
+        self._git(
+            "config",
+            "merge.graphify.driver",
+            "graphify merge-driver %O %A %B",
+        )
+        attributes = self.repository / ".gitattributes"
+        attributes.write_text(
+            "graphify-out/graph.json merge=graphify\n",
+            encoding="utf-8",
+        )
+
+        result = sync_graphs(
+            self.repository, self.data_root, graphify=self.graphify
+        )[0]
+        current = self.target()
+
+        self.assertFalse(attributes.exists())
+        self.assertEqual(result.output_dir, current.output_dir)
+        self.assertEqual(inspect_graph(current).status, "current")
+
+    def test_migration_ignores_owned_macos_metadata(self):
+        legacy = self.repository / "graphify-out"
+        legacy.mkdir()
+        target = self.target()
+        (legacy / "graph.json").write_text(
+            json.dumps({
+                "built_at_commit": target.revision,
+                "nodes": [{"id": "node", "source_file": "source.py"}],
+                "links": [],
+            }),
+            encoding="utf-8",
+        )
+        (legacy / ".DS_Store").write_bytes(b"finder")
+        dated = legacy / "2026-07-27"
+        dated.mkdir()
+        (dated / ".DS_Store").write_bytes(b"finder")
+
+        self.assertTrue(migrate_legacy_graph(target))
+        self.assertFalse((target.output_dir / ".DS_Store").exists())
+        self.assertFalse(
+            (target.output_dir / "2026-07-27" / ".DS_Store").exists()
+        )
+
     def test_unknown_legacy_entry_refuses_migration_and_preserves_source(self):
         legacy = self.repository / "graphify-out"
         legacy.mkdir()
@@ -1563,7 +1623,7 @@ with counter.open("r+", encoding="ascii") as state:
         )
         (legacy / "unexpected.bin").write_bytes(b"unknown")
 
-        with self.assertRaises(GraphError):
+        with self.assertRaisesRegex(GraphError, r"unexpected\.bin"):
             migrate_legacy_graph(self.target())
 
         self.assertTrue(legacy.exists())
