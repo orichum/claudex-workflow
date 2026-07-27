@@ -154,7 +154,14 @@ help="$("$ROOT/bin/orichum" --help)"
 rg -Fq 'usage: orichum ' <<<"$help"
 rg -Fq 'context' <<<"$help"
 rg -Fq 'graph' <<<"$help"
+rg -Fq 'leanctx' <<<"$help"
 rg -Fq 'sessions' <<<"$help"
+
+leanctx_help="$("$ROOT/bin/orichum" leanctx --help)"
+rg -Fq 'dashboard' <<<"$leanctx_help"
+rg -Fq 'list' <<<"$leanctx_help"
+rg -Fq 'stats' <<<"$leanctx_help"
+rg -Fq 'watch' <<<"$leanctx_help"
 
 ORICHUM_CONFIG_HOME="$ROOT/config" \
 ORICHUM_DATA_HOME="$fixture/data" \

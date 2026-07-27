@@ -17,6 +17,7 @@ from unittest import mock
 from integrations.common import graph_manager
 from integrations.common import orichum_cli
 from integrations.common import stack_bindings
+from integrations.common.leanctx_monitor import LeanctxRun, LeanctxStats
 from integrations.common.stack_bindings import (
     StackBindingError,
     StackBindings,
@@ -1063,6 +1064,218 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("PROJECT", stdout)
         self.assertNotIn("credential", stdout.lower())
         self.assertNotIn("routing", stdout.lower())
+
+    def test_leanctx_parser_exposes_bounded_monitoring_commands(self) -> None:
+        parser = orichum_cli.build_parser()
+
+        self.assertEqual(
+            parser.parse_args(["leanctx", "stats", "--run", "run.one"])
+            .leanctx_command,
+            "stats",
+        )
+        dashboard = parser.parse_args(
+            [
+                "leanctx",
+                "dashboard",
+                "--run",
+                "run.one",
+                "--port",
+                "3341",
+                "--open",
+                "none",
+            ]
+        )
+        self.assertEqual(dashboard.port, 3341)
+        self.assertEqual(dashboard.open_mode, "none")
+        self.assertEqual(
+            parser.parse_args(["leanctx", "watch"]).leanctx_command,
+            "watch",
+        )
+        self.assertEqual(
+            parser.parse_args(["leanctx", "list"]).leanctx_command,
+            "list",
+        )
+
+    def test_leanctx_list_marks_newest_run_for_current_project(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        current = LeanctxRun(
+            "run.current",
+            self.root / "data" / "state" / "sessions" / "run.current",
+            project,
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+        older = LeanctxRun(
+            "run.older",
+            self.root / "data" / "state" / "sessions" / "run.older",
+            project,
+            "2026-07-26T10:00:00Z",
+            False,
+        )
+        with (
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "discover_runs",
+                return_value=(current, older),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "resolve_control_plane_context",
+                return_value={
+                    "route": {"contextRootReal": str(project)}
+                },
+            ),
+        ):
+            status, stdout, stderr = self.run_cli("leanctx", "list")
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("RUN", stdout)
+        self.assertIn("PROJECT", stdout)
+        self.assertIn("run.current", stdout)
+        current_row = next(
+            line for line in stdout.splitlines() if "run.current" in line
+        )
+        older_row = next(
+            line for line in stdout.splitlines() if "run.older" in line
+        )
+        self.assertIn("yes", current_row)
+        self.assertIn("—", older_row)
+
+    def test_leanctx_stats_selects_project_and_renders_exact_savings(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        selected = LeanctxRun(
+            "run.current",
+            self.root / "data" / "state" / "sessions" / "run.current",
+            project,
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+        binary = self.root / "data" / "bin" / "lean-ctx"
+        with (
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "discover_runs",
+                return_value=(selected,),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "resolve_control_plane_context",
+                return_value={
+                    "route": {"contextRootReal": str(project)}
+                },
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "managed_binary",
+                return_value=binary,
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "read_stats",
+                return_value=LeanctxStats(
+                    4,
+                    14261,
+                    1590,
+                    12671,
+                    88.85,
+                ),
+            ) as read,
+        ):
+            status, stdout, stderr = self.run_cli("leanctx", "stats")
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("run.current", stdout)
+        self.assertIn("14,261", stdout)
+        self.assertIn("12,671", stdout)
+        self.assertIn("88.9%", stdout)
+        read.assert_called_once_with(binary, selected)
+
+    def test_leanctx_dashboard_propagates_selected_options_and_status(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        selected = LeanctxRun(
+            "run.current",
+            self.root / "data" / "state" / "sessions" / "run.current",
+            project,
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+        binary = self.root / "data" / "bin" / "lean-ctx"
+        with (
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "discover_runs",
+                return_value=(selected,),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "resolve_control_plane_context",
+                return_value={
+                    "route": {"contextRootReal": str(project)}
+                },
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "managed_binary",
+                return_value=binary,
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "run_dashboard",
+                return_value=7,
+            ) as dashboard,
+        ):
+            status, stdout, stderr = self.run_cli(
+                "leanctx",
+                "dashboard",
+                "--run",
+                "run.current",
+                "--port",
+                "3341",
+                "--open",
+                "none",
+            )
+
+        self.assertEqual((status, stdout, stderr), (7, "", ""))
+        dashboard.assert_called_once_with(
+            binary,
+            selected,
+            self.root / "data" / "state",
+            port=3341,
+            open_mode="none",
+        )
+
+    def test_leanctx_implicit_selection_error_is_concise(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        with (
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "discover_runs",
+                return_value=(),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "resolve_control_plane_context",
+                return_value={
+                    "route": {"contextRootReal": str(project)}
+                },
+            ),
+        ):
+            status, stdout, stderr = self.run_cli("leanctx", "stats")
+
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertEqual(
+            stderr,
+            "ERROR: current project has no LeanCTX activity; "
+            "run 'orichum leanctx list' to inspect available runs\n",
+        )
 
     def test_session_routes_prints_opaque_account_ids_not_display_names(
         self,
