@@ -29,6 +29,36 @@ if parse_install_mode --purge >/dev/null 2>&1; then
   exit 1
 fi
 
+matching_digest="$(printf 'a%.0s' {1..64})"
+changed_digest="$(printf 'b%.0s' {1..64})"
+matching_manifest="$fixture/matching-manifest.json"
+jq -n \
+  --arg digest "$matching_digest" \
+  '{
+    schemaVersion: 1,
+    platform: "darwin:aarch64",
+    components: {
+      cliproxy: {
+        version: "7.2.97",
+        sourceIdentity: "github:router-for-me/CLIProxyAPI@v7.2.97",
+        artifactSha256: $digest,
+        inputSha256: $digest,
+        probeSha256: $digest
+      }
+    }
+  }' >"$matching_manifest"
+component_state_matches \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$matching_digest"
+if component_state_matches \
+    "$matching_manifest" cliproxy 7.2.97 \
+    github:router-for-me/CLIProxyAPI@v7.2.97 \
+    "$changed_digest" "$matching_digest" "$matching_digest"; then
+  printf 'changed component artifact matched installer state\n' >&2
+  exit 1
+fi
+
 python_data="$fixture/python-data"
 python_root="$python_data/python"
 python_bin="$python_root/cpython-3.14.6/bin"
@@ -484,6 +514,20 @@ IFS=$'\t' read -r \
 [[ -z "$python_generation" ]]
 [[ ! -s "$fake_uv_log" ]]
 
+if INSTALL_MODE=upgrade \
+   PATH="$fake_uv_bin:$PATH" \
+   FAKE_UV_LOG="$fake_uv_log" \
+   FAKE_UV_VERSION=3.14.7 \
+   FAKE_UV_INSTALL_FAIL=true \
+    install_or_reuse_orichum_python "$provisioned_data" true \
+      >"$fixture/python-upgrade.stdout" \
+      2>"$fixture/python-upgrade.stderr"; then
+  printf 'failed explicit Python upgrade reused the prior runtime\n' >&2
+  exit 1
+fi
+rg -Fq 'could not install private CPython 3.14.7' \
+  "$fixture/python-upgrade.stderr"
+
 rollback_data="$fixture/rollback-data"
 rollback_snapshot="$fixture/rollback-snapshot"
 old_runtime="$rollback_data/python/cpython-3.14.5/bin/python3.14"
@@ -584,6 +628,14 @@ fetch_latest_github_release() {
   printf 'unexpected release lookup\n' >>"$recorded_release_log"
   return 97
 }
+fetch_github_release_tag() {
+  printf 'unexpected tagged release lookup\n' >>"$recorded_release_log"
+  return 97
+}
+curl() {
+  printf 'unexpected artifact download\n' >>"$recorded_release_log"
+  return 97
+}
 recorded_state="$(
   stage_github_binary \
     example/tool tool- .tar.gz tool \
@@ -594,7 +646,86 @@ recorded_state="$(
 [[ "$(jq -r '.changed' <<<"$recorded_state")" == false ]]
 [[ "$(jq -r '.staged_path' <<<"$recorded_state")" == null ]]
 [[ ! -e "$recorded_release_log" ]]
-unset -f fetch_latest_github_release
+unset -f fetch_latest_github_release fetch_github_release_tag curl
+
+repair_archive_root="$fixture/repair-archive"
+repair_archive="$fixture/tool-1.2.3.tar.gz"
+repair_fetch_log="$fixture/repair-fetch.log"
+install -d -m 0700 "$repair_archive_root"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.3\n"' >"$repair_archive_root/tool"
+chmod 0755 "$repair_archive_root/tool"
+tar -czf "$repair_archive" -C "$repair_archive_root" tool
+repair_digest="$(sha256_file "$repair_archive")"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.2\n"' >"$recorded_binary"
+chmod 0755 "$recorded_binary"
+fetch_github_release_tag() {
+  local repository="$1"
+  local tag="$2"
+  local output_file="$3"
+  printf '%s|%s\n' "$repository" "$tag" >>"$repair_fetch_log"
+  jq -n \
+    --arg tag "$tag" \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: $tag,
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+curl() {
+  local output_file=
+  while (($# > 0)); do
+    if [[ "$1" == --output ]]; then
+      output_file="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  cp "$repair_archive" "$output_file"
+}
+repaired_state="$(
+  stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/repair-stage" \
+    false 1.2.3 github:example/tool@v1.2.3
+)"
+[[ "$(jq -r '.changed' <<<"$repaired_state")" == true ]]
+[[ "$(jq -r '.version' <<<"$repaired_state")" == 1.2.3 ]]
+[[ "$(cat "$repair_fetch_log")" == 'example/tool|v1.2.3' ]]
+binary_reports_semver "$(jq -r '.staged_path' <<<"$repaired_state")" 1.2.3
+
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: "v9.9.9",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/mismatch-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    >"$fixture/mismatch.stdout" 2>"$fixture/mismatch.stderr"; then
+  printf 'mismatched tagged release metadata was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'recorded GitHub release identity did not match' \
+  "$fixture/mismatch.stderr"
+unset -f fetch_github_release_tag curl
 
 printf '6.8.0-generic\n' >"$fixture/linux-osrelease"
 printf '4.4.0-Microsoft\n' >"$fixture/wsl1-osrelease"

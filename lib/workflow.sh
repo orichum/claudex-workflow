@@ -23,6 +23,30 @@ parse_install_mode() {
   esac
 }
 
+component_state_matches() {
+  local manifest="$1"
+  local name="$2"
+  local version="$3"
+  local source_identity="$4"
+  local artifact_sha="$5"
+  local input_sha="$6"
+  local probe_sha="$7"
+  jq -e \
+    --arg name "$name" \
+    --arg version "$version" \
+    --arg source_identity "$source_identity" \
+    --arg artifact_sha "$artifact_sha" \
+    --arg input_sha "$input_sha" \
+    --arg probe_sha "$probe_sha" \
+    '.components[$name] == {
+      version: $version,
+      sourceIdentity: $source_identity,
+      artifactSha256: $artifact_sha,
+      inputSha256: $input_sha,
+      probeSha256: $probe_sha
+    }' "$manifest" >/dev/null
+}
+
 linux_environment_kind() {
   local osrelease_path="${1:-/proc/sys/kernel/osrelease}"
   if rg -qi microsoft "$osrelease_path" 2>/dev/null; then
@@ -243,7 +267,8 @@ install_or_reuse_orichum_python() (
       uv python list --only-downloads --output-format json \
         --no-config 3.14
     )"; then
-    if [[ -n "$prior_version" ]]; then
+    if [[ -n "$prior_version" && \
+          "${INSTALL_MODE:-fast}" != upgrade ]]; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0
     fi
@@ -283,7 +308,8 @@ install_or_reuse_orichum_python() (
   trap 'rm -rf -- "$stage_root"' EXIT
   if ! uv python install --install-dir "$stage_root" \
       --no-bin --no-config "$latest_version" 1>&2; then
-    if [[ -n "$prior_version" ]]; then
+    if [[ -n "$prior_version" && \
+          "${INSTALL_MODE:-fast}" != upgrade ]]; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0
     fi
