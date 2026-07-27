@@ -1896,7 +1896,7 @@ if [[ "$INSTALL_MODE" == upgrade || \
       "$prior_install_state_verified" != true ]]; then
   graphify_doctor_diagnostics \
     "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_ROOT" \
-    "$ORICHUM_PYTHON" "$graphify_binary" || \
+    "$ORICHUM_PYTHON" || \
     printf 'NOTICE: repository graph upgrade diagnostics were unavailable\n' \
       >&2
 fi

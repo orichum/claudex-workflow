@@ -4,18 +4,29 @@ Providers describe how a model family reaches CLIProxyAPI. Named accounts bind
 a friendly name, provider, credential reference, account pool, and priority.
 Secrets remain in CLIProxyAPI's private authentication directory.
 
-## Login
+## Add an account
+
+Use the interactive wizard:
+
+```bash
+orichum provider configure
+```
+
+The wizard lists configured providers, runs the selected CLIProxyAPI login,
+detects the new credential, and asks only for the account's display name, pool,
+and priority. Credential filenames and contents are not displayed.
+
+Run the wizard again for each additional account.
+
+## Low-level commands
+
+The separate commands remain available for recovery and automation:
 
 ```bash
 orichum provider login codex
 orichum provider login claude
 orichum provider login antigravity
 orichum provider login kimi
-```
-
-Run a login once per upstream account. Then find the private auth directory:
-
-```bash
 orichum config paths
 ls ~/.local/share/orichum/auth
 ```
@@ -29,6 +40,7 @@ orichum provider account add \
 
 `CREDENTIAL_FILE` means the filename created by CLIProxyAPI inside Orichum's
 auth directory. `shared` is the account pool in which the account is available.
+Normal interactive setup does not require this manual path.
 
 ## Manage accounts
 

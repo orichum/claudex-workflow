@@ -3048,9 +3048,8 @@ graphify_doctor_diagnostics() {
   local config_root="$2"
   local workflow_root="$3"
   local python_runtime="$4"
-  local graphify_binary="${5:-}"
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-    "$workflow_root" "$config_root" "$graphify_binary" <<'PY'
+    "$workflow_root" "$config_root" <<'PY'
 import json
 import os
 import stat
@@ -3059,10 +3058,7 @@ from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
 from integrations.common.graph_hooks import graph_hook_status
-from integrations.common.graph_manager import _package_version, _skill_version
-
 config_root = Path(sys.argv[2])
-graphify = sys.argv[3] or None
 try:
     document = json.loads(
         (config_root / "projects.json").read_text(encoding="utf-8")
@@ -3123,12 +3119,6 @@ legacy = sum(
 )
 hook_states = [graph_hook_status(repository) for repository in repositories]
 hook_drift = sum(state != "installed" for state in hook_states)
-package = _package_version(graphify)
-skill = _skill_version()
-if package != skill:
-    print(f"NOTICE Graphify package/skill drift: {package} != {skill}")
-else:
-    print(f"OK   Graphify package and installed skill match: {package}")
 print(f"NOTICE repository-local legacy Graphify outputs: {legacy}")
 print(f"NOTICE repository graph hooks need reconciliation: {hook_drift}")
 if scan_bounded:

@@ -1612,24 +1612,6 @@ def _package_version(graphify: str | None) -> str:
     return match.group(1) if match else "unknown"
 
 
-def _skill_version() -> str:
-    home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
-    candidates = (
-        home / ".agents" / "skills" / "graphify" / ".graphify_version",
-        home / ".codex" / "skills" / "graphify" / ".graphify_version",
-        home / ".claude" / "skills" / "graphify" / ".graphify_version",
-    )
-    for candidate in candidates:
-        try:
-            with candidate.open("r", encoding="ascii") as stream:
-                value = stream.read(128).strip()
-        except (OSError, UnicodeError):
-            continue
-        if value:
-            return value[:64]
-    return "unavailable"
-
-
 def _render_status_table(rows: list[tuple[str, ...]]) -> str:
     headers = (
         "REPOSITORY",
@@ -1724,10 +1706,7 @@ def _graph_status(path: Path) -> int:
     for detail in details:
         print(detail)
     package = _package_version(graphify)
-    skill = _skill_version()
-    drift = " (drift)" if package != skill else ""
     print(f"Graphify package: {package}")
-    print(f"Graphify skill: {skill}{drift}")
     return 0
 
 

@@ -81,6 +81,17 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn("secret", stdout.lower())
         self.assertNotIn("authorization:", stdout.lower())
 
+    def test_version_uses_release_identity_file(self) -> None:
+        stdout = io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            orichum_cli.build_parser().parse_args(["--version"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.1\n")
+
     def test_context_models_provider_and_plugin_read_only_commands(self) -> None:
         status, stdout, stderr = self.run_cli("context", "list")
         self.assertEqual(status, 0)
@@ -254,6 +265,22 @@ class OrichumCliTests(unittest.TestCase):
             "ERROR: stack configuration requires an interactive terminal\n",
         )
         wizard.assert_not_called()
+
+    def test_provider_configure_rejects_non_tty_before_login(self) -> None:
+        with mock.patch.object(
+            orichum_cli, "_run_external", return_value=0
+        ) as run:
+            status, stdout, stderr = self.run_cli(
+                "provider", "configure"
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "ERROR: provider configuration requires an interactive terminal\n",
+        )
+        run.assert_not_called()
 
     def test_external_diagnostics_use_argv_runner_without_shell(self) -> None:
         with mock.patch.object(orichum_cli, "_run_external", return_value=8) as run:
@@ -450,6 +477,56 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(
             json.loads(registry.read_text(encoding="utf-8"))["accounts"], []
         )
+
+    def test_provider_configure_logs_in_and_registers_named_account(self) -> None:
+        config_home, credential = self.provision_account_runtime()
+        credential_document = credential.read_text(encoding="utf-8")
+        credential.unlink()
+
+        def authenticate(*_arguments, **_kwargs):
+            credential.write_text(credential_document, encoding="utf-8")
+            credential.chmod(0o600)
+            return 0
+
+        with (
+            mock.patch.object(
+                orichum_cli, "_interactive_terminal", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_run_external",
+                side_effect=authenticate,
+            ) as run,
+            mock.patch(
+                "builtins.input",
+                side_effect=("1", "Work Claude", "", "", ""),
+            ),
+        ):
+            status, stdout, stderr = self.run_cli(
+                "provider", "configure"
+            )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        run.assert_called_once_with(
+            "orichum-login",
+            ["claude"],
+            environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
+        )
+        document = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(document["accounts"]), 1)
+        account = document["accounts"][0]
+        self.assertEqual(account["name"], "Work Claude")
+        self.assertEqual(account["provider"], "anthropic")
+        self.assertEqual(account["credentialRef"], credential.name)
+        self.assertEqual(account["pool"], "shared")
+        self.assertEqual(account["priority"], 100)
+        self.assertEqual(account["state"], "active")
+        self.assertIn("Provider account ready: Work Claude", stdout)
+        self.assertNotIn(credential.name, stdout)
+        self.assertNotIn("DO-NOT-PRINT", stdout)
 
     def test_account_remove_rejects_stack_candidate_binding(self) -> None:
         config_home, credential = self.provision_account_runtime()
@@ -1064,6 +1141,30 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("PROJECT", stdout)
         self.assertNotIn("credential", stdout.lower())
         self.assertNotIn("routing", stdout.lower())
+
+    def test_sessions_cleanup_previews_without_deleting(self) -> None:
+        state = self.root / "data" / "state"
+        state.mkdir(parents=True, mode=0o700)
+        sessions = state / "sessions"
+        stale = sessions / "run.stale"
+        sessions.mkdir(mode=0o700)
+        stale.mkdir(mode=0o700)
+        (stale / ".complete").write_text("{}", encoding="utf-8")
+        (stale / ".complete").chmod(0o600)
+        os.utime(stale / ".complete", (1_700_000_000, 1_700_000_000))
+
+        with mock.patch(
+            "integrations.common.orichum_sessions.datetime"
+        ) as clock:
+            clock.now.return_value.timestamp.return_value = 1_701_000_000
+            status, stdout, stderr = self.run_cli(
+                "sessions", "cleanup", "--older-than", "7"
+            )
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("run.stale", stdout)
+        self.assertIn("--yes", stdout)
+        self.assertTrue(stale.is_dir())
 
     def test_leanctx_parser_exposes_bounded_monitoring_commands(self) -> None:
         parser = orichum_cli.build_parser()
@@ -1930,7 +2031,7 @@ commit = subprocess.run(
             any(self.data_root.rglob("api/revisions/*/graphify-out/graph.json"))
         )
 
-    def test_graph_status_is_read_only_and_reports_version_drift(self) -> None:
+    def test_graph_status_is_read_only_and_reports_package_version(self) -> None:
         (self.repository / "dirty.py").write_text(
             "print('dirty')\n", encoding="utf-8"
         )
@@ -1947,7 +2048,7 @@ commit = subprocess.run(
         self.assertIn("github.com/example/api", stdout)
         self.assertIn(str(self.repository), stdout)
         self.assertIn("Graphify package: 1.2.3", stdout)
-        self.assertIn("Graphify skill: 1.2.2 (drift)", stdout)
+        self.assertNotIn("Graphify skill:", stdout)
         self.assertEqual(self.snapshot_tree(self.data_root), before_data)
         self.assertEqual(self.snapshot_tree(self.repository), before_repository)
 

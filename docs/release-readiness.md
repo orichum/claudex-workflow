@@ -1,6 +1,6 @@
 # Release readiness
 
-This report records the release-candidate acceptance pass run on 2026-07-27.
+This report records the Orichum `0.1.0-rc.1` acceptance pass run on 2026-07-27.
 It separates live evidence from deterministic and isolated acceptance coverage.
 
 ## Verdict
@@ -16,6 +16,10 @@ Two intentionally excluded cases are not release blockers:
 
 Both were excluded at the user's request. Account selection, priority,
 validation, and rollover behavior remain covered deterministically.
+
+The repository does not yet declare a software license. That does not affect
+local installation or private evaluation, but an open-source release requires
+the owner to choose the legal terms; Orichum does not infer or grant them.
 
 ## Live acceptance
 
@@ -44,7 +48,7 @@ Atlassian, GitHub, or other project services.
 
 | Boundary | Coverage |
 |---|---|
-| Python behavior | 593 `unittest` cases, including routing, accounts, sessions, hooks, tool deferral, graph safety, and status rendering |
+| Python behavior | 618 `unittest` cases, including routing, accounts, sessions, hooks, tool deferral, graph safety, and status rendering |
 | Shell behavior | All seven suites: smoke, plugin, installer, transaction, route, launcher, and uninstall |
 | Installer safety | Fresh install, idempotent upgrade, occupied-port selection, owned-service reuse, foreign-service preservation, and rollback |
 | Uninstall | Default and purge behavior in isolated homes; external tools and unrelated services are preserved |
@@ -57,14 +61,12 @@ Atlassian, GitHub, or other project services.
 
 `orichum doctor` currently reports:
 
-- Graphify package/skill drift (`0.9.27` package, `0.9.23` separately
-  installed global skill);
 - legacy repository-local Graphify outputs;
 - repositories whose older hooks can be reconciled.
 
 These do not affect Orichum's bound Graphify MCP or central graphs. Orichum
-does not silently rewrite unrelated global skills or bulk-change existing
-repositories. Reconcile a repository when you next work in it with:
+does not silently bulk-change existing repositories. Reconcile a repository
+when you next work in it with:
 
 ```bash
 orichum graph .

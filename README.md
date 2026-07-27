@@ -35,7 +35,7 @@ Orichum supports macOS, Linux with a systemd user manager, and WSL2 with
 systemd enabled.
 
 ```bash
-git clone https://github.com/arvind9981/claudex-workflow.git orichum
+git clone https://github.com/orichum/claudex-workflow.git orichum
 cd orichum
 ./install.sh
 ```
@@ -46,6 +46,10 @@ Use `./install.sh --upgrade` when you want Orichum to check upstream releases,
 upgrade managed tools, run their complete probes, and finish with the full
 doctor check. See [Installation and upgrades](docs/installation.md) for
 details, locations, port handling, and uninstall options.
+
+Check the installed Orichum release with `orichum --version`. See the
+[Changelog](CHANGELOG.md) for release history and current release-candidate
+limitations.
 
 To remove the Orichum runtime while keeping accounts, sessions, project
 configuration, graphs, and Mempalace palaces for a later reinstall:
@@ -62,41 +66,17 @@ remove Orichum's saved configuration and data.
 This walkthrough creates the smallest useful setup: one provider, one named
 account, one model stack, and one project.
 
-### 1. Connect one provider
+### 1. Connect one provider account
 
-Choose the provider you want to use first. This example authenticates a Claude
-account through CLIProxyAPI:
-
-```bash
-orichum provider login claude
-```
-
-Other supported login types include `codex`, `antigravity`, and `kimi`.
-
-### 2. Register the account
-
-The login creates a credential file inside Orichum's private auth directory.
-Find the data directory with:
+Start the provider wizard:
 
 ```bash
-orichum config paths
+orichum provider configure
 ```
 
-Look inside its `auth` directory and use the credential **filename**, not its
-contents or full path, in the next command:
-
-```bash
-orichum provider account add \
-  "Personal Claude" anthropic CREDENTIAL_FILE shared --priority primary
-```
-
-In this command:
-
-- `Personal Claude` is the name shown in Orichum.
-- `anthropic` is the configured provider.
-- `CREDENTIAL_FILE` is the filename created by the login.
-- `shared` is the account pool available to projects.
-- `primary` gives this account first priority.
+Choose the provider, complete its CLIProxyAPI login, then name the account and
+select its pool and priority. Orichum detects the new private credential and
+registers it without asking you to find or copy a credential filename.
 
 Confirm that the account is active:
 
@@ -107,7 +87,7 @@ orichum provider accounts
 See [Providers and accounts](docs/providers-and-accounts.md) for other
 providers and account-management commands.
 
-### 3. Create a model stack
+### 2. Create a model stack
 
 A stack assigns live models to the main controller and optional specialist
 roles. Start the interactive wizard:
@@ -130,7 +110,7 @@ orichum stack show STACK
 See [Model stacks](docs/model-stacks.md) for provider locks, account policies,
 and role behavior.
 
-### 4. Add a project
+### 3. Add a project
 
 A context tells Orichum which settings belong to a parent directory and every
 repository below it. This example adds `~/projects` using the shared account
@@ -159,7 +139,7 @@ orichum context list
 See [Project contexts](docs/project-contexts.md) for GitHub identities,
 multiple parent directories, repository discovery, and context maintenance.
 
-### 5. Start Orichum
+### 4. Start Orichum
 
 Enter a repository below the configured parent and launch:
 

@@ -2,9 +2,15 @@
 
 ## Supported hosts
 
-- macOS on Apple Silicon or x86-64
-- Linux on arm64 or x86-64 with a systemd user manager
-- WSL2 with systemd enabled
+The release-accepted host configurations are:
+
+- macOS on Apple Silicon (native acceptance)
+- Linux on x86-64 with systemd (native acceptance)
+- WSL2 on x86-64 with systemd (contract acceptance)
+
+The installer also recognizes macOS x86-64 and Linux arm64. Those paths use
+the same guarded installer logic but have not completed native release
+acceptance, so they are best-effort rather than release-gated targets.
 
 Required commands are `bash`, `curl`, `gh`, `git`, `jq`, `python3` 3.10 or
 newer, `rg`, `tar`, `uv`, and Claude Code. Linux and WSL also require `ss`,
@@ -16,7 +22,7 @@ an isolated, uv-managed CPython 3.14.x.
 ## Install
 
 ```bash
-git clone https://github.com/arvind9981/claudex-workflow.git orichum
+git clone https://github.com/orichum/claudex-workflow.git orichum
 cd orichum
 ./install.sh
 ```

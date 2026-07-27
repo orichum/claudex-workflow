@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
+[[ "$(<"$ROOT/VERSION")" == 0.1.0-rc.1 ]]
+rg -Fq '## 0.1.0-rc.1 - 2026-07-27' "$ROOT/CHANGELOG.md"
+rg -Fq 'orichum --version' "$ROOT/docs/cli-reference.md"
+rg -Fq '[Changelog](CHANGELOG.md)' "$ROOT/README.md"
+rg -Fq 'orichum sessions cleanup' \
+  "$ROOT/docs/cli-reference.md" "$ROOT/docs/sessions.md"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-smoke.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
@@ -226,10 +232,32 @@ rg -Fq 'orichum stack available' "$ROOT/docs/model-stacks.md"
 rg -Fq 'orichum stack configure' "$ROOT/docs/model-stacks.md"
 rg -Fq 'orichum stack list' "$ROOT/docs/model-stacks.md"
 rg -Fq 'orichum stack show STACK' "$ROOT/docs/model-stacks.md"
+rg -Fq 'orichum provider configure' \
+  "$ROOT/README.md" \
+  "$ROOT/docs/providers-and-accounts.md" \
+  "$ROOT/docs/cli-reference.md"
 rg -Fq 'TARGET_STACK' "$ROOT/docs/sessions.md"
 if rg -Fq 'claude-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md || \
    rg -Fq 'google-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md; then
   printf 'documentation references model stacks that are not configured\n' >&2
+  exit 1
+fi
+rg -Fq 'https://github.com/orichum/claudex-workflow.git' \
+  "$ROOT/README.md" "$ROOT/docs/installation.md"
+if rg -Fq 'https://github.com/arvind9981/claudex-workflow.git' \
+    "$ROOT/README.md" "$ROOT/docs/installation.md"; then
+  printf 'documentation still uses the pre-organization repository URL\n' >&2
+  exit 1
+fi
+rg -Fq 'macOS on Apple Silicon (native acceptance)' \
+  "$ROOT/docs/installation.md"
+rg -Fq 'Linux on x86-64 with systemd (native acceptance)' \
+  "$ROOT/docs/installation.md"
+rg -Fq 'WSL2 on x86-64 with systemd (contract acceptance)' \
+  "$ROOT/docs/installation.md"
+if rg -Fq 'macOS on Apple Silicon or x86-64' \
+    "$ROOT/docs/installation.md"; then
+  printf 'installation guide overstates native platform acceptance\n' >&2
   exit 1
 fi
 [[ "$(rg -c -- '--max-time 4' \
@@ -248,7 +276,10 @@ rg -Fq 'central Graphify storage is private' "$ROOT/doctor.sh"
 rg -Fq 'graphify_doctor_diagnostics' "$ROOT/doctor.sh"
 rg -Fq 'repository-local legacy Graphify outputs' \
   "$ROOT/lib/workflow.sh"
-rg -Fq 'Graphify package/skill drift' "$ROOT/lib/workflow.sh"
+if rg -Fq 'Graphify package/skill drift' "$ROOT/lib/workflow.sh"; then
+  printf 'doctor still compares Graphify package and skill versions\n' >&2
+  exit 1
+fi
 [[ ! -e "$ROOT/controller/plugin/scripts/ensure-graphify-hook.py" ]]
 "$system_python" -I -B - "$ROOT" <<'PY'
 import sys

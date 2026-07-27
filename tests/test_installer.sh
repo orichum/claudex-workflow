@@ -603,14 +603,9 @@ done
 
 doctor_project="$fixture/doctor-project"
 doctor_config="$fixture/doctor-config"
-doctor_bin="$fixture/doctor-bin"
-install -d -m 0700 "$doctor_project" "$doctor_config" "$doctor_bin"
+install -d -m 0700 "$doctor_project" "$doctor_config"
 git -C "$doctor_project" init -q
 install -d -m 0700 "$doctor_project/graphify-out"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'printf "graphifyy 2.0.0\n"' >"$doctor_bin/graphify"
-chmod 0755 "$doctor_bin/graphify"
 printf '1.9.0\n' \
   >"$skill_home/.agents/skills/graphify/.graphify_version"
 python3 - "$doctor_config/projects.json" "$doctor_project" <<'PY'
@@ -628,11 +623,12 @@ with open(sys.argv[1], "w", encoding="utf-8") as stream:
 PY
 doctor_graph_output="$(
   HOME="$skill_home" graphify_doctor_diagnostics \
-    "$graph_data" "$doctor_config" "$ROOT" "$(command -v python3)" \
-    "$doctor_bin/graphify"
+    "$graph_data" "$doctor_config" "$ROOT" "$(command -v python3)"
 )"
-rg -Fq 'Graphify package/skill drift: 2.0.0 != 1.9.0' \
-  <<<"$doctor_graph_output"
+if rg -Fq 'Graphify package/skill drift' <<<"$doctor_graph_output"; then
+  printf 'doctor compared the managed package with a global skill version\n' >&2
+  exit 1
+fi
 rg -Fq 'repository-local legacy Graphify outputs: 1' \
   <<<"$doctor_graph_output"
 rg -Fq 'repository graph hooks need reconciliation: 1' \
@@ -1432,7 +1428,8 @@ if rg -Fq 'anthropic_proxy.py' "$ROOT/install.sh"; then
   printf 'route runtime fingerprint references a nonexistent legacy module\n' >&2
   exit 1
 fi
-rg -Fq 'root.glob("*.py")' "$ROOT/install.sh"
+rg -Fq '(root / "integrations" / "common").glob("*.py")' \
+  "$ROOT/install.sh"
 
 rg -Fq 'export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"' \
   "$ROOT/install.sh"

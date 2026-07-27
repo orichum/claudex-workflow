@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import socket
 import stat
 from typing import Collection, Mapping, Sequence
 from types import MappingProxyType
@@ -41,6 +43,7 @@ _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _UPSTREAM = re.compile(
     r"oc-r-[a-f0-9]{16}/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}"
 )
+_RUN_ID = re.compile(r"run\.[A-Za-z0-9_]{1,64}")
 
 
 class LogicalSessionError(RuntimeError):
@@ -71,6 +74,12 @@ class ResolvedSessionPlan:
     controller: RouteBinding
     agents: Mapping[str, RouteBinding]
     effective: EffectiveStack
+
+
+@dataclass(frozen=True)
+class PhysicalRunCleanup:
+    run_id: str
+    status: str
 
 
 def _require_private_directory(path: Path, label: str) -> Path:
@@ -637,3 +646,114 @@ def list_logical_sessions(state_home: Path) -> tuple[LogicalSession, ...]:
     names.sort()
     sessions = tuple(load_logical_session(state_home, name) for name in names)
     return tuple(sorted(sessions, key=lambda item: (item.created_at, item.id)))
+
+
+def _port_is_live(port: int) -> bool:
+    try:
+        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+    except OSError:
+        return False
+    connection.close()
+    return True
+
+
+def _run_port(run_dir: Path) -> int | None:
+    path = run_dir / "claudex-proxy-port"
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as failure:
+        raise LogicalSessionError("physical session port is unavailable") from failure
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) != 0o600
+        or observed.st_size > 16
+    ):
+        raise LogicalSessionError("physical session port file is unsafe")
+    try:
+        value = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as failure:
+        raise LogicalSessionError("physical session port is unavailable") from failure
+    if not value.isdigit() or not 1 <= int(value) <= 65535:
+        raise LogicalSessionError("physical session port is invalid")
+    return int(value)
+
+
+def cleanup_physical_runs(
+    state_home: Path,
+    *,
+    older_than_days: int,
+    apply: bool,
+    now: float | None = None,
+) -> tuple[PhysicalRunCleanup, ...]:
+    """Preview or remove inactive physical runs without touching logical sessions."""
+    if type(older_than_days) is not int or older_than_days < 1:
+        raise LogicalSessionError("older-than days must be a positive integer")
+    state = _require_private_directory(Path(state_home), "Orichum state directory")
+    sessions = state / "sessions"
+    try:
+        os.lstat(sessions)
+    except FileNotFoundError:
+        return ()
+    except OSError as failure:
+        raise LogicalSessionError(
+            "physical session directory is unavailable"
+        ) from failure
+    sessions = _require_private_directory(
+        sessions, "physical session directory"
+    )
+    cutoff = (
+        datetime.now(tz=timezone.utc).timestamp() if now is None else float(now)
+    ) - older_than_days * 86_400
+    selected: list[PhysicalRunCleanup] = []
+    try:
+        entries = tuple(os.scandir(sessions))
+    except OSError as failure:
+        raise LogicalSessionError(
+            "physical sessions could not be listed"
+        ) from failure
+    for entry in sorted(entries, key=lambda item: item.name):
+        if not _RUN_ID.fullmatch(entry.name) or not entry.is_dir(
+            follow_symlinks=False
+        ):
+            raise LogicalSessionError(
+                "physical session directory contains an unexpected entry"
+            )
+        run_dir = _require_private_directory(
+            sessions / entry.name, "physical session"
+        )
+        manifest = run_dir / ".complete"
+        try:
+            observed = os.lstat(manifest)
+        except FileNotFoundError:
+            continue
+        except OSError as failure:
+            raise LogicalSessionError(
+                "physical session manifest is unavailable"
+            ) from failure
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or stat.S_IMODE(observed.st_mode) != 0o600
+        ):
+            raise LogicalSessionError("physical session manifest is unsafe")
+        if observed.st_mtime > cutoff:
+            continue
+        port = _run_port(run_dir)
+        if port is not None and _port_is_live(port):
+            continue
+        status = "eligible"
+        if apply:
+            try:
+                shutil.rmtree(run_dir)
+            except OSError as failure:
+                raise LogicalSessionError(
+                    f"physical session {entry.name} could not be removed"
+                ) from failure
+            status = "removed"
+        selected.append(PhysicalRunCleanup(entry.name, status))
+    return tuple(selected)

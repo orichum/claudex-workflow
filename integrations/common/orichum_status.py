@@ -33,7 +33,11 @@ _QUOTA_CACHE_SECONDS = 60
 _QUOTA_STALE_SECONDS = 15 * 60
 _QUOTA_TIMEOUT_SECONDS = 2
 _CODEX_WINDOWS = {18000: "five_hour", 604800: "seven_day"}
-_CREDENTIAL_PROVIDER = {"anthropic": "claude", "openai": "codex"}
+_CREDENTIAL_PROVIDER = {
+    "anthropic": "claude",
+    "kimi": "kimi",
+    "openai": "codex",
+}
 
 
 def _text(value: object, fallback: str) -> str:
@@ -85,6 +89,31 @@ def _percentage_number(value: object) -> float | None:
     return number if math.isfinite(number) and 0 <= number <= 100 else None
 
 
+def _used_percentage(value: object) -> float | None:
+    if not isinstance(value, Mapping):
+        return None
+    used = value.get("used")
+    limit = value.get("limit")
+    remaining = value.get("remaining")
+    if type(limit) not in (int, float):
+        return None
+    limit_number = float(limit)
+    if type(used) in (int, float):
+        used_number = float(used)
+    elif type(remaining) in (int, float):
+        used_number = limit_number - float(remaining)
+    else:
+        return None
+    if (
+        not math.isfinite(used_number)
+        or not math.isfinite(limit_number)
+        or used_number < 0
+        or limit_number <= 0
+    ):
+        return None
+    return min(100.0, used_number / limit_number * 100)
+
+
 def _parse_provider_quota(
     provider: str, document: object
 ) -> dict[str, float]:
@@ -98,6 +127,41 @@ def _parse_provider_quota(
                 continue
             percentage = _percentage_number(window.get("utilization"))
             if percentage is not None:
+                windows[key] = percentage
+        return windows
+    if provider == "kimi":
+        percentage = _used_percentage(document.get("usage"))
+        if percentage is not None:
+            windows["seven_day"] = percentage
+        limits = document.get("limits")
+        if not isinstance(limits, list):
+            return windows
+        for limit in limits:
+            if not isinstance(limit, Mapping):
+                continue
+            detail = limit.get("detail")
+            detail = detail if isinstance(detail, Mapping) else limit
+            window = limit.get("window")
+            window = window if isinstance(window, Mapping) else limit
+            duration = window.get("duration")
+            unit = window.get("timeUnit")
+            if type(duration) is not int or not isinstance(unit, str):
+                continue
+            normalized_unit = unit.upper()
+            unit_seconds = (
+                60
+                if "MINUTE" in normalized_unit
+                else 3600
+                if "HOUR" in normalized_unit
+                else 86400
+                if "DAY" in normalized_unit
+                else None
+            )
+            percentage = _used_percentage(detail)
+            if unit_seconds is None or percentage is None:
+                continue
+            key = _CODEX_WINDOWS.get(duration * unit_seconds)
+            if key is not None:
                 windows[key] = percentage
         return windows
     if provider != "openai":
@@ -140,6 +204,9 @@ def _request_provider_quota(
         host = "api.anthropic.com"
         path = "/api/oauth/usage"
         headers["anthropic-beta"] = "oauth-2025-04-20"
+    elif account.provider == "kimi":
+        host = "api.kimi.com"
+        path = "/coding/usages"
     else:
         return {}
     connection = http.client.HTTPSConnection(
