@@ -644,6 +644,10 @@ finalize_config = source.index(
     "finalize_installed_control_plane", activate_config
 )
 doctor = source.index('"$USER_BIN_DIR/orichum" doctor', activate_config)
+runtime_ready = source.index(
+    '"$WORKFLOW_ROOT/bin/orichum-runtime-ready"',
+    activate_config,
+)
 publish_install_state = source.index(
     'write "$install_state_path" "$install_state_platform"',
     doctor,
@@ -657,6 +661,7 @@ config_inactive = source.index(
 )
 if not (
     activate_config
+    < runtime_ready
     < doctor
     < install_state_active
     < publish_install_state

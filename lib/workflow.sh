@@ -71,6 +71,28 @@ install_state_component_field() {
     '.components[$name][$field]' "$manifest"
 }
 
+print_component_status_table() {
+  (($# == 8)) || return 2
+  local value
+  for value in "$@"; do
+    case "$value" in
+      reused|repaired|upgraded) ;;
+      *) return 2 ;;
+    esac
+  done
+  printf '\n%-20s  %-9s\n' COMPONENT STATUS
+  printf '%-20s  %-9s\n' '--------------------' '---------'
+  printf '%-20s  %-9s\n' \
+    Python "$1" \
+    CLIProxyAPI "$2" \
+    Claudex "$3" \
+    LeanCTX "$4" \
+    Mempalace "$5" \
+    Graphify "$6" \
+    Routing "$7" \
+    'Controller plugin' "$8"
+}
+
 linux_environment_kind() {
   local osrelease_path="${1:-/proc/sys/kernel/osrelease}"
   if rg -qi microsoft "$osrelease_path" 2>/dev/null; then
@@ -2196,6 +2218,56 @@ private_tool_layout_is_owned() {
   [[ "$tools_physical" == "$data_physical/tools" ]] && \
     [[ "$tool_physical" == "$data_physical/tools/uv" ]] && \
     [[ "$bin_physical" == "$data_physical/tools/bin" ]]
+}
+
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+private_uv_tool_identity() {
+  local data_root="$1"
+  local environment="$2"
+  local distribution="$3"
+  shift 3
+  local tool_dir="$data_root/tools/uv"
+  local bin_dir="$data_root/tools/bin"
+  local environment_dir="$tool_dir/$environment"
+  local environment_bin="$environment_dir/bin"
+  local entrypoint link_path target_path target_mode version payload=
+  local current_uid
+  private_tool_layout_is_owned \
+    "$data_root" "$tool_dir" "$bin_dir" || return 1
+  current_uid="$(id -u)"
+  [[ -d "$environment_dir" && ! -L "$environment_dir" && \
+     -d "$environment_bin" && ! -L "$environment_bin" && \
+     "$(path_uid "$environment_dir")" == "$current_uid" && \
+     "$(path_uid "$environment_bin")" == "$current_uid" ]] || return 1
+  version="$(
+    "$environment_bin/python" -I -B -c \
+      'import importlib.metadata,sys; print(importlib.metadata.version(sys.argv[1]))' \
+      "$distribution"
+  )" || return 1
+  [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || return 1
+  (($# > 0)) || return 1
+  for entrypoint in "$@"; do
+    [[ "$entrypoint" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+    link_path="$bin_dir/$entrypoint"
+    [[ -L "$link_path" && "$(path_uid "$link_path")" == "$current_uid" ]] || \
+      return 1
+    target_path="$(workflow_physical_path "$link_path")" || return 1
+    [[ "$target_path" == "$environment_bin/$entrypoint" && \
+       -f "$target_path" && ! -L "$target_path" && \
+       -x "$target_path" && \
+       "$(path_uid "$target_path")" == "$current_uid" ]] || return 1
+    target_mode="$(path_mode "$target_path")" || return 1
+    (( (8#$target_mode & 0022) == 0 )) || return 1
+    payload+="$entrypoint:$(sha256_file "$target_path")"$'\n'
+  done
+  printf '%s\t%s\n' "$version" "$(printf '%s' "$payload" | sha256_text)"
 }
 
 migrate_legacy_private_tools() (

@@ -322,6 +322,50 @@ leanctx_probe_sha="$(
     integrations/common/mcp_probe.py
 )" || workflow_die "LeanCTX probe fingerprint failed"
 empty_artifact_sha="$(printf '0%.0s' {1..64})"
+plugin_paths=()
+while IFS= read -r plugin_path; do
+  plugin_paths+=("$plugin_path")
+done < <(
+  git -C "$WORKFLOW_ROOT" ls-files \
+    controller/plugin config/plugins.json | LC_ALL=C sort
+)
+((${#plugin_paths[@]} > 1)) || \
+  workflow_die "controller plugin fingerprint inputs are missing"
+controller_plugin_input_sha="$(
+  install_contract_fingerprint "${plugin_paths[@]}"
+)" || workflow_die "controller plugin input fingerprint failed"
+controller_plugin_probe_sha="$(
+  install_contract_fingerprint \
+    bin/orichum-plugin controller/plugin/hooks/hooks.json
+)" || workflow_die "controller plugin probe fingerprint failed"
+mempalace_input_sha="$(
+  printf 'pypi:mempalace\n' | sha256_text
+)"
+mempalace_probe_sha="$(
+  printf '%s\n' \
+    "$(sha256_file "$WORKFLOW_ROOT/integrations/common/mcp_probe.py")" \
+    mempalace_get_taxonomy mempalace_search mempalace_checkpoint | \
+    sha256_text
+)"
+graphify_input_sha="$(
+  printf 'pypi:graphifyy[mcp,terraform]\n' | sha256_text
+)"
+graphify_probe_sha="$(
+  printf '%s\n' \
+    "$(sha256_file "$WORKFLOW_ROOT/integrations/common/mcp_probe.py")" \
+    "$(sha256_file "$WORKFLOW_ROOT/lib/workflow.sh")" \
+    query_graph graph_stats | sha256_text
+)"
+controller_plugin_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  controller_plugin_decision="$(
+    decide_install_component \
+      "$prior_install_state" controllerPlugin \
+      1 orichum:controller-plugin \
+      "$controller_plugin_input_sha" \
+      "$controller_plugin_input_sha" "$controller_plugin_probe_sha"
+  )"
+fi
 
 while IFS= read -r configured_palace; do
   case "$configured_palace" in
@@ -332,13 +376,16 @@ while IFS= read -r configured_palace; do
   install -d -m 0700 "$resolved_palace"
 done < <(jq -er '.contexts[].memoryPalace' "$WORKFLOW_ROOT/config/projects.json")
 
-validation_config="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin.XXXXXX")"
-register_cleanup_path "$validation_config"
-chmod 0700 "$validation_config"
-CLAUDE_CONFIG_DIR="$validation_config" \
-  claude plugin validate --strict "$WORKFLOW_ROOT/controller/plugin" >/dev/null || \
-  workflow_die "controller plugin validation failed"
-rm -rf -- "$validation_config"
+if [[ "$controller_plugin_decision" != reused ]]; then
+  validation_config="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin.XXXXXX")"
+  register_cleanup_path "$validation_config"
+  chmod 0700 "$validation_config"
+  CLAUDE_CONFIG_DIR="$validation_config" \
+    claude plugin validate --strict \
+      "$WORKFLOW_ROOT/controller/plugin" >/dev/null || \
+    workflow_die "controller plugin validation failed"
+  rm -rf -- "$validation_config"
+fi
 
 install -d -m 0755 "$USER_BIN_DIR"
 install -d -m 0700 "$WORKFLOW_DATA_ROOT"
@@ -1389,38 +1436,220 @@ if [[ -n "$prior_model_generation" ]]; then
     workflow_die "prior model configuration could not be snapshotted"
 fi
 
-private_tools_transaction_active=true
-uv tool install --upgrade mempalace
-if ! mempalace_mcp="$(command -v mempalace-mcp)"; then
-  workflow_die "Mempalace installation did not provide mempalace-mcp"
+routing_probe_sha="$(
+  install_contract_fingerprint \
+    discover-models.sh integrations/common/model_routing.py \
+    integrations/common/route_proxy.py
+)" || workflow_die "routing probe fingerprint failed"
+routing_input_descriptor="$installer_temp/routing-input"
+cliproxy_desired_artifact="$(
+  if [[ "$cliproxy_binary_changed" == true ]]; then
+    sha256_file "$(jq -r '.staged_path' <<<"$cliproxy_state")"
+  else
+    sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"
+  fi
+)"
+claudex_desired_artifact="$(
+  if [[ "$claudex_binary_changed" == true ]]; then
+    sha256_file "$(jq -r '.staged_path' <<<"$claudex_state")"
+  else
+    sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex"
+  fi
+)"
+{
+  printf 'cliproxy=%s\n' "$cliproxy_desired_artifact"
+  printf 'claudex=%s\n' "$claudex_desired_artifact"
+  for routing_input in \
+      "$WORKFLOW_ROOT/config/providers.json" \
+      "$WORKFLOW_ROOT/config/runtime.json" \
+      "$WORKFLOW_ROOT/config/model-stacks.json" \
+      "$candidate_config_root/accounts.json" \
+      "$desired_cliproxy_config" \
+      "$desired_service_file" \
+      "$claudex_proxy_desired_service_file"; do
+    printf '%s\n' "$(sha256_file "$routing_input")"
+  done
+  printf 'ports=%s,%s,%s\n' \
+    "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT"
+} >"$routing_input_descriptor"
+chmod 0600 "$routing_input_descriptor"
+routing_input_sha="$(sha256_file "$routing_input_descriptor")"
+
+routing_runtime_artifact() {
+  local artifact_descriptor="$installer_temp/routing-artifact"
+  local active_claudex active_models active_effective active_path
+  active_claudex="$(model_config_file \
+    "$WORKFLOW_DATA_ROOT" claudex.toml)"
+  active_models="$(model_config_file "$WORKFLOW_DATA_ROOT" models.json)"
+  active_effective="$(model_config_file \
+    "$WORKFLOW_DATA_ROOT" effective-models.json)"
+  for active_path in \
+      "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
+      "$service_file" "$claudex_proxy_service_file" \
+      "$active_claudex" "$active_models" "$active_effective"; do
+    [[ -f "$active_path" && ! -L "$active_path" ]] || return 1
+  done
+  {
+    for active_path in \
+        "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
+        "$service_file" "$claudex_proxy_service_file" \
+        "$active_claudex" "$active_models" "$active_effective"; do
+      printf '%s\n' "$(sha256_file "$active_path")"
+    done
+  } >"$artifact_descriptor"
+  chmod 0600 "$artifact_descriptor"
+  sha256_file "$artifact_descriptor"
+}
+routing_current_artifact="$empty_artifact_sha"
+if observed_routing_artifact="$(routing_runtime_artifact 2>/dev/null)"; then
+  routing_current_artifact="$observed_routing_artifact"
 fi
-install -d -m 0700 "$installer_temp/mempalace-probe"
-if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
-  "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
-  --timeout 30 \
-  --require-tool mempalace_get_taxonomy \
-  --require-tool mempalace_search \
-  --require-tool mempalace_checkpoint \
-  -- "$mempalace_mcp" --palace "$installer_temp/mempalace-probe"; then
-  workflow_die "Mempalace MCP failed protocol readiness checks"
+routing_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  routing_decision="$(
+    decide_install_component \
+      "$prior_install_state" routing \
+      1 orichum:routing "$routing_current_artifact" \
+      "$routing_input_sha" "$routing_probe_sha"
+  )"
+  if [[ "$routing_decision" == reused && \
+        ( "$cliproxy_listener_owned" != true || \
+          "$cliproxy_ready_before" != true || \
+          "$claudex_proxy_listener_owned" != true ) ]]; then
+    routing_decision=repaired
+  fi
 fi
 
-uv tool install --upgrade 'graphifyy[mcp,terraform]'
-if ! graphify_binary="$(command -v graphify)"; then
-  workflow_die "Graphify installation did not provide graphify"
+mempalace_recorded_version=
+mempalace_recorded_artifact="$empty_artifact_sha"
+mempalace_current_version=
+mempalace_current_artifact="$empty_artifact_sha"
+mempalace_decision=upgraded
+graphify_recorded_version=
+graphify_recorded_artifact="$empty_artifact_sha"
+graphify_current_version=
+graphify_current_artifact="$empty_artifact_sha"
+graphify_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  mempalace_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" mempalace version 2>/dev/null || true
+  )"
+  mempalace_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" mempalace artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if mempalace_identity="$(
+      private_uv_tool_identity \
+        "$WORKFLOW_DATA_ROOT" mempalace mempalace \
+        mempalace mempalace-mcp 2>/dev/null
+    )"; then
+    IFS=$'\t' read -r \
+      mempalace_current_version mempalace_current_artifact \
+      <<<"$mempalace_identity"
+  fi
+  mempalace_decision="$(
+    decide_install_component \
+      "$prior_install_state" mempalace \
+      "$mempalace_recorded_version" \
+      "pypi:mempalace@$mempalace_recorded_version" \
+      "$mempalace_current_artifact" \
+      "$mempalace_input_sha" "$mempalace_probe_sha"
+  )"
+
+  graphify_recorded_version="$(
+    install_state_component_field \
+      "$prior_install_state" graphify version 2>/dev/null || true
+  )"
+  graphify_recorded_artifact="$(
+    install_state_component_field \
+      "$prior_install_state" graphify artifactSha256 2>/dev/null || \
+      printf '%s' "$empty_artifact_sha"
+  )"
+  if graphify_identity="$(
+      private_uv_tool_identity \
+        "$WORKFLOW_DATA_ROOT" graphifyy graphifyy \
+        graphify graphify-mcp 2>/dev/null
+    )"; then
+    IFS=$'\t' read -r graphify_current_version graphify_current_artifact \
+      <<<"$graphify_identity"
+  fi
+  graphify_decision="$(
+    decide_install_component \
+      "$prior_install_state" graphify \
+      "$graphify_recorded_version" \
+      "pypi:graphifyy[mcp,terraform]@$graphify_recorded_version" \
+      "$graphify_current_artifact" \
+      "$graphify_input_sha" "$graphify_probe_sha"
+  )"
 fi
-if ! graphify_mcp="$(command -v graphify-mcp)"; then
-  workflow_die "Graphify installation did not provide graphify-mcp"
+
+if [[ "$mempalace_decision" == upgraded ]]; then
+  private_tools_transaction_active=true
+  uv tool install --upgrade mempalace
+elif [[ "$mempalace_decision" == repaired && \
+        ( "$mempalace_current_version" != "$mempalace_recorded_version" || \
+          "$mempalace_current_artifact" != \
+            "$mempalace_recorded_artifact" ) ]]; then
+  private_tools_transaction_active=true
+  uv tool install --force "mempalace==$mempalace_recorded_version"
 fi
-reconcile_graphify_storage \
-  "$WORKFLOW_DATA_ROOT" "$graphify_binary" "$graphify_mcp" \
-  "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$installer_temp" || \
-  workflow_die \
-    "Graphify failed absolute-output, extract, update, or MCP capability checks"
-graphify_doctor_diagnostics \
-  "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_ROOT" \
-  "$ORICHUM_PYTHON" "$graphify_binary" || \
-  printf 'NOTICE: repository graph upgrade diagnostics were unavailable\n' >&2
+mempalace_identity="$(
+  private_uv_tool_identity \
+    "$WORKFLOW_DATA_ROOT" mempalace mempalace \
+    mempalace mempalace-mcp
+)" || workflow_die "Mempalace private installation is unsafe"
+IFS=$'\t' read -r mempalace_version mempalace_artifact \
+  <<<"$mempalace_identity"
+mempalace_mcp="$UV_TOOL_BIN_DIR/mempalace-mcp"
+if [[ "$mempalace_decision" != reused ]]; then
+  install -d -m 0700 "$installer_temp/mempalace-probe"
+  if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
+    "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+    --timeout 30 \
+    --require-tool mempalace_get_taxonomy \
+    --require-tool mempalace_search \
+    --require-tool mempalace_checkpoint \
+    -- "$mempalace_mcp" --palace "$installer_temp/mempalace-probe"; then
+    workflow_die "Mempalace MCP failed protocol readiness checks"
+  fi
+fi
+
+if [[ "$graphify_decision" == upgraded ]]; then
+  private_tools_transaction_active=true
+  uv tool install --upgrade 'graphifyy[mcp,terraform]'
+elif [[ "$graphify_decision" == repaired && \
+        ( "$graphify_current_version" != "$graphify_recorded_version" || \
+          "$graphify_current_artifact" != "$graphify_recorded_artifact" ) ]]; then
+  private_tools_transaction_active=true
+  uv tool install --force \
+    "graphifyy[mcp,terraform]==$graphify_recorded_version"
+fi
+graphify_identity="$(
+  private_uv_tool_identity \
+    "$WORKFLOW_DATA_ROOT" graphifyy graphifyy \
+    graphify graphify-mcp
+)" || workflow_die "Graphify private installation is unsafe"
+IFS=$'\t' read -r graphify_version graphify_artifact \
+  <<<"$graphify_identity"
+graphify_binary="$UV_TOOL_BIN_DIR/graphify"
+graphify_mcp="$UV_TOOL_BIN_DIR/graphify-mcp"
+if [[ "$graphify_decision" != reused ]]; then
+  reconcile_graphify_storage \
+    "$WORKFLOW_DATA_ROOT" "$graphify_binary" "$graphify_mcp" \
+    "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$installer_temp" || \
+    workflow_die \
+      "Graphify failed absolute-output, extract, update, or MCP capability checks"
+fi
+if [[ "$INSTALL_MODE" == upgrade || \
+      "$prior_install_state_verified" != true ]]; then
+  graphify_doctor_diagnostics \
+    "$WORKFLOW_DATA_ROOT" "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_ROOT" \
+    "$ORICHUM_PYTHON" "$graphify_binary" || \
+    printf 'NOTICE: repository graph upgrade diagnostics were unavailable\n' \
+      >&2
+fi
 
 preflight_claudex_proxy() (
   local preflight_port preflight_pid= preflight_ready=false
@@ -1609,10 +1838,15 @@ done
 
 source "$WORKFLOW_ROOT/discover-models.sh"
 model_discovery_succeeded=true
+model_discovery_performed=false
+routing_action="$routing_decision"
 discovery_entrypoint=discover_models_main_core
 model_discovery_status=0
-CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint" || \
-  model_discovery_status=$?
+if [[ "$routing_decision" != reused ]]; then
+  model_discovery_performed=true
+  CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint" || \
+    model_discovery_status=$?
+fi
 if [[ "$model_discovery_status" -ne 0 ]]; then
   model_discovery_succeeded=false
   if [[ -z "$prior_model_generation" ]] && \
@@ -1627,6 +1861,7 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
        [[ "$claudex_proxy_service_changed" == unchanged ]] && \
        [[ "$claudex_proxy_listener_owned" == true ]]; then
     printf 'WARNING: model discovery failed; unchanged healthy proxy state was retained.\n' >&2
+    routing_action=reused
   else
     workflow_die \
       "model discovery failed while persistent proxy reconciliation was required"
@@ -1760,11 +1995,20 @@ verify_committed_control_plane \
   workflow_die "committed Orichum control plane is invalid"
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
-ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
-ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
-  "$WORKFLOW_ROOT/bin/orichum-plugin" sync || \
-  workflow_die \
-    "services are healthy, but declared Claude plugins could not be synchronized; rerun the installer after correcting the plugin error"
+if [[ "$controller_plugin_decision" != reused ]]; then
+  ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
+  ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT/bin/orichum-plugin" sync || \
+    workflow_die \
+      "services are healthy, but declared Claude plugins could not be synchronized; rerun the installer after correcting the plugin error"
+fi
+if [[ "$claudex_proxy_action" != pending-provider-login ]]; then
+  ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
+  ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT/bin/orichum-runtime-ready" \
+      "$WORKFLOW_DATA_ROOT" || \
+    workflow_die "focused Orichum runtime readiness failed"
+fi
 install_state_prior_components="$installer_temp/prior-components.json"
 if [[ "$prior_install_state_verified" == true ]]; then
   jq -e '.components' "$prior_install_state" \
@@ -1799,6 +2043,16 @@ jq -n \
     "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/lean-ctx")" \
   --arg leanctx_input "$leanctx_input_sha" \
   --arg leanctx_probe "$leanctx_probe_sha" \
+  --arg mempalace_version "$mempalace_version" \
+  --arg mempalace_artifact "$mempalace_artifact" \
+  --arg mempalace_input "$mempalace_input_sha" \
+  --arg mempalace_probe "$mempalace_probe_sha" \
+  --arg graphify_version "$graphify_version" \
+  --arg graphify_artifact "$graphify_artifact" \
+  --arg graphify_input "$graphify_input_sha" \
+  --arg graphify_probe "$graphify_probe_sha" \
+  --arg controller_plugin_input "$controller_plugin_input_sha" \
+  --arg controller_plugin_probe "$controller_plugin_probe_sha" \
   '$prior[0] + {
     python: {
       version: $python_version,
@@ -1829,10 +2083,52 @@ jq -n \
       artifactSha256: $leanctx_artifact,
       inputSha256: $leanctx_input,
       probeSha256: $leanctx_probe
+    },
+    mempalace: {
+      version: $mempalace_version,
+      sourceIdentity: ("pypi:mempalace@" + $mempalace_version),
+      artifactSha256: $mempalace_artifact,
+      inputSha256: $mempalace_input,
+      probeSha256: $mempalace_probe
+    },
+    graphify: {
+      version: $graphify_version,
+      sourceIdentity: (
+        "pypi:graphifyy[mcp,terraform]@" + $graphify_version
+      ),
+      artifactSha256: $graphify_artifact,
+      inputSha256: $graphify_input,
+      probeSha256: $graphify_probe
+    },
+    controllerPlugin: {
+      version: "1",
+      sourceIdentity: "orichum:controller-plugin",
+      artifactSha256: $controller_plugin_input,
+      inputSha256: $controller_plugin_input,
+      probeSha256: $controller_plugin_probe
     }
   }' >"$install_state_components" || \
   workflow_die "candidate installer state could not be built"
 chmod 0600 "$install_state_components"
+if [[ "$model_discovery_succeeded" == true ]]; then
+  routing_verified_artifact="$(routing_runtime_artifact)" || \
+    workflow_die "verified routing artifact could not be fingerprinted"
+  routing_state_candidate="$installer_temp/routing-state-components.json"
+  jq \
+    --arg artifact "$routing_verified_artifact" \
+    --arg input "$routing_input_sha" \
+    --arg probe "$routing_probe_sha" \
+    '.routing = {
+      version: "1",
+      sourceIdentity: "orichum:routing",
+      artifactSha256: $artifact,
+      inputSha256: $input,
+      probeSha256: $probe
+    }' "$install_state_components" >"$routing_state_candidate" || \
+    workflow_die "candidate routing state could not be built"
+  chmod 0600 "$routing_state_candidate"
+  mv -f "$routing_state_candidate" "$install_state_components"
+fi
 if [[ "$model_discovery_succeeded" == true ]]; then
   prune_model_config_generations "$WORKFLOW_DATA_ROOT" || \
     printf 'WARNING: stale model configuration could not be pruned.\n' >&2
@@ -1845,6 +2141,11 @@ if [[ "$cliproxy_restart_required" == true ]]; then
     cliproxy_action=installed
   fi
 fi
+print_component_status_table \
+  "$python_decision" "$cliproxy_decision" "$claudex_decision" \
+  "$leanctx_decision" "$mempalace_decision" "$graphify_decision" \
+  "$routing_action" "$controller_plugin_decision" || \
+  workflow_die "component reconciliation status is invalid"
 printf 'Installed Orichum with Claudex %s, CLIProxyAPI %s, and LeanCTX %s for %s.\n' \
   "$claudex_version" "$cliproxy_version" "$leanctx_version" "$platform"
 print_install_summary \
@@ -1862,11 +2163,14 @@ print_install_summary \
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$WORKFLOW_ROOT"
-else
+elif [[ "$INSTALL_MODE" == upgrade || \
+        "$prior_install_state_verified" != true ]]; then
   printf '\nRunning Orichum doctor...\n'
   ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
   ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
     "$USER_BIN_DIR/orichum" doctor
+else
+  printf '\nFast readiness checks passed.\n'
 fi
 install_state_transaction_active=true
 python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \

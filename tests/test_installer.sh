@@ -77,6 +77,17 @@ INSTALL_MODE=upgrade
   github:router-for-me/CLIProxyAPI@v7.2.97 \
   "$matching_digest" "$matching_digest" "$matching_digest")" == upgraded ]]
 INSTALL_MODE=fast
+component_table="$(
+  print_component_status_table \
+    reused repaired upgraded reused repaired upgraded reused repaired
+)"
+rg -Fq 'CLIProxyAPI           repaired' <<<"$component_table"
+rg -Fq 'Controller plugin     repaired' <<<"$component_table"
+if print_component_status_table \
+    invalid reused reused reused reused reused reused reused >/dev/null; then
+  printf 'invalid component status was accepted\n' >&2
+  exit 1
+fi
 
 python_data="$fixture/python-data"
 python_root="$python_data/python"
@@ -182,6 +193,48 @@ chmod 0755 "$managed_bin/tool"
 ln -s "$managed_bin/tool" "$managed_bin/tool-link"
 if managed_executable_is_safe "$managed_bin/tool-link"; then
   printf 'managed executable symlink was accepted\n' >&2
+  exit 1
+fi
+
+identity_data="$fixture/private-tool-identity"
+identity_tools="$identity_data/tools/uv"
+identity_bin="$identity_data/tools/bin"
+identity_env="$identity_tools/mempalace"
+install -d -m 0700 "$identity_env/bin" "$identity_bin"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  '[[ "${!#}" == mempalace ]]' \
+  'printf "3.6.0\n"' >"$identity_env/bin/python"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$identity_env/bin/mempalace"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$identity_env/bin/mempalace-mcp"
+chmod 0755 "$identity_env/bin/"*
+ln -s "$identity_env/bin/mempalace" "$identity_bin/mempalace"
+ln -s "$identity_env/bin/mempalace-mcp" "$identity_bin/mempalace-mcp"
+IFS=$'\t' read -r identity_version identity_artifact < <(
+  private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp
+)
+[[ "$identity_version" == 3.6.0 ]]
+[[ "$identity_artifact" =~ ^[a-f0-9]{64}$ ]]
+printf '# changed\n' >>"$identity_env/bin/mempalace-mcp"
+IFS=$'\t' read -r changed_identity_version changed_identity_artifact < <(
+  private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp
+)
+[[ "$changed_identity_version" == 3.6.0 ]]
+[[ "$changed_identity_artifact" != "$identity_artifact" ]]
+external_identity_tool="$fixture/external-identity-tool"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$external_identity_tool"
+chmod 0755 "$external_identity_tool"
+ln -sfn "$external_identity_tool" "$identity_bin/mempalace-mcp"
+if private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp >/dev/null 2>&1; then
+  printf 'private tool entrypoint escape was accepted\n' >&2
   exit 1
 fi
 
