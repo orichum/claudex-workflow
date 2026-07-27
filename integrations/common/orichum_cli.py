@@ -68,6 +68,29 @@ from .stack_bindings import (
     load_stack_bindings,
     stack_binding_transaction,
 )
+
+GRAPHIFY_AUTO_APPROVED_TOOLS = (
+    "get_community",
+    "get_neighbors",
+    "get_node",
+    "get_pr_impact",
+    "god_nodes",
+    "graph_stats",
+    "list_prs",
+    "query_graph",
+    "shortest_path",
+    "triage_prs",
+)
+
+MEMPALACE_AUTO_APPROVED_TOOLS = (
+    "mempalace_diary_read",
+    "mempalace_follow_tunnels",
+    "mempalace_list_drawers",
+    "mempalace_list_hallways",
+    "mempalace_list_rooms",
+    "mempalace_list_tunnels",
+    "mempalace_search",
+)
 from .stack_definition import normalize_model_stacks
 from .stack_catalog import (
     CatalogError,
@@ -1678,8 +1701,14 @@ def _launch_session(
         "--strict-mcp-config",
         "--allowedTools",
         ",".join(
-            f"mcp__leanctx__{tool}"
-            for tool in LEANCTX_AUTO_APPROVED_TOOLS
+            (
+                *(f"mcp__leanctx__{tool}" for tool in LEANCTX_AUTO_APPROVED_TOOLS),
+                *(f"mcp__graphify__{tool}" for tool in GRAPHIFY_AUTO_APPROVED_TOOLS),
+                *(
+                    f"mcp__mempalace__{tool}"
+                    for tool in MEMPALACE_AUTO_APPROVED_TOOLS
+                ),
+            )
         ),
         "--effort",
         runtime["effort"],

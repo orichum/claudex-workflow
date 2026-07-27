@@ -10,14 +10,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import threading
 import time
 from typing import Callable, Mapping
+from urllib.parse import parse_qsl, urlsplit
 
 from .model_routing import ROLES
 from .orichum_sessions import LogicalSessionError
+from .route_selection import Route
+from .route_status import RouteStatusStore
 from .tool_deferral import transform_request
 
 
@@ -38,6 +42,7 @@ _HOP_HEADERS = frozenset(
         "upgrade",
     }
 )
+_LOGICAL_SESSION_ID = re.compile(r"oc-s-[a-f0-9]{16}")
 
 
 class RouteProxyError(RuntimeError):
@@ -60,9 +65,9 @@ class RouteIndex:
     def __init__(self, state_home: Path):
         self.state_home = Path(state_home)
 
-    def fallback_for(
+    def routes_for(
         self, session_id: str | None, primary_model: str
-    ) -> str | None:
+    ) -> tuple[Route, Route | None] | None:
         if session_id is None:
             return None
         from .orichum_sessions import load_logical_session
@@ -72,19 +77,25 @@ class RouteIndex:
             session.controller,
             *(session.agents[role] for role in ROLES),
         )
-        matches = tuple(
-            binding
+        matches = {
+            (
+                binding.primary,
+                binding.fallbacks[0] if binding.fallbacks else None,
+            )
             for binding in bindings
             if binding.primary.upstream_model == primary_model
-        )
-        if not matches:
-            return None
-        fallbacks = {
-            binding.fallbacks[0].upstream_model
-            for binding in matches
-            if binding.fallbacks
         }
-        return next(iter(fallbacks)) if len(fallbacks) == 1 else None
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    def fallback_for(
+        self, session_id: str | None, primary_model: str
+    ) -> str | None:
+        routes = self.routes_for(session_id, primary_model)
+        return (
+            None
+            if routes is None or routes[1] is None
+            else routes[1].upstream_model
+        )
 
 
 class Cooldowns:
@@ -458,30 +469,88 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
 
+    def _status_json(self, status: int, document: dict[str, object]) -> None:
+        body = json.dumps(
+            document, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        self.send_response_only(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _status(self) -> None:
+        parameters = parse_qsl(
+            urlsplit(self.path).query, keep_blank_values=True
+        )
+        if (
+            len(parameters) != 1
+            or parameters[0][0] != "session_id"
+            or not _LOGICAL_SESSION_ID.fullmatch(parameters[0][1])
+        ):
+            self._status_json(400, {"error": "invalid status request"})
+            return
+        status = self.server.route_status_store.get(parameters[0][1])
+        if status is None:
+            self._status_json(404, {"error": "status not found"})
+            return
+        self._status_json(200, status.as_public_json())
+
     def _handle(self) -> None:
         self._response_started = False
         self.connection.settimeout(CLIENT_READ_TIMEOUT_SECONDS)
         try:
             body = _read_request_body(self)
             primary = _request_model(body)
-            session_id = self.headers.get("X-Orichum-Session-ID")
+            supplied_session_id = self.headers.get("X-Orichum-Session-ID")
+            session_id = (
+                supplied_session_id
+                if supplied_session_id is not None
+                and _LOGICAL_SESSION_ID.fullmatch(supplied_session_id)
+                else None
+            )
             index: RouteIndex = self.server.route_index
             cooldowns: Cooldowns = self.server.cooldowns
-            fallback = (
-                index.fallback_for(session_id, primary)
+            status_store: RouteStatusStore = self.server.route_status_store
+            routes = (
+                index.routes_for(session_id, primary)
                 if primary is not None
                 else None
+            )
+            primary_route = None if routes is None else routes[0]
+            fallback_route = None if routes is None else routes[1]
+            fallback = (
+                None
+                if fallback_route is None
+                else fallback_route.upstream_model
             )
             if (
                 primary is not None
                 and fallback is not None
                 and cooldowns.active(primary)
             ):
+                status_store.select(
+                    session_id,
+                    fallback_route,
+                    route_state="fallback",
+                    reason="cooldown",
+                )
                 fallback_body = _replace_model(body, primary, fallback)
                 connection, response = self._candidate_upstream(fallback_body)
+                status_store.complete(session_id, response.status)
                 self._send_response(connection, response)
                 return
 
+            if session_id is not None and primary_route is not None:
+                status_store.select(
+                    session_id,
+                    primary_route,
+                    route_state="primary",
+                    reason="primary",
+                )
             connection, response = self._candidate_upstream(body)
             if (
                 primary is not None
@@ -490,10 +559,18 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             ):
                 connection.close()
                 cooldowns.trip(primary)
+                status_store.select(
+                    session_id,
+                    fallback_route,
+                    route_state="fallback",
+                    reason="retry",
+                )
                 fallback_body = _replace_model(body, primary, fallback)
                 connection, response = self._candidate_upstream(fallback_body)
             elif primary is not None and response.status < 400:
                 cooldowns.clear(primary)
+            if session_id is not None and primary_route is not None:
+                status_store.complete(session_id, response.status)
             self._send_response(connection, response)
         except RequestTooLarge:
             self._safe_error(413, "Orichum request body is too large")
@@ -507,6 +584,8 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self._health()
+        elif urlsplit(self.path).path == "/status":
+            self._status()
         else:
             self._handle()
 
@@ -525,12 +604,14 @@ class RouteProxyServer(ThreadingHTTPServer):
         *,
         route_index: RouteIndex | None = None,
         cooldowns: Cooldowns | None = None,
+        route_status_store: RouteStatusStore | None = None,
     ):
         if address[0] != "127.0.0.1":
             raise RouteProxyError("route proxy must bind to 127.0.0.1")
         self.proxy_config = config
         self.route_index = route_index or RouteIndex(config.state_home)
         self.cooldowns = cooldowns or Cooldowns(config.cooldown_seconds)
+        self.route_status_store = route_status_store or RouteStatusStore()
         self.attestation_gate = AttestationGate(
             ATTESTATION_TTL_SECONDS
         )

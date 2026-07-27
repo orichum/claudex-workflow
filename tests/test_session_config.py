@@ -799,8 +799,8 @@ class SessionConfigTests(unittest.TestCase):
             config.read_text(encoding="utf-8"),
             """compression_level = "lite"
 minimal_overhead = true
-tools_enabled = ["ctx_read", "ctx_delta", "ctx_search", "ctx_glob", "ctx_tree", "ctx_outline", "ctx_explore", "ctx_expand", "ctx_patch", "ctx_shell"]
-disabled_tools = ["ctx_call"]
+tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand", "ctx_patch", "ctx_shell"]
+disabled_tools = ["ctx_call", "ctx_callgraph", "ctx_compose", "ctx_session", "shell"]
 auto_capture = false
 buddy_enabled = false
 enable_wakeup_ctx = false

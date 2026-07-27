@@ -173,7 +173,9 @@ orichum
 Orichum resolves the project, freezes the selected model and account routes,
 prepares only the relevant tools, and opens Claude Code. From this point, talk
 to Claude Code normally; the controller decides when a configured specialist
-is useful.
+is useful. The Orichum status line shows the active model, named account,
+route state, context usage, and available provider limits. See
+[Status line](docs/status-line.md).
 
 If launch fails, start with:
 
@@ -280,6 +282,7 @@ delays, and installer port conflicts.
 | [Model stacks](docs/model-stacks.md) | Interactive model selection, roles, and provider locks |
 | [Project contexts](docs/project-contexts.md) | Directory mappings, identities, Docker profiles, and population |
 | [Sessions](docs/sessions.md) | Start, inspect, resume, fork, and concurrent sessions |
+| [Status line](docs/status-line.md) | Active model, account, failover state, context, and quota metrics |
 | [Routing and failover](docs/routing-and-failover.md) | Route selection, cooldowns, rollover, and handoff boundaries |
 | [Subagents](docs/subagents.md) | Automatic delegation, specialist roles, and the sole-writer policy |
 | [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
@@ -290,6 +293,8 @@ delays, and installer port conflicts.
 | [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
 | [Troubleshooting](docs/troubleshooting.md) | Symptoms, diagnostics, and recovery |
 | [CLI reference](docs/cli-reference.md) | The complete command map |
+| [Release readiness](docs/release-readiness.md) | End-to-end acceptance evidence, supported boundaries, and known notices |
+| [Efficiency and performance](docs/efficiency-and-performance.md) | Measured savings, latency, cost, cache, and resource usage |
 
 ## Built with
 

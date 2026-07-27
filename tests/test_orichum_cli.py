@@ -976,13 +976,26 @@ class OrichumCliTests(unittest.TestCase):
             command[allowed_index + 1],
             ",".join((
                 "mcp__leanctx__ctx_read",
-                "mcp__leanctx__ctx_delta",
                 "mcp__leanctx__ctx_search",
-                "mcp__leanctx__ctx_glob",
                 "mcp__leanctx__ctx_tree",
-                "mcp__leanctx__ctx_outline",
-                "mcp__leanctx__ctx_explore",
                 "mcp__leanctx__ctx_expand",
+                "mcp__graphify__get_community",
+                "mcp__graphify__get_neighbors",
+                "mcp__graphify__get_node",
+                "mcp__graphify__get_pr_impact",
+                "mcp__graphify__god_nodes",
+                "mcp__graphify__graph_stats",
+                "mcp__graphify__list_prs",
+                "mcp__graphify__query_graph",
+                "mcp__graphify__shortest_path",
+                "mcp__graphify__triage_prs",
+                "mcp__mempalace__mempalace_diary_read",
+                "mcp__mempalace__mempalace_follow_tunnels",
+                "mcp__mempalace__mempalace_list_drawers",
+                "mcp__mempalace__mempalace_list_hallways",
+                "mcp__mempalace__mempalace_list_rooms",
+                "mcp__mempalace__mempalace_list_tunnels",
+                "mcp__mempalace__mempalace_search",
             )),
         )
         self.assertNotIn(
@@ -991,6 +1004,14 @@ class OrichumCliTests(unittest.TestCase):
         )
         self.assertNotIn(
             "mcp__leanctx__ctx_shell",
+            command[allowed_index + 1].split(","),
+        )
+        self.assertNotIn(
+            "mcp__mempalace__mempalace_status",
+            command[allowed_index + 1].split(","),
+        )
+        self.assertNotIn(
+            "mcp__mempalace__mempalace_get_taxonomy",
             command[allowed_index + 1].split(","),
         )
         self.assertNotIn("mcp__leanctx__*", command)

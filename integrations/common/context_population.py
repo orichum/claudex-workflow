@@ -15,6 +15,10 @@ from integrations.common.graph_manager import (
     GraphManagerError,
     sync_graphs,
 )
+from integrations.common.graph_hooks import (
+    GraphHookError,
+    graph_hook_status,
+)
 
 
 PRUNED_DIRECTORIES = frozenset({
@@ -585,12 +589,23 @@ def populate_context(
             (
                 "not applicable"
                 if result.action == "not-applicable"
-                else "not managed"
+                else _reported_hook_status(result.repository)
             ),
         )
         for result in synchronized
     )
     return PopulationResult(Path(palace), wing, results)
+
+
+def _reported_hook_status(repository: Path) -> str:
+    try:
+        return (
+            "installed"
+            if graph_hook_status(repository) == "installed"
+            else "not managed"
+        )
+    except GraphHookError:
+        return "not managed"
 
 
 def render_population_result(result: PopulationResult) -> str:

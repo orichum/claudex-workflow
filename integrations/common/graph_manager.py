@@ -827,9 +827,9 @@ def _validate_graph_file(graph_file: Path, revision: str) -> int:
         if not isinstance(entry, dict):
             raise GraphError("Graphify graph is invalid")
         source_file = entry.get("source_file")
-        if source_file is None:
+        if source_file is None or source_file == "":
             continue
-        if not isinstance(source_file, str) or not source_file:
+        if not isinstance(source_file, str):
             raise GraphError("Graphify graph source path is invalid")
         relative = Path(source_file)
         if relative.is_absolute() or ".." in relative.parts:

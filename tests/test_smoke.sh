@@ -286,6 +286,7 @@ amd64_workflow="$ROOT/.github/workflows/amd64-acceptance.yml"
 [[ -f "$amd64_workflow" ]]
 for required_contract in \
     'name: Native AMD64 acceptance' \
+    'push:' \
     'pull_request:' \
     'workflow_dispatch:' \
     'permissions:' \
@@ -298,6 +299,7 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
+    'tests/test_orichum_launcher.sh' \
     'Verify central repository graph lifecycle' \
     'orichum graph "$graph_project"' \
     'orichum graph status "$graph_project"' \
@@ -351,6 +353,7 @@ macos_workflow="$ROOT/.github/workflows/macos-arm64-acceptance.yml"
 [[ -f "$macos_workflow" ]]
 for required_contract in \
     'name: Native macOS ARM64 acceptance' \
+    'push:' \
     'pull_request:' \
     'workflow_dispatch:' \
     'permissions:' \
@@ -364,6 +367,7 @@ for required_contract in \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
+    'tests/test_orichum_launcher.sh' \
     'Verify central repository graph lifecycle' \
     'orichum graph "$graph_project"' \
     'orichum graph status "$graph_project"' \

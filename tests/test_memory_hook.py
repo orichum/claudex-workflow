@@ -101,6 +101,15 @@ class MemoryHookTests(unittest.TestCase):
         self.assertEqual(updated["items"][0]["wing"], "xebia")
         self.assertEqual(updated["diary"]["wing"], "xebia")
 
+    def test_allows_palace_status_without_a_wing_argument(self):
+        completed = self.invoke({
+            "tool_name": "mcp__mempalace__mempalace_status",
+            "tool_input": {},
+        })
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "")
+
     def test_unknown_mempalace_tool_fails_closed(self):
         completed = self.invoke({
             "tool_name": "mcp__mempalace__mempalace_future_export",

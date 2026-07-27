@@ -3679,12 +3679,8 @@ PY
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -B \
     "$workflow_root/integrations/common/mcp_probe.py" \
     --exact-tool ctx_read \
-    --exact-tool ctx_delta \
     --exact-tool ctx_search \
-    --exact-tool ctx_glob \
     --exact-tool ctx_tree \
-    --exact-tool ctx_outline \
-    --exact-tool ctx_explore \
     --exact-tool ctx_expand \
     --exact-tool ctx_patch \
     --exact-tool ctx_shell \
