@@ -598,11 +598,14 @@ jobs:
           )"
           for component in \
               Python CLIProxyAPI Claudex LeanCTX \
-              Mempalace Graphify Routing; do
+              Mempalace Graphify; do
             grep -Eq \
               "^${component}[[:space:]]+reused[[:space:]]*$" \
               "$RUNNER_TEMP/orichum-fast.log"
           done
+          grep -Eq \
+            '^Routing[[:space:]]+repaired[[:space:]]*$' \
+            "$RUNNER_TEMP/orichum-fast.log"
           grep -Eq \
             '^Controller plugin[[:space:]]+reused[[:space:]]*$' \
             "$RUNNER_TEMP/orichum-fast.log"
