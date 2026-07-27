@@ -16,18 +16,14 @@ orichum
 
 ## What Orichum does
 
-- Lets one Claude Code workflow use GPT, Claude, Google, Kimi, and other
-  configured model families.
-- Chooses models for controller and specialist roles from a model stack you
-  control.
-- Supports named accounts, account priorities, and bounded same-family
-  failover.
-- Selects the correct GitHub identity, MCP_DOCKER profile, Mempalace memory,
-  and Graphify code graph from the project directory.
-- Keeps concurrent and resumed sessions isolated.
-- Routes source context through LeanCTX, repository relationships through
-  Graphify, and durable decisions through Mempalace—without tool profiles or
-  manual selection.
+- Runs GPT, Claude, Google, Kimi, and other configured models inside the
+  familiar Claude Code interface.
+- Lets you choose models and named provider accounts while handling safe
+  same-family account recovery automatically.
+- Loads the right GitHub identity, project tools, memory, and code graph from
+  the directory where you start it.
+- Keeps concurrent and resumed sessions isolated, while the controller chooses
+  relevant context and specialist agents for each task.
 
 You do not need to understand the routing architecture before using Orichum.
 Start with one provider and one project; add the other capabilities only when
@@ -170,11 +166,13 @@ cd ~/projects/my-app
 orichum
 ```
 
-Orichum resolves the project, freezes the selected model and account routes,
-prepares only the relevant tools, and opens Claude Code. From this point, talk
-to Claude Code normally; the controller decides when a configured specialist
-is useful. The Orichum status line shows the active model, named account,
-route state, context usage, and available provider limits. See
+Orichum resolves the project, prepares an isolated session with the selected
+model, account, and relevant tools, then opens Claude Code. From this point,
+work normally; the controller decides when project context or a configured
+specialist is useful.
+
+The Orichum status line keeps the active model, named account, route state,
+context usage, and available provider limits visible. See
 [Status line](docs/status-line.md).
 
 If launch fails, start with:
@@ -194,6 +192,7 @@ orichum doctor
 | List sessions | `orichum sessions` |
 | Inspect a session's routes | `orichum session routes SESSION_ID` |
 | Resume a session | `orichum resume SESSION_ID` |
+| Monitor context savings | `orichum leanctx stats`, `orichum leanctx watch`, or `orichum leanctx dashboard` |
 | Refresh the current code graph | `orichum graph .` |
 | Inspect graph state without changing it | `orichum graph status .` |
 | Check the installation | `orichum doctor` |
@@ -225,29 +224,23 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
   review, architecture, or implementation work while keeping one writer. See
   [Subagents](docs/subagents.md).
 
-## How a request flows
+## How Orichum fits together
 
 ```mermaid
 flowchart LR
-    C["Claude Code"] --> X["Per-session Claudex translator"]
-    X --> R["Shared Orichum route proxy<br/>tool deferral + account failover"]
-    R --> P["Shared CLIProxyAPI"]
-    P --> A["Selected named account"]
-    A --> M["Provider model"]
+    P["Project directory"] --> O["Orichum"]
+    O --> S["Isolated Claude Code session"]
+    S --> M["Selected account and model"]
+    O -. "loads only relevant context" .-> T["LeanCTX · Graphify · Mempalace · MCP_DOCKER"]
 ```
 
-The directory where you run `orichum` selects the project context. Orichum
-then creates an isolated session with fixed model and account routes, relevant
-MCPs, and its controller policy. Resident services are shared where safe;
-session-specific state remains private.
-
-Inside the session, current source context comes from LeanCTX, repository
-relationships come from Graphify, and durable project history comes from
-Mempalace. The route proxy automatically retains the preferred LeanCTX tools
-and defers unrelated tool schemas when supported; you do not select a profile.
+The directory where you run `orichum` selects the project configuration.
+Orichum opens a private session using the chosen model and account, then makes
+only the relevant project context available. You do not select a tool profile
+or manually route each request.
 
 Read [Architecture](docs/architecture.md) for service ownership, security
-boundaries, session isolation, and the complete request path.
+boundaries, session isolation, and the internal request path.
 
 ## If something is wrong
 
@@ -287,7 +280,7 @@ delays, and installer port conflicts.
 | [Subagents](docs/subagents.md) | Automatic delegation, specialist roles, and the sole-writer policy |
 | [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
 | [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
-| [LeanCTX](docs/leanctx.md) | Compact current-source reads, isolation, fallbacks, and exact-read rules |
+| [LeanCTX](docs/leanctx.md) | Compact source context, fallbacks, savings statistics, and live monitoring |
 | [Memory and code graph](docs/memory-and-code-graph.md) | Mempalace, Graphify, hooks, worktrees, and retrieval |
 | [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
 | [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
