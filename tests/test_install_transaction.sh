@@ -676,11 +676,13 @@ for global_skill_root in (
         raise SystemExit("installer must not mutate global Graphify skills")
 PY
 
+shared_suite_workflow="$ROOT/.github/workflows/amd64-acceptance.yml"
+rg -Fq 'if ! bash "$test_script"; then' "$shared_suite_workflow"
+rg -Fq 'bash -x "$test_script"' "$shared_suite_workflow"
+
 for acceptance_workflow in \
     "$ROOT/.github/workflows/amd64-acceptance.yml" \
     "$ROOT/.github/workflows/macos-arm64-acceptance.yml"; do
-  rg -Fq 'if ! bash "$test_script"; then' "$acceptance_workflow"
-  rg -Fq 'bash -x "$test_script"' "$acceptance_workflow"
   rg -Fq 'report_acceptance_failure()' "$acceptance_workflow"
   rg -Fq 'trap report_acceptance_failure ERR' "$acceptance_workflow"
   rg -Fq "printf '%s\\n' \"\$doctor_output\"" "$acceptance_workflow"

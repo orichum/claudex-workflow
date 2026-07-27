@@ -293,8 +293,6 @@ amd64_workflow="$ROOT/.github/workflows/amd64-acceptance.yml"
 [[ -f "$amd64_workflow" ]]
 for required_contract in \
     'name: Native AMD64 acceptance' \
-    'push:' \
-    'pull_request:' \
     'workflow_dispatch:' \
     'permissions:' \
     'contents: read' \
@@ -303,6 +301,7 @@ for required_contract in \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
     'sudo apt-get install --yes ripgrep' \
     'PATH="$poison_bin:$USER_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+    'Run repository test suites' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
@@ -334,6 +333,14 @@ for required_contract in \
     'Verify idempotent upgrade'; do
   rg -Fq -- "$required_contract" "$amd64_workflow"
 done
+if rg -q '^  push:' "$amd64_workflow"; then
+  printf 'AMD64 acceptance must not repeat verified PR work after merge\n' >&2
+  exit 1
+fi
+if rg -q '^  pull_request:' "$amd64_workflow"; then
+  printf 'AMD64 acceptance must run only when explicitly dispatched\n' >&2
+  exit 1
+fi
 if sed -n '/>>"[$]GITHUB_PATH"/,+3p' "$amd64_workflow" | \
     rg -Fq '$ORICHUM_DATA_HOME/headroom/bin'; then
   printf 'AMD64 acceptance still adds the private tool directory to GITHUB_PATH\n' >&2
@@ -360,8 +367,6 @@ macos_workflow="$ROOT/.github/workflows/macos-arm64-acceptance.yml"
 [[ -f "$macos_workflow" ]]
 for required_contract in \
     'name: Native macOS ARM64 acceptance' \
-    'push:' \
-    'pull_request:' \
     'workflow_dispatch:' \
     'permissions:' \
     'contents: read' \
@@ -373,8 +378,6 @@ for required_contract in \
     'launchctl print "gui/$(id -u)/io.orichum.route-proxy"' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
-    'tests/test_live_stack_routes.sh' \
-    'tests/test_orichum_launcher.sh' \
     'Verify central repository graph lifecycle' \
     'orichum graph "$graph_project"' \
     'orichum graph status "$graph_project"' \
@@ -399,6 +402,18 @@ for required_contract in \
     'Clean up launch agents'; do
   rg -Fq -- "$required_contract" "$macos_workflow"
 done
+if rg -q '^  push:' "$macos_workflow"; then
+  printf 'macOS acceptance must not repeat verified PR work after merge\n' >&2
+  exit 1
+fi
+if rg -q '^  pull_request:' "$macos_workflow"; then
+  printf 'macOS acceptance must run only when explicitly dispatched\n' >&2
+  exit 1
+fi
+if rg -Fq 'Run repository test suites' "$macos_workflow"; then
+  printf 'macOS acceptance must not repeat platform-neutral repository tests\n' >&2
+  exit 1
+fi
 if rg -Fq 'macos-15-intel' "$macos_workflow"; then
   printf 'macOS acceptance must run on Apple Silicon only\n' >&2
   exit 1
