@@ -1,5 +1,7 @@
 # Orichum
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 > Run Claude Code with the models, accounts, project tools, memory, and
 > specialist agents that fit each project.
 
@@ -297,6 +299,13 @@ delays, and installer port conflicts.
 Orichum is an independent project. It is not affiliated with or endorsed by
 these upstream projects, and it integrates them without modifying their source
 code.
+
+## License
+
+Orichum is licensed under the [Apache License 2.0](LICENSE). See
+[NOTICE](NOTICE) for Orichum attribution and
+[third-party notices](THIRD_PARTY_NOTICES.md) for the independent tools and
+content it integrates.
 
 ## References
 
