@@ -6,31 +6,27 @@ WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 
-case "$#" in
-  0) ;;
-  1)
-    [[ "$1" == --uninstall ]] || {
-      printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
-      exit 2
-    }
+install_usage() {
+  printf 'Usage: ./install.sh [--upgrade | --uninstall [--purge]]\n' >&2
+}
+
+INSTALL_MODE="$(parse_install_mode "$@")" || {
+  install_usage
+  exit 2
+}
+case "$INSTALL_MODE" in
+  fast|upgrade) ;;
+  uninstall)
     # shellcheck source=lib/uninstall.sh
     source "$WORKFLOW_ROOT/lib/uninstall.sh"
     orichum_uninstall false
     exit
     ;;
-  2)
-    [[ "$1" == --uninstall && "$2" == --purge ]] || {
-      printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
-      exit 2
-    }
+  purge)
     # shellcheck source=lib/uninstall.sh
     source "$WORKFLOW_ROOT/lib/uninstall.sh"
     orichum_uninstall true
     exit
-    ;;
-  *)
-    printf 'Usage: %s [--uninstall [--purge]]\n' "$0" >&2
-    exit 2
     ;;
 esac
 
@@ -328,7 +324,7 @@ WORKFLOW_TRANSACTION_ACTIVE=true
 IFS=$'\t' read -r \
   orichum_python_action orichum_python_version orichum_python_candidate \
   python_candidate_generation < <(
-    install_or_reuse_orichum_python "$WORKFLOW_DATA_ROOT"
+    install_or_reuse_orichum_python "$WORKFLOW_DATA_ROOT" true
   ) || workflow_die "private Orichum Python could not be provisioned"
 (
   cd "$WORKFLOW_ROOT"
@@ -430,17 +426,20 @@ chmod 0755 "$WORKFLOW_ROOT/controller/plugin/scripts/"*.sh
 
 export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"
 
-cliproxy_state="$(stage_latest_github_binary \
+cliproxy_state="$(stage_github_binary \
   router-for-me/CLIProxyAPI 'CLIProxyAPI_' "_${cliproxy_os}_${cliproxy_arch}.tar.gz" \
-  cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" "$installer_temp/cliproxy")"
+  cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" \
+  "$installer_temp/cliproxy" true)"
 cliproxy_version="$(jq -r '.version' <<<"$cliproxy_state")"
-claudex_state="$(stage_latest_github_binary \
+claudex_state="$(stage_github_binary \
   StringKe/claudex 'claudex-v' "-${claudex_arch}-${claudex_os}.tar.gz" \
-  claudex "$WORKFLOW_DATA_ROOT/bin/claudex" "$installer_temp/claudex")"
+  claudex "$WORKFLOW_DATA_ROOT/bin/claudex" \
+  "$installer_temp/claudex" true)"
 claudex_version="$(jq -r '.version' <<<"$claudex_state")"
-leanctx_state="$(stage_latest_github_binary \
+leanctx_state="$(stage_github_binary \
   yvgude/lean-ctx 'lean-ctx-' "$leanctx_release_asset_suffix" \
-  lean-ctx "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$installer_temp/leanctx")"
+  lean-ctx "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
+  "$installer_temp/leanctx" true)"
 leanctx_version="$(jq -r '.version' <<<"$leanctx_state")"
 cliproxy_binary_changed="$(jq -r '.changed' <<<"$cliproxy_state")"
 claudex_binary_changed="$(jq -r '.changed' <<<"$claudex_state")"

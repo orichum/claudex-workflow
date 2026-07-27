@@ -38,6 +38,9 @@ for script in "$ROOT"/bin/orichum* "$ROOT/install.sh" "$ROOT/doctor.sh"; do
   [[ -x "$script" ]]
   bash -n "$script"
 done
+rg -Fq \
+  'Usage: ./install.sh [--upgrade | --uninstall [--purge]]' \
+  "$ROOT/install.sh"
 
 install -d \
   "$fixture/fake-bin" \

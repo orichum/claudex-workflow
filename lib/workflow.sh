@@ -5,6 +5,24 @@ workflow_die() {
   return 1
 }
 
+parse_install_mode() {
+  case "$#" in
+    0) printf 'fast\n' ;;
+    1)
+      case "$1" in
+        --upgrade) printf 'upgrade\n' ;;
+        --uninstall) printf 'uninstall\n' ;;
+        *) return 2 ;;
+      esac
+      ;;
+    2)
+      [[ "$1" == --uninstall && "$2" == --purge ]] || return 2
+      printf 'purge\n'
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 linux_environment_kind() {
   local osrelease_path="${1:-/proc/sys/kernel/osrelease}"
   if rg -qi microsoft "$osrelease_path" 2>/dev/null; then
@@ -202,6 +220,8 @@ python_version_is_at_least() {
 
 install_or_reuse_orichum_python() (
   local data_root="$1"
+  local resolve_upstream="${2:-true}"
+  local recorded_version="${3:-}"
   local private_root entrypoint prior_identity prior_version=
   local available_json latest_version stage_root stage_root_real candidate
   local candidate_real
@@ -212,6 +232,12 @@ install_or_reuse_orichum_python() (
     "$data_root" "$data_root/bin" "$data_root/state" "$private_root" || return 1
   if prior_identity="$(validate_orichum_python "$data_root" "$entrypoint" 2>/dev/null)"; then
     IFS=$'\t' read -r prior_version candidate_real <<<"$prior_identity"
+  fi
+  if [[ "$resolve_upstream" == false && \
+        -n "$recorded_version" && \
+        "$prior_version" == "$recorded_version" ]]; then
+    printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
+    return 0
   fi
   if ! available_json="$(
       uv python list --only-downloads --output-format json \
@@ -3609,6 +3635,19 @@ fetch_latest_github_release() {
   fi
 }
 
+fetch_github_release_tag() {
+  local repository="$1"
+  local tag="$2"
+  local output_file="$3"
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    gh api "repos/$repository/releases/tags/$tag" >"$output_file"
+  else
+    curl --fail --location --silent --show-error \
+      "https://api.github.com/repos/$repository/releases/tags/$tag" \
+      --output "$output_file"
+  fi
+}
+
 leanctx_release_suffix() {
   local platform="$1"
   local architecture="$2"
@@ -3699,20 +3738,54 @@ PY
     "$leanctx_binary"
 }
 
-stage_latest_github_binary() {
+stage_github_binary() {
   local repository="$1"
   local prefix="$2"
   local suffix="$3"
   local archive_binary="$4"
   local destination="$5"
   local staging_dir="$6"
+  local resolve_upstream="${7:-true}"
+  local recorded_version="${8:-}"
+  local source_identity="${9:-}"
   local metadata archive row url digest asset tag version actual_sha staged_binary
+  local expected_source_prefix expected_tag=
 
+  if [[ "$resolve_upstream" == false ]]; then
+    [[ "$recorded_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+      workflow_die "recorded GitHub binary version is invalid"
+      return 1
+    }
+    expected_source_prefix="github:$repository@"
+    case "$source_identity" in
+      "$expected_source_prefix"*)
+        expected_tag="${source_identity#"$expected_source_prefix"}"
+        ;;
+      *)
+        workflow_die "recorded GitHub source identity is invalid"
+        return 1
+        ;;
+    esac
+    [[ "$expected_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || {
+      workflow_die "recorded GitHub release tag is unsafe"
+      return 1
+    }
+    if managed_executable_is_safe "$destination" && \
+       binary_reports_semver "$destination" "$recorded_version"; then
+      jq -cn --arg version "$recorded_version" --arg tag "$expected_tag" \
+        '{version: $version, tag: $tag, changed: false, staged_path: null}'
+      return 0
+    fi
+  fi
   install -d -m 0700 "$staging_dir"
   metadata="$staging_dir/release.json"
   archive="$staging_dir/release.tar.gz"
   staged_binary="$staging_dir/$archive_binary"
-  fetch_latest_github_release "$repository" "$metadata"
+  if [[ "$resolve_upstream" == false ]]; then
+    fetch_github_release_tag "$repository" "$expected_tag" "$metadata"
+  else
+    fetch_latest_github_release "$repository" "$metadata"
+  fi
   row="$(jq -er --arg prefix "$prefix" --arg suffix "$suffix" '
     [.assets[] | select(.name | startswith($prefix) and endswith($suffix))] |
     if length == 1 then .[0] else error("expected exactly one release asset") end |
@@ -3723,6 +3796,11 @@ stage_latest_github_binary() {
   version="$(jq -er '.tag_name | sub("^v"; "")' "$metadata")"
   [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
     workflow_die "GitHub release tag is unsafe"
+  if [[ "$resolve_upstream" == false && \
+        ( "$tag" != "$expected_tag" || "$version" != "$recorded_version" ) ]]; then
+    workflow_die "recorded GitHub release identity did not match"
+    return 1
+  fi
   if [[ "$digest" != sha256:* ]]; then
     workflow_die "GitHub did not publish a SHA-256 digest for $asset"
     return 1

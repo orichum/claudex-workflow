@@ -20,6 +20,15 @@ install -d -m 0700 "$fixture/install.lock"
 exec 9<"$fixture/install.lock"
 WORKFLOW_LOCK_FD=9
 
+[[ "$(parse_install_mode)" == fast ]]
+[[ "$(parse_install_mode --upgrade)" == upgrade ]]
+[[ "$(parse_install_mode --uninstall)" == uninstall ]]
+[[ "$(parse_install_mode --uninstall --purge)" == purge ]]
+if parse_install_mode --purge >/dev/null 2>&1; then
+  printf 'standalone --purge was accepted\n' >&2
+  exit 1
+fi
+
 python_data="$fixture/python-data"
 python_root="$python_data/python"
 python_bin="$python_root/cpython-3.14.6/bin"
@@ -458,6 +467,23 @@ IFS=$'\t' read -r \
      "$provisioned_data/python/cpython-3.14.6/bin/python3.14")" ]]
 [[ -z "$python_generation" ]]
 
+: >"$fake_uv_log"
+IFS=$'\t' read -r \
+  python_action python_version python_candidate python_generation < <(
+  PATH="$fake_uv_bin:$PATH" \
+  FAKE_UV_LOG="$fake_uv_log" \
+  FAKE_UV_VERSION=3.14.6 \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6
+)
+[[ "$python_action" == reused ]]
+[[ "$python_version" == 3.14.6 ]]
+[[ "$python_candidate" == \
+   "$(workflow_physical_path \
+     "$provisioned_data/python/cpython-3.14.6/bin/python3.14")" ]]
+[[ -z "$python_generation" ]]
+[[ ! -s "$fake_uv_log" ]]
+
 rollback_data="$fixture/rollback-data"
 rollback_snapshot="$fixture/rollback-snapshot"
 old_runtime="$rollback_data/python/cpython-3.14.5/bin/python3.14"
@@ -545,6 +571,30 @@ curl() {
 GH_TOKEN= fetch_latest_github_release example/tool "$anonymous_release"
 [[ "$(jq -r .tag_name "$anonymous_release")" == v4.5.6 ]]
 unset -f gh curl
+
+recorded_binary_root="$fixture/recorded-binary"
+recorded_binary="$recorded_binary_root/tool"
+recorded_release_log="$fixture/recorded-release.log"
+install -d -m 0700 "$recorded_binary_root"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.3\n"' >"$recorded_binary"
+chmod 0755 "$recorded_binary"
+fetch_latest_github_release() {
+  printf 'unexpected release lookup\n' >>"$recorded_release_log"
+  return 97
+}
+recorded_state="$(
+  stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/recorded-stage" \
+    false 1.2.3 github:example/tool@v1.2.3
+)"
+[[ "$(jq -r '.version' <<<"$recorded_state")" == 1.2.3 ]]
+[[ "$(jq -r '.changed' <<<"$recorded_state")" == false ]]
+[[ "$(jq -r '.staged_path' <<<"$recorded_state")" == null ]]
+[[ ! -e "$recorded_release_log" ]]
+unset -f fetch_latest_github_release
 
 printf '6.8.0-generic\n' >"$fixture/linux-osrelease"
 printf '4.4.0-Microsoft\n' >"$fixture/wsl1-osrelease"
