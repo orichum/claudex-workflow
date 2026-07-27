@@ -137,6 +137,51 @@ class LeanctxMonitorTests(unittest.TestCase):
 
         self.assertEqual(selected.run_id, "run.newer")
 
+    def test_implicit_selection_prefers_newest_run_with_activity(self) -> None:
+        active = LeanctxRun(
+            "run.active",
+            self.root / "run.active",
+            self.xebia,
+            "2026-07-26T10:00:00Z",
+            True,
+        )
+        inactive = LeanctxRun(
+            "run.inactive",
+            self.root / "run.inactive",
+            self.xebia,
+            "2026-07-27T10:00:00Z",
+            False,
+        )
+
+        selected = select_run((inactive, active), self.xebia, None)
+
+        self.assertEqual(selected.run_id, "run.active")
+
+    def test_current_run_wins_even_before_it_records_activity(self) -> None:
+        active = LeanctxRun(
+            "run.active",
+            self.root / "run.active",
+            self.xebia,
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+        current = LeanctxRun(
+            "run.current",
+            self.root / "run.current",
+            self.xebia,
+            "2026-07-26T10:00:00Z",
+            False,
+        )
+
+        selected = select_run(
+            (active, current),
+            self.xebia,
+            None,
+            current_run_id="run.current",
+        )
+
+        self.assertEqual(selected.run_id, "run.current")
+
     def test_implicit_selection_never_crosses_projects(self) -> None:
         other = LeanctxRun(
             "run.other",

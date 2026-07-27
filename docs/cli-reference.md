@@ -50,12 +50,12 @@ Installer modes are separate from the `orichum` command:
 | `orichum graph status [PATH]` | Read graph, working-tree, hook, output, and Graphify version status without changing state |
 | `orichum graph identity PATH --set ID` | Set an explicit repository identity such as `github.com/xebia/X-ACE-UI` |
 | `orichum graph identity PATH --clear` | Clear the explicit identity and return to remote-derived identity |
-| `orichum leanctx list` | List LeanCTX-enabled physical runs and mark the current project's newest run |
+| `orichum leanctx list [--limit N \| --all]` | List recent LeanCTX physical runs and mark the implicitly selected run |
 | `orichum leanctx stats [--run RUN]` | Show an exact savings snapshot |
 | `orichum leanctx watch [--run RUN]` | Open LeanCTX's live terminal monitor |
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
 | `orichum doctor` | Validate the complete local installation |
-| `orichum sessions` | List logical sessions |
+| `orichum sessions [--limit N \| --all]` | List recent logical sessions |
 | `orichum sessions cleanup [--older-than DAYS] [--yes]` | Preview or remove inactive physical launch snapshots |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
 | `orichum resume ID` | Resume the same logical session |
@@ -89,15 +89,18 @@ Graphify only; they do not mine or query Mempalace.
 
 ```bash
 orichum leanctx list
+orichum leanctx list --all
 orichum leanctx stats
 orichum leanctx watch --run run.mrds3ghq
 orichum leanctx dashboard --open browser
 orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
 ```
 
-The monitoring commands use the newest LeanCTX-enabled physical run for the
-current project unless `--run RUN` selects an ID from `orichum leanctx list`.
-Implicit selection never crosses project boundaries.
+Inside a live session, monitoring uses that physical run. Otherwise it uses the
+newest run with recorded LeanCTX activity for the current project, falling back
+to the project's newest run only when none has activity. `--run RUN` selects an
+ID explicitly. Implicit selection never crosses project boundaries. `list`
+shows 20 runs by default; use `--limit N` or `--all` to change that bound.
 
 `--port PORT` requests a specific loopback port. When omitted, Orichum selects
 the first available port starting at `3333`. `--open` accepts `browser`,

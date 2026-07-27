@@ -12,9 +12,14 @@ orichum
 orichum run -- -p "Summarize this repository"
 
 orichum sessions
+orichum sessions --limit 50
+orichum sessions --all
 orichum session routes SESSION_ID
 orichum sessions routes SESSION_ID
 ```
+
+The session list shows the newest 20 logical sessions by default. Use `--limit`
+for a different bound or `--all` when the complete history is needed.
 
 Use `--` after `orichum run` when forwarding Claude Code arguments. Orichum
 rejects runtime options it owns, including model, session, workspace, MCP,

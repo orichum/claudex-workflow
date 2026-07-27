@@ -208,8 +208,9 @@ def select_run(
     runs: Sequence[LeanctxRun],
     project_root: Path | None,
     run_id: str | None,
+    current_run_id: str | None = None,
 ) -> LeanctxRun:
-    """Select one explicit run or the newest run for a project."""
+    """Select an explicit, current, or newest active run for a project."""
     if run_id is not None:
         if not _RUN_ID.fullmatch(run_id):
             raise LeanctxMonitorError("run identifier is invalid")
@@ -224,7 +225,13 @@ def select_run(
     expected = Path(project_root).resolve(strict=False)
     matches = tuple(run for run in runs if run.project_root == expected)
     if matches:
-        return max(matches, key=lambda run: (run.created_at, run.run_id))
+        if current_run_id is not None:
+            for run in matches:
+                if run.run_id == current_run_id:
+                    return run
+        active = tuple(run for run in matches if run.has_activity)
+        candidates = active or matches
+        return max(candidates, key=lambda run: (run.created_at, run.run_id))
     raise LeanctxMonitorError(
         "current project has no LeanCTX activity; "
         "run 'orichum leanctx list' to inspect available runs"

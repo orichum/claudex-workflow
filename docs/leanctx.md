@@ -54,7 +54,8 @@ native read and search tools.
 
 ## Monitor LeanCTX
 
-From a configured project, inspect its newest LeanCTX-enabled Orichum run:
+From a configured project, inspect the current Orichum run. Outside a live
+session, Orichum selects the newest run that has recorded LeanCTX activity:
 
 ```bash
 orichum leanctx stats
@@ -72,15 +73,20 @@ List physical runs or select one explicitly:
 
 ```bash
 orichum leanctx list
+orichum leanctx list --limit 50
+orichum leanctx list --all
 orichum leanctx stats --run run.mrds3ghq
 orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
 ```
 
-Without `--run`, Orichum selects the newest run for the current project and
-never falls back to another project. A physical `run.*` ID identifies one
-LeanCTX process and its metrics; it is different from the logical `oc-s-*`
-session ID used by `orichum resume`. Historical physical runs remain
-selectable with `--run`.
+The list shows the newest 20 physical runs by default. Use `--limit` for a
+different bound or `--all` for the complete history. Without `--run`, Orichum
+uses the current physical run when that identity is available. Otherwise it
+selects the newest run with recorded activity for the current project, falling
+back to that project's newest run only when none has activity. It never crosses
+project boundaries. A physical `run.*` ID identifies one LeanCTX process and
+its metrics; it is different from the logical `oc-s-*` session ID used by
+`orichum resume`. Historical physical runs remain selectable with `--run`.
 
 The web dashboard opens a browser by default. Use `--open none` to print its
 local URL without opening one. It uses a temporary configuration copy, so

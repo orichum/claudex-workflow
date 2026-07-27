@@ -92,6 +92,30 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.1\n")
 
+    def test_help_explains_top_level_commands(self) -> None:
+        help_text = orichum_cli.build_parser().format_help()
+
+        self.assertIn("start a project-aware session", help_text)
+        self.assertIn("manage provider accounts", help_text)
+        self.assertIn("inspect and monitor LeanCTX", help_text)
+        self.assertIn("inspect and clean sessions", help_text)
+
+    def test_nested_help_explains_common_workflows(self) -> None:
+        for command, expected in (
+            ("context", "add and populate a project context"),
+            ("provider", "configure and register an account"),
+            ("stack", "create or edit a stack interactively"),
+        ):
+            stdout = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                orichum_cli.build_parser().parse_args([command, "--help"])
+
+            self.assertEqual(raised.exception.code, 0)
+            self.assertIn(expected, stdout.getvalue())
+
     def test_context_models_provider_and_plugin_read_only_commands(self) -> None:
         status, stdout, stderr = self.run_cli("context", "list")
         self.assertEqual(status, 0)
@@ -1142,6 +1166,44 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn("credential", stdout.lower())
         self.assertNotIn("routing", stdout.lower())
 
+    def test_sessions_lists_newest_twenty_by_default(self) -> None:
+        sessions = tuple(
+            SimpleNamespace(
+                id=f"oc-s-{index:016x}",
+                created_at=f"2026-07-{index + 1:02d}T10:00:00Z",
+                project_root=Path(f"/project/{index}"),
+                stack="balanced",
+                controller=SimpleNamespace(
+                    primary=SimpleNamespace(
+                        family="gpt",
+                        logical_model="gpt-5.6-sol",
+                    )
+                ),
+                parent_id=None,
+            )
+            for index in range(25)
+        )
+        with mock.patch.object(
+            orichum_cli,
+            "list_logical_sessions",
+            return_value=sessions,
+        ):
+            status, stdout, stderr = self.run_cli("sessions")
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertNotIn("oc-s-0000000000000000", stdout)
+        self.assertIn("oc-s-0000000000000018", stdout)
+        self.assertIn("Showing newest 20 of 25 sessions", stdout)
+
+    def test_sessions_all_disables_default_limit(self) -> None:
+        parser = orichum_cli.build_parser()
+
+        parsed = parser.parse_args(["sessions", "--all"])
+        limited = parser.parse_args(["sessions", "--limit", "7"])
+
+        self.assertTrue(parsed.show_all)
+        self.assertEqual(limited.limit, 7)
+
     def test_sessions_cleanup_previews_without_deleting(self) -> None:
         state = self.root / "data" / "state"
         state.mkdir(parents=True, mode=0o700)
@@ -1195,6 +1257,13 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(
             parser.parse_args(["leanctx", "list"]).leanctx_command,
             "list",
+        )
+        self.assertTrue(
+            parser.parse_args(["leanctx", "list", "--all"]).show_all
+        )
+        self.assertEqual(
+            parser.parse_args(["leanctx", "list", "--limit", "7"]).limit,
+            7,
         )
 
     def test_leanctx_list_marks_newest_run_for_current_project(self) -> None:

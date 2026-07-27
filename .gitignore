@@ -12,3 +12,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+
+# LeanCTX overlay state is machine-local and regenerated on demand.
+.lean-ctx/
