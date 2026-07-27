@@ -31,6 +31,21 @@ restore_snapshot "$absent" "$snapshot" absent
 snapshot_path_matches "$absent" "$snapshot" absent
 [[ ! -e "$absent" && ! -L "$absent" ]]
 
+install_state_dir="$fixture/install-state"
+install_state_snapshot="$fixture/install-state-snapshot"
+install_state_file="$install_state_dir/install-state.json"
+install -d -m 0700 "$install_state_dir" "$install_state_snapshot"
+printf '{"prior":true}\n' >"$install_state_file"
+chmod 0600 "$install_state_file"
+snapshot_path \
+  "$install_state_file" "$install_state_snapshot" install-state
+printf '{"partial":true}\n' >"$install_state_file"
+restore_snapshot \
+  "$install_state_file" "$install_state_snapshot" install-state
+snapshot_path_matches \
+  "$install_state_file" "$install_state_snapshot" install-state
+[[ "$(<"$install_state_file")" == '{"prior":true}' ]]
+
 private_data="$fixture/private-data"
 private_tools="$private_data/tools/uv"
 private_bin="$private_data/tools/bin"
@@ -568,6 +583,9 @@ restore_cliproxy = rollback.index(
 )
 restore_endpoint = rollback.index("restore_model_config_generation")
 restore_route = rollback.index("restore_claudex_proxy_service")
+restore_install_state = rollback.index(
+    'restore_snapshot "$install_state_path"'
+)
 if not (
     stop_route
     < restore_installed_config
@@ -576,6 +594,7 @@ if not (
     < restore_cliproxy
     < restore_endpoint
     < restore_route
+    < restore_install_state
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
 
@@ -624,10 +643,27 @@ if '"$candidate_config_root" "$INSTALLED_CONFIG_ROOT" \\\n  "$control_plane_jour
 finalize_config = source.index(
     "finalize_installed_control_plane", activate_config
 )
+doctor = source.index('"$USER_BIN_DIR/orichum" doctor', activate_config)
+publish_install_state = source.index(
+    'write "$install_state_path" "$install_state_platform"',
+    doctor,
+)
+install_state_active = source.index(
+    "install_state_transaction_active=true",
+    publish_install_state,
+)
 config_inactive = source.index(
     "config_transaction_active=false", finalize_config
 )
-if not activate_config < finalize_config < config_inactive < transaction_end:
+if not (
+    activate_config
+    < doctor
+    < publish_install_state
+    < install_state_active
+    < finalize_config
+    < config_inactive
+    < transaction_end
+):
     raise SystemExit(
         "stable control-plane journal is not finalized before disarming "
         "rollback"
@@ -638,13 +674,17 @@ migrate_legacy_tools = source.index("migrate_legacy_private_tools")
 private_tool_exports = source.index("export UV_TOOL_DIR UV_TOOL_BIN_DIR")
 python_transaction = source.index("python_transaction_active=true")
 provision_python = source.index("install_or_reuse_orichum_python")
+snapshot_install_state = source.index(
+    'snapshot_path "$install_state_path"'
+)
 upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
 upgrade_graphify = source.index("uv tool install --upgrade 'graphifyy[mcp,terraform]'")
 probe_graphify = source.index("reconcile_graphify_storage", upgrade_graphify)
 normalize_endpoint = source.index("normalize_headroom_free_endpoint_snapshot")
 remove_headroom = source.index("remove_owned_headroom_installation")
 if not (
-    python_transaction
+    snapshot_install_state
+    < python_transaction
     < provision_python
     < migrate_legacy_tools
     < snapshot_private_tools

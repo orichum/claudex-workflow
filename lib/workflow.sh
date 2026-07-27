@@ -47,6 +47,30 @@ component_state_matches() {
     }' "$manifest" >/dev/null
 }
 
+decide_install_component() {
+  local manifest="$1"
+  local name="$2"
+  shift 2
+  if [[ "${INSTALL_MODE:-fast}" == upgrade ]]; then
+    printf 'upgraded\n'
+  elif component_state_matches "$manifest" "$name" "$@"; then
+    printf 'reused\n'
+  elif jq -e --arg name "$name" \
+      '.components[$name] != null' "$manifest" >/dev/null 2>&1; then
+    printf 'repaired\n'
+  else
+    printf 'upgraded\n'
+  fi
+}
+
+install_state_component_field() {
+  local manifest="$1"
+  local name="$2"
+  local field="$3"
+  jq -er --arg name "$name" --arg field "$field" \
+    '.components[$name][$field]' "$manifest"
+}
+
 linux_environment_kind() {
   local osrelease_path="${1:-/proc/sys/kernel/osrelease}"
   if rg -qi microsoft "$osrelease_path" 2>/dev/null; then
@@ -246,10 +270,12 @@ install_or_reuse_orichum_python() (
   local data_root="$1"
   local resolve_upstream="${2:-true}"
   local recorded_version="${3:-}"
+  local expected_artifact_sha="${4:-}"
   local private_root entrypoint prior_identity prior_version=
   local available_json latest_version stage_root stage_root_real candidate
   local candidate_real
   local relative generation_name generation destination identity version action
+  local force_repair=false
   private_root="$(orichum_python_root "$data_root")" || return 1
   entrypoint="$(orichum_python_entrypoint "$data_root")" || return 1
   install -d -m 0700 \
@@ -260,43 +286,52 @@ install_or_reuse_orichum_python() (
   if [[ "$resolve_upstream" == false && \
         -n "$recorded_version" && \
         "$prior_version" == "$recorded_version" ]]; then
-    printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
-    return 0
-  fi
-  if ! available_json="$(
-      uv python list --only-downloads --output-format json \
-        --no-config 3.14
-    )"; then
-    if [[ -n "$prior_version" && \
-          "${INSTALL_MODE:-fast}" != upgrade ]]; then
+    if [[ -z "$expected_artifact_sha" ]] || \
+       [[ "$(sha256_file "$candidate_real")" == "$expected_artifact_sha" ]]; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0
     fi
-    workflow_die "uv could not resolve the latest private CPython 3.14"
-    return 1
+    force_repair=true
   fi
-  latest_version="$(
-    jq -er '
-      [
-        .[]
-        | select(
-            .version_parts.major == 3 and
-            .version_parts.minor == 14
-          )
-      ]
-      | sort_by([
-          .version_parts.major,
-          .version_parts.minor,
-          .version_parts.patch
-        ])
-      | last
-      | .version
-    ' <<<"$available_json"
-  )" || {
-    workflow_die "uv returned no downloadable CPython 3.14 runtime"
-    return 1
-  }
-  if [[ -n "$prior_version" ]] && \
+  if [[ "$resolve_upstream" == false && \
+        "$recorded_version" =~ ^3\.14\.[0-9]+$ ]]; then
+    latest_version="$recorded_version"
+  else
+    if ! available_json="$(
+        uv python list --only-downloads --output-format json \
+          --no-config 3.14
+      )"; then
+      if [[ -n "$prior_version" && \
+            "${INSTALL_MODE:-fast}" != upgrade ]]; then
+        printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
+        return 0
+      fi
+      workflow_die "uv could not resolve the latest private CPython 3.14"
+      return 1
+    fi
+    latest_version="$(
+      jq -er '
+        [
+          .[]
+          | select(
+              .version_parts.major == 3 and
+              .version_parts.minor == 14
+            )
+        ]
+        | sort_by([
+            .version_parts.major,
+            .version_parts.minor,
+            .version_parts.patch
+          ])
+        | last
+        | .version
+      ' <<<"$available_json"
+    )" || {
+      workflow_die "uv returned no downloadable CPython 3.14 runtime"
+      return 1
+    }
+  fi
+  if [[ "$force_repair" != true && -n "$prior_version" ]] && \
      python_version_is_at_least "$prior_version" "$latest_version"; then
     printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
     return 0
@@ -341,6 +376,9 @@ install_or_reuse_orichum_python() (
   }
   generation="$stage_root_real/$generation_name"
   destination="$private_root/$generation_name"
+  if [[ "$force_repair" == true ]]; then
+    destination="$private_root/${generation_name}.repair.$$.$RANDOM"
+  fi
   if [[ -e "$destination" || -L "$destination" ]]; then
     candidate="$destination/${relative#*/}"
     if identity="$(validate_orichum_python \
@@ -368,7 +406,14 @@ install_or_reuse_orichum_python() (
     fi
   fi
   IFS=$'\t' read -r version candidate_real <<<"$identity"
-  if [[ -z "$prior_version" ]]; then
+  if [[ "$force_repair" == true ]]; then
+    if [[ "$(sha256_file "$candidate_real")" != "$expected_artifact_sha" ]]; then
+      remove_orichum_python_generation "$data_root" "$generation" || true
+      workflow_die "repaired private CPython artifact did not match"
+      return 1
+    fi
+    action=repaired
+  elif [[ -z "$prior_version" ]]; then
     action=installed
   elif [[ "$prior_version" == "$version" ]]; then
     action=reused
@@ -3774,12 +3819,17 @@ stage_github_binary() {
   local resolve_upstream="${7:-true}"
   local recorded_version="${8:-}"
   local source_identity="${9:-}"
+  local expected_artifact_sha="${10:-}"
   local metadata archive row url digest asset tag version actual_sha staged_binary
   local expected_source_prefix expected_tag=
 
   if [[ "$resolve_upstream" == false ]]; then
     [[ "$recorded_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
       workflow_die "recorded GitHub binary version is invalid"
+      return 1
+    }
+    [[ "$expected_artifact_sha" =~ ^[a-f0-9]{64}$ ]] || {
+      workflow_die "recorded GitHub artifact hash is invalid"
       return 1
     }
     expected_source_prefix="github:$repository@"
@@ -3797,7 +3847,8 @@ stage_github_binary() {
       return 1
     }
     if managed_executable_is_safe "$destination" && \
-       binary_reports_semver "$destination" "$recorded_version"; then
+       binary_reports_semver "$destination" "$recorded_version" && \
+       [[ "$(sha256_file "$destination")" == "$expected_artifact_sha" ]]; then
       jq -cn --arg version "$recorded_version" --arg tag "$expected_tag" \
         '{version: $version, tag: $tag, changed: false, staged_path: null}'
       return 0
@@ -3833,7 +3884,11 @@ stage_github_binary() {
   fi
 
   if managed_executable_is_safe "$destination" && \
-     binary_reports_semver "$destination" "$version"; then
+     binary_reports_semver "$destination" "$version" && \
+     {
+       [[ "$resolve_upstream" == true ]] || \
+         [[ "$(sha256_file "$destination")" == "$expected_artifact_sha" ]]
+     }; then
     jq -cn --arg version "$version" --arg tag "$tag" \
       '{version: $version, tag: $tag, changed: false, staged_path: null}'
     return 0
@@ -3849,6 +3904,11 @@ stage_github_binary() {
   chmod 0755 "$staged_binary"
   if ! binary_reports_semver "$staged_binary" "$version"; then
     workflow_die "staged $asset did not report version $version"
+    return 1
+  fi
+  if [[ "$resolve_upstream" == false && \
+        "$(sha256_file "$staged_binary")" != "$expected_artifact_sha" ]]; then
+    workflow_die "recorded GitHub binary artifact did not match"
     return 1
   fi
   jq -cn --arg version "$version" --arg tag "$tag" \

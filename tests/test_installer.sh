@@ -58,6 +58,25 @@ if component_state_matches \
   printf 'changed component artifact matched installer state\n' >&2
   exit 1
 fi
+INSTALL_MODE=fast
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$matching_digest")" == reused ]]
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$changed_digest" "$matching_digest" "$matching_digest")" == repaired ]]
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$changed_digest")" == repaired ]]
+INSTALL_MODE=upgrade
+[[ "$(decide_install_component \
+  "$matching_manifest" cliproxy 7.2.97 \
+  github:router-for-me/CLIProxyAPI@v7.2.97 \
+  "$matching_digest" "$matching_digest" "$matching_digest")" == upgraded ]]
+INSTALL_MODE=fast
 
 python_data="$fixture/python-data"
 python_root="$python_data/python"
@@ -514,6 +533,32 @@ IFS=$'\t' read -r \
 [[ -z "$python_generation" ]]
 [[ ! -s "$fake_uv_log" ]]
 
+python_runtime="$provisioned_data/python/cpython-3.14.6/bin/python3.14"
+python_runtime_backup="$fixture/python3.14.saved"
+cp -p "$python_runtime" "$python_runtime_backup"
+python_recorded_sha="$(sha256_file "$python_runtime")"
+printf '# drift\n' >>"$python_runtime"
+: >"$fake_uv_log"
+IFS=$'\t' read -r \
+  python_action python_version python_candidate python_generation < <(
+  PATH="$fake_uv_bin:$PATH" \
+  FAKE_UV_LOG="$fake_uv_log" \
+  FAKE_UV_VERSION=3.14.6 \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6 "$python_recorded_sha"
+)
+[[ "$python_action" == repaired ]]
+[[ "$python_version" == 3.14.6 ]]
+[[ -n "$python_generation" ]]
+[[ "$(sha256_file "$python_candidate")" == "$python_recorded_sha" ]]
+if rg -Fq 'python list ' "$fake_uv_log"; then
+  printf 'recorded Python repair resolved latest upstream version\n' >&2
+  exit 1
+fi
+rg -Fq 'python install ' "$fake_uv_log"
+remove_orichum_python_generation "$provisioned_data" "$python_generation"
+cp -p "$python_runtime_backup" "$python_runtime"
+
 if INSTALL_MODE=upgrade \
    PATH="$fake_uv_bin:$PATH" \
    FAKE_UV_LOG="$fake_uv_log" \
@@ -640,7 +685,8 @@ recorded_state="$(
   stage_github_binary \
     example/tool tool- .tar.gz tool \
     "$recorded_binary" "$fixture/recorded-stage" \
-    false 1.2.3 github:example/tool@v1.2.3
+    false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$recorded_binary")"
 )"
 [[ "$(jq -r '.version' <<<"$recorded_state")" == 1.2.3 ]]
 [[ "$(jq -r '.changed' <<<"$recorded_state")" == false ]]
@@ -695,7 +741,8 @@ repaired_state="$(
   stage_github_binary \
     example/tool tool- .tar.gz tool \
     "$recorded_binary" "$fixture/repair-stage" \
-    false 1.2.3 github:example/tool@v1.2.3
+    false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$repair_archive_root/tool")"
 )"
 [[ "$(jq -r '.changed' <<<"$repaired_state")" == true ]]
 [[ "$(jq -r '.version' <<<"$repaired_state")" == 1.2.3 ]]
@@ -719,6 +766,7 @@ if stage_github_binary \
     example/tool tool- .tar.gz tool \
     "$recorded_binary" "$fixture/mismatch-stage" \
     false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$repair_archive_root/tool")" \
     >"$fixture/mismatch.stdout" 2>"$fixture/mismatch.stderr"; then
   printf 'mismatched tagged release metadata was accepted\n' >&2
   exit 1
@@ -742,6 +790,7 @@ if stage_github_binary \
     example/tool tool- .tar.gz tool \
     "$recorded_binary" "$fixture/checksum-stage" \
     false 1.2.3 github:example/tool@v1.2.3 \
+    "$(sha256_file "$repair_archive_root/tool")" \
     >"$fixture/checksum.stdout" 2>"$fixture/checksum.stderr"; then
   printf 'wrong recorded GitHub checksum was accepted\n' >&2
   exit 1
@@ -749,6 +798,31 @@ fi
 rg -Fq 'checksum mismatch for tool-1.2.3.tar.gz' \
   "$fixture/checksum.stderr"
 [[ ! -e "$fixture/checksum-stage/tool" ]]
+
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: "v1.2.3",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/artifact-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    0000000000000000000000000000000000000000000000000000000000000000 \
+    >"$fixture/artifact.stdout" 2>"$fixture/artifact.stderr"; then
+  printf 'wrong installed GitHub artifact hash was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'recorded GitHub binary artifact did not match' \
+  "$fixture/artifact.stderr"
 unset -f fetch_github_release_tag curl
 
 printf '6.8.0-generic\n' >"$fixture/linux-osrelease"
