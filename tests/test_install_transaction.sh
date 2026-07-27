@@ -633,6 +633,31 @@ if not (
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
 
+fast_attempt = source.index("if attempt_verified_fast_install")
+source_validation = source.index("source Orichum control plane is invalid")
+first_runtime_snapshot = source.index(
+    'snapshot_path "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
+)
+private_tool_snapshot = source.index("snapshot_private_tool_state")
+if not (
+    source_validation
+    < fast_attempt
+    < first_runtime_snapshot
+    < private_tool_snapshot
+):
+    raise SystemExit(
+        "verified fast path validation or snapshot ordering is unsafe"
+    )
+fast_start = source.index("attempt_verified_fast_install()")
+fast_end = source.index("\n)\n\nif attempt_verified_fast_install", fast_start)
+fast_body = source[fast_start:fast_end]
+if (
+    "trap cleanup_fast_verifiers EXIT" not in fast_body
+    or "wait \"$config_verify_pid\"" not in fast_body
+    or "wait \"$runtime_verify_pid\"" not in fast_body
+):
+    raise SystemExit("verified fast path does not reap background verifiers")
+
 restore_start = source.index("restore_claudex_proxy_service()")
 restore_end = source.index("\n}\n\nrollback_install_transaction()", restore_start)
 restore_service = source[restore_start:restore_end]
@@ -704,6 +729,10 @@ runtime_ready = source.index(
     '"$WORKFLOW_ROOT/bin/orichum-runtime-ready"',
     activate_config,
 )
+committed_routing_fingerprint = source.index(
+    "committed routing input fingerprint failed",
+    activate_config,
+)
 publish_install_state = source.index(
     'write "$install_state_path" "$install_state_platform"',
     doctor,
@@ -717,6 +746,7 @@ config_inactive = source.index(
 )
 if not (
     activate_config
+    < committed_routing_fingerprint
     < runtime_ready
     < doctor
     < install_state_active

@@ -89,6 +89,116 @@ if print_component_status_table \
   exit 1
 fi
 
+routing_fixture="$fixture/routing-fingerprint"
+routing_data="$routing_fixture/data"
+routing_config="$routing_fixture/config"
+routing_generation="$routing_data/model-config/generation.test"
+routing_descriptor="$routing_fixture/runtime.descriptor"
+install -d -m 0700 \
+  "$routing_data/claude-config" "$routing_generation" "$routing_config"
+printf '%s\n' cliproxy.yaml >"$routing_data/cliproxy.yaml"
+for routing_file in cliproxy.service route-proxy.service; do
+  printf '%s\n' "$routing_file" >"$routing_fixture/$routing_file"
+done
+for routing_file in \
+    claudex.toml models.json effective-models.json; do
+  printf '%s\n' "$routing_file" >"$routing_generation/$routing_file"
+done
+for routing_file in \
+    accounts.json model-stacks.json plugins.json projects.json \
+    providers.json runtime.json controller-policy.md; do
+  printf '%s\n' "$routing_file" >"$routing_config/$routing_file"
+done
+printf '{}\n' >"$routing_data/claude-config/settings.json"
+ln -s generation.test "$routing_data/model-config/current"
+routing_artifact="$(
+  verified_routing_runtime_artifact \
+    "$routing_data" "$routing_config" \
+    "$routing_fixture/cliproxy.service" \
+    "$routing_fixture/route-proxy.service" \
+    "$routing_descriptor"
+)"
+[[ "$routing_artifact" =~ ^[a-f0-9]{64}$ ]]
+printf 'changed\n' >>"$routing_config/projects.json"
+changed_routing_artifact="$(
+  verified_routing_runtime_artifact \
+    "$routing_data" "$routing_config" \
+    "$routing_fixture/cliproxy.service" \
+    "$routing_fixture/route-proxy.service" \
+    "$routing_descriptor"
+)"
+[[ "$changed_routing_artifact" != "$routing_artifact" ]]
+routing_source="$routing_fixture/source-runtime.json"
+printf '{"source":"v1"}\n' >"$routing_source"
+routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+same_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-copy.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+[[ "$routing_input" == "$same_routing_input" ]]
+changed_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-changed.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf changed-route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+[[ "$changed_routing_input" != "$routing_input" ]]
+printf '{"source":"v2"}\n' >"$routing_source"
+source_changed_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-source-changed.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 \
+    "$routing_config/projects.json" "$routing_source" \
+    "$routing_data/cliproxy.yaml"
+)"
+[[ "$source_changed_routing_input" != "$routing_input" ]]
+
+candidate_models="$routing_fixture/candidate-models.json"
+committed_models="$routing_fixture/committed-models.json"
+printf '{"models":{"demo":{"priority":1}}}\n' >"$candidate_models"
+printf '{\n  "models": {\n    "demo": {\n      "priority": 1\n    }\n  }\n}\n' >"$committed_models"
+precommit_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-precommit.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$candidate_models"
+)"
+committed_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-committed.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$committed_models"
+)"
+fast_routing_input="$(
+  verified_routing_input_fingerprint \
+    "$routing_fixture/input-fast.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$committed_models"
+)"
+[[ "$precommit_routing_input" != "$committed_routing_input" ]]
+[[ "$committed_routing_input" == "$fast_routing_input" ]]
+
 python_data="$fixture/python-data"
 python_root="$python_data/python"
 python_bin="$python_root/cpython-3.14.6/bin"

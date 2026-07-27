@@ -2467,6 +2467,169 @@ except (InstallStateError, OSError, RuntimeError, ValueError) as error:
 PY
 }
 
+verified_route_runtime_digest() {
+  (($# == 4)) || return 2
+  local workflow_root="$1"
+  local python_runtime="$2"
+  local python_version="$3"
+  local descriptor="$4"
+  "$python_runtime" -I -B - \
+    "$workflow_root/integrations/common" "$python_runtime" \
+    "$python_version" "$descriptor" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+runtime = Path(sys.argv[2])
+version = sys.argv[3]
+descriptor = Path(sys.argv[4])
+uid = os.getuid()
+digest = hashlib.sha256()
+
+
+def add_file(label: str, path: Path) -> None:
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    digest.update(label.encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+
+
+add_file("python", runtime)
+digest.update(version.encode())
+digest.update(b"\0")
+for path in sorted(root.glob("*.py")):
+    add_file(path.name, path)
+value = digest.hexdigest()
+descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor.write_text(value + "\n", encoding="ascii")
+os.chmod(descriptor, 0o600)
+print(value)
+PY
+}
+
+verified_routing_input_fingerprint() {
+  (($# >= 8)) || return 2
+  local descriptor="$1"
+  local cliproxy_artifact="$2"
+  local claudex_artifact="$3"
+  local route_runtime="$4"
+  local cliproxy_port="$5"
+  local claudex_port="$6"
+  local route_port="$7"
+  shift 7
+  python3 -I -B - \
+    "$descriptor" "$cliproxy_artifact" "$claudex_artifact" \
+    "$route_runtime" "$cliproxy_port" "$claudex_port" "$route_port" \
+    "$@" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+descriptor = Path(sys.argv[1])
+values = sys.argv[2:8]
+paths = [Path(value) for value in sys.argv[8:]]
+uid = os.getuid()
+digest = hashlib.sha256()
+for label, value in zip(
+    ("cliproxy", "claudex", "route-runtime", "cliproxy-port",
+     "claudex-port", "route-port"),
+    values,
+):
+    digest.update(label.encode())
+    digest.update(b"=")
+    digest.update(value.encode())
+    digest.update(b"\0")
+for index, path in enumerate(paths):
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    digest.update(str(index).encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+value = digest.hexdigest()
+descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor.write_text(value + "\n", encoding="ascii")
+os.chmod(descriptor, 0o600)
+print(value)
+PY
+}
+
+verified_routing_runtime_artifact() {
+  (($# == 5)) || return 2
+  local data_root="$1"
+  local config_root="$2"
+  local cliproxy_service="$3"
+  local route_service="$4"
+  local descriptor="$5"
+  local active_claudex active_models active_effective
+  active_claudex="$(model_config_file "$data_root" claudex.toml)" || return 1
+  active_models="$(model_config_file "$data_root" models.json)" || return 1
+  active_effective="$(
+    model_config_file "$data_root" effective-models.json
+  )" || return 1
+  python3 -I -B - \
+    "$descriptor" \
+    "$data_root/cliproxy.yaml" \
+    "$cliproxy_service" "$route_service" \
+    "$active_claudex" "$active_models" "$active_effective" \
+    "$data_root/claude-config/settings.json" \
+    "$config_root/accounts.json" \
+    "$config_root/model-stacks.json" \
+    "$config_root/plugins.json" \
+    "$config_root/projects.json" \
+    "$config_root/providers.json" \
+    "$config_root/runtime.json" \
+    "$config_root/controller-policy.md" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+descriptor = Path(sys.argv[1])
+paths = [Path(value) for value in sys.argv[2:]]
+uid = os.getuid()
+digest = hashlib.sha256()
+for index, path in enumerate(paths):
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+    digest.update(str(index).encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+value = digest.hexdigest()
+descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor.write_text(value + "\n", encoding="ascii")
+os.chmod(descriptor, 0o600)
+print(value)
+PY
+}
+
 migrate_legacy_private_tools() (
   local data_root="$1"
   local tool_dir="$2"
