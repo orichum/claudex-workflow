@@ -46,6 +46,10 @@ if [[ "$login_status" -eq 0 ]]; then
       "authentication succeeded, but the provider routing priority was not applied"
     exit 1
   fi
-  printf 'Authentication complete. Next: orichum provider account add ...; orichum models validate\n'
+  if [[ "${ORICHUM_PROVIDER_CONFIGURE:-0}" == 1 ]]; then
+    printf 'Authentication complete. Continuing account setup.\n'
+  else
+    printf 'Authentication complete. Next: orichum provider account add ...; orichum models validate\n'
+  fi
 fi
 exit "$login_status"

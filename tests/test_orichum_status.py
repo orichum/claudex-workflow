@@ -227,9 +227,67 @@ class OrichumStatusTests(unittest.TestCase):
                 "seven_day": {"utilization": 12.0},
             },
         )
+        kimi = _parse_provider_quota(
+            "kimi",
+            {
+                "usage": {"used": 30, "limit": 120},
+                "limits": [
+                    {
+                        "window": {
+                            "duration": 300,
+                            "timeUnit": "MINUTE",
+                        },
+                        "detail": {"used": 45, "limit": 100},
+                    }
+                ],
+            },
+        )
 
         self.assertEqual(codex, {"five_hour": 14.0, "seven_day": 21.0})
         self.assertEqual(claude, {"five_hour": 0.0, "seven_day": 12.0})
+        self.assertEqual(kimi, {"five_hour": 45.0, "seven_day": 25.0})
+
+    def test_kimi_quota_uses_the_documented_coding_usage_endpoint(self) -> None:
+        from integrations.common.orichum_status import _request_provider_quota
+
+        account = Account(
+            id="oc-a-0000000000000003",
+            name="Kimi",
+            provider="kimi",
+            credential_ref="kimi.json",
+            pool="shared",
+            routing_prefix="oc-r-0000000000000003",
+            priority=10,
+            state="active",
+            original_prefix=None,
+            original_priority=None,
+        )
+        response = unittest.mock.Mock()
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {"usage": {"used": 1, "limit": 4}}
+        ).encode("utf-8")
+        connection = unittest.mock.Mock()
+        connection.getresponse.return_value = response
+
+        with patch(
+            "integrations.common.orichum_status.http.client.HTTPSConnection",
+            return_value=connection,
+        ) as connect:
+            result = _request_provider_quota(
+                account, {"access_token": "secret"}
+            )
+
+        connect.assert_called_once_with("api.kimi.com", timeout=2)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/coding/usages",
+            headers={
+                "Authorization": "Bearer secret",
+                "Accept": "application/json",
+            },
+        )
+        self.assertEqual(result, {"seven_day": 25.0})
 
     def test_provider_quota_cache_uses_safe_account_scoped_values(self) -> None:
         from integrations.common.orichum_status import _provider_quota

@@ -21,6 +21,7 @@ Installer modes are separate from the `orichum` command:
 
 | Command | Purpose |
 |---|---|
+| `orichum --version` | Print the installed Orichum release identity |
 | `orichum` / `orichum run` | Start a project-aware session |
 | `orichum config show` | Show the merged, redacted control plane |
 | `orichum config validate` | Validate focused configuration |
@@ -39,6 +40,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum stack configure` | Create or edit a stack interactively |
 | `orichum stack list` | List stacks |
 | `orichum stack show STACK` | Inspect roles, providers, and account policy |
+| `orichum provider configure` | Log in and register one provider account interactively |
 | `orichum provider login TYPE` | Authenticate a provider through CLIProxyAPI |
 | `orichum provider list` | List configured provider adapters and model families |
 | `orichum provider accounts` | List named accounts |
@@ -54,6 +56,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
 | `orichum doctor` | Validate the complete local installation |
 | `orichum sessions` | List logical sessions |
+| `orichum sessions cleanup [--older-than DAYS] [--yes]` | Preview or remove inactive physical launch snapshots |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
 | `orichum resume ID` | Resume the same logical session |
 | `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |

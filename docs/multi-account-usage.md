@@ -15,38 +15,17 @@ different providers, without changing the machine-wide active login.
 
 ## Add multiple accounts for one provider
 
-Log in once for each provider account. Each login creates a separate credential
-file under the private auth directory shown by `orichum config paths`.
+Run the provider wizard once for each account:
 
 ```bash
-orichum provider login claude
-orichum provider login claude
-orichum config paths
-ls ~/.local/share/orichum/auth
+orichum provider configure
+orichum provider configure
 ```
 
-Register each credential by its filename, not its full path:
-
-```bash
-orichum provider account add \
-  "Work Claude" anthropic FIRST_CREDENTIAL_FILE xebia --priority primary
-
-orichum provider account add \
-  "Backup Claude" anthropic SECOND_CREDENTIAL_FILE xebia --priority secondary
-```
-
-The same pattern works for two OpenAI accounts:
-
-```bash
-orichum provider login codex
-orichum provider login codex
-
-orichum provider account add \
-  "Primary GPT" openai FIRST_CREDENTIAL_FILE shared --priority primary
-
-orichum provider account add \
-  "Backup GPT" openai SECOND_CREDENTIAL_FILE shared --priority secondary
-```
+Choose the same provider both times. Name the first account, select its pool,
+and give it primary priority. Give the second account secondary or reserve
+priority. The same flow works for Claude, OpenAI, Antigravity, and Kimi
+accounts without handling credential filenames manually.
 
 Priority aliases are `primary` (100), `secondary` (50), and `reserve` (10).
 Numeric priorities from 0 through 1000 are also accepted.
@@ -89,15 +68,8 @@ wizard. Normal wizard-created automatic candidates stay within their selected
 provider; they do not silently switch from Anthropic to Antigravity.
 
 ```bash
-orichum provider login claude
-orichum provider login antigravity
-
-orichum provider account add \
-  "Direct Claude" anthropic CLAUDE_CREDENTIAL_FILE shared --priority primary
-
-orichum provider account add \
-  "Antigravity Claude" antigravity ANTIGRAVITY_CREDENTIAL_FILE shared \
-  --priority primary
+orichum provider configure  # choose anthropic
+orichum provider configure  # choose antigravity
 ```
 
 Use different providers for different roles in one stack, or create an explicit

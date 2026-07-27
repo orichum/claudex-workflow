@@ -204,10 +204,8 @@ else
 fi
 
 if [[ "$graph_contract_available" == true ]]; then
-  graphify_binary="$(command -v graphify 2>/dev/null || true)"
   if ! graphify_doctor_diagnostics \
-      "$data_root" "$config_root" "$WORKFLOW_ROOT" "$orichum_python" \
-      "$graphify_binary"; then
+      "$data_root" "$config_root" "$WORKFLOW_ROOT" "$orichum_python"; then
     printf 'NOTICE repository graph diagnostics were unavailable\n'
   fi
 fi

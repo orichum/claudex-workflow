@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import multiprocessing
 import json
 import os
@@ -88,6 +90,41 @@ class GraphManagerTests(unittest.TestCase):
                 "origin",
                 "https://github.com/xebia/X-ACE-UI.git",
             )
+
+    def test_graph_status_reports_package_without_global_skill_version(self):
+        import integrations.common.graph_manager as graph_manager
+
+        row = (
+            "github.com/example/project",
+            "0123456789ab",
+            "clean",
+            "current",
+            "1",
+            "installed",
+            "/tmp/graphify-out",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                graph_manager, "_status_rows", return_value=([row], [])
+            ),
+            mock.patch.object(
+                graph_manager, "_graph_data_root", return_value=self.data_root
+            ),
+            mock.patch.object(
+                graph_manager.shutil, "which", return_value="/graphify"
+            ),
+            mock.patch.object(
+                graph_manager, "_package_version", return_value="2.0.0"
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(graph_manager._graph_status(self.source), 0)
+
+        rendered = output.getvalue()
+        self.assertIn("Graphify package: 2.0.0", rendered)
+        self.assertNotIn("Graphify skill:", rendered)
+        self.assertNotIn("drift", rendered.lower())
 
     def _git(self, repository: Path, *arguments: str) -> str:
         return subprocess.run(

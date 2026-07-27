@@ -52,3 +52,22 @@ or the full parent transcript.
 Concurrent sessions use separate physical run directories, MCP files, plugin
 copies, and Claudex translation ports. The three upstream resident services are
 shared.
+
+## Clean old physical runs
+
+Logical sessions remain resumable, but each launch also creates a disposable
+physical snapshot. Preview inactive snapshots older than seven days:
+
+```bash
+orichum sessions cleanup
+```
+
+Remove only the runs shown by that preview:
+
+```bash
+orichum sessions cleanup --yes
+```
+
+Use `--older-than DAYS` to change the minimum age. Cleanup never removes
+logical session records and skips a run while its Claudex translator port is
+live.

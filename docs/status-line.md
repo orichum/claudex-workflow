@@ -18,7 +18,8 @@ that account.
 - Model and context usage come from Claude Code's status-line input.
 - Quota usage prefers Claude Code's native values. Because Claude Code omits
   them when Orichum's external auth source is active, Orichum falls back to the
-  selected OpenAI or Anthropic account's usage endpoint.
+  selected OpenAI, Anthropic, or Kimi account's usage endpoint. Kimi's weekly
+  quota is shown as `7d`; its rolling five-hour limit is shown as `5h`.
 - Provider quota lookups are cached locally for 60 seconds and scoped by
   Orichum account ID. Concurrent sessions using different accounts cannot
   replace one another's values.
@@ -35,6 +36,12 @@ that account.
 - `—` means the active provider did not publish that window. It is not treated
   as zero. For example, an account that currently publishes only a weekly
   window correctly shows a 7-day value and `5h —`.
+
+Antigravity currently publishes model-specific remaining fractions rather than
+the same five-hour and seven-day windows. Those values can also disagree with
+actual request throttling, so Orichum does not relabel them as `5h` or `7d`.
+Claude Code native values are still displayed when available; otherwise the
+window remains `—`.
 
 The route snapshot is scoped to the current Orichum session. Concurrent
 sessions cannot replace one another's displayed account.

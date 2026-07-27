@@ -50,7 +50,9 @@ from .orichum_config import (
 from .orichum_sessions import (
     LogicalSession,
     LogicalSessionError,
+    PhysicalRunCleanup,
     RouteBinding,
+    cleanup_physical_runs,
     create_logical_session,
     list_logical_sessions,
     load_logical_session,
@@ -61,6 +63,7 @@ from .project_context import ContextError, resolve_control_plane_context
 from .provider_credentials import (
     CredentialError,
     credential_metadata_transaction,
+    list_credentials,
     resolve_credential_ref,
 )
 from .route_selection import RouteError, validate_route_credential
@@ -114,6 +117,25 @@ WORKFLOW_ROOT = Path(__file__).resolve().parents[2]
 
 class CliError(RuntimeError):
     """An Orichum command cannot be completed safely."""
+
+
+def _release_version() -> str:
+    try:
+        version = (WORKFLOW_ROOT / "VERSION").read_text(
+            encoding="ascii"
+        ).strip()
+    except (OSError, UnicodeError):
+        return "unknown"
+    return (
+        version
+        if re.fullmatch(
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+            r"(?:0|[1-9][0-9]*)"
+            r"(?:-[0-9A-Za-z.-]+)?",
+            version,
+        )
+        else "unknown"
+    )
 
 
 @dataclass(frozen=True)
@@ -418,6 +440,23 @@ def _session_list(sessions: Sequence[LogicalSession]) -> str:
     return _render_table(
         ("ID", "CREATED", "PROJECT", "STACK", "FAMILY", "MODEL", "PARENT"),
         rows,
+    )
+
+
+def _physical_cleanup_report(
+    runs: Sequence[PhysicalRunCleanup], *, older_than_days: int, applied: bool
+) -> str:
+    if not runs:
+        return (
+            f"No inactive physical runs older than {older_than_days} day(s).\n"
+        )
+    rows = [(run.run_id, run.status.upper()) for run in runs]
+    report = _render_table(("RUN", "STATUS"), rows)
+    if applied:
+        return report + f"Removed {len(runs)} physical run(s).\n"
+    return (
+        report
+        + "Preview only. Re-run with --yes to remove these physical runs.\n"
     )
 
 
@@ -1236,17 +1275,193 @@ def _mutate_account(
             )
 
 
-def _run_external(name: str, arguments: list[str]) -> int:
+def _interactive_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _prompt_choice(
+    heading: str,
+    choices: Sequence[tuple[str, str]],
+    *,
+    default: int = 0,
+) -> str:
+    if not choices or default < 0 or default >= len(choices):
+        raise CliError("interactive choice configuration is invalid")
+    print(heading)
+    for index, (label, _value) in enumerate(choices, start=1):
+        suffix = " [default]" if index - 1 == default else ""
+        print(f"  {index}. {label}{suffix}")
+    while True:
+        raw = input(f"Select [{default + 1}]: ").strip()
+        if not raw:
+            return choices[default][1]
+        if raw.isdigit() and 1 <= int(raw) <= len(choices):
+            return choices[int(raw) - 1][1]
+        print(f"Enter a number from 1 to {len(choices)}.")
+
+
+def _prompt_text(label: str, default: str) -> str:
+    raw = input(f"{label} [{default}]: ").strip()
+    return raw or default
+
+
+def _prompt_confirm() -> bool:
+    while True:
+        raw = input("Register this account? [Y/n]: ").strip().lower()
+        if raw in {"", "y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print("Enter y or n.")
+
+
+def _provider_configure(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+) -> int:
+    provider_document = config.documents["providers"]
+    providers = provider_document["providers"]
+    provider_choices = tuple(
+        (
+            f"{name} ({', '.join(details['families'])})",
+            name,
+        )
+        for name, details in providers.items()
+    )
+    provider_name = _prompt_choice("Choose a provider:", provider_choices)
+    provider = providers[provider_name]
+    auth_dir = paths["data"] / "auth"
+    before_credentials = (
+        list_credentials(auth_dir) if auth_dir.exists() else ()
+    )
+    before_refs = {credential.path.name for credential in before_credentials}
+    login_status = _run_external(
+        "orichum-login",
+        [provider["authType"]],
+        environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
+    )
+    if login_status != 0:
+        return login_status
+
+    registry = paths["config"] / "accounts.json"
+    accounts = load_accounts(registry)
+    assigned = {account.credential_ref for account in accounts}
+    compatible = tuple(
+        credential
+        for credential in list_credentials(auth_dir)
+        if (
+            credential.provider == provider["authType"]
+            and not credential.disabled
+            and credential.path.name not in assigned
+        )
+    )
+    if not compatible:
+        registered = tuple(
+            account.name
+            for account in accounts
+            if (
+                account.provider == provider_name
+                and account.credential_ref in assigned
+            )
+        )
+        if registered:
+            print(
+                "Provider account already registered: "
+                + ", ".join(registered)
+            )
+            return 0
+        raise CliError(
+            "authentication completed, but no unregistered compatible "
+            "credential was found; inspect 'orichum provider accounts'"
+        )
+    new_credentials = tuple(
+        credential
+        for credential in compatible
+        if credential.path.name not in before_refs
+    )
+    if len(new_credentials) == 1:
+        credential = new_credentials[0]
+    else:
+        selected_ref = _prompt_choice(
+            "Choose the authenticated account:",
+            tuple(
+                (item.account, item.path.name)
+                for item in compatible
+            ),
+        )
+        credential = next(
+            item for item in compatible if item.path.name == selected_ref
+        )
+    default_name = (
+        credential.account
+        if credential.account != "hidden"
+        else f"{provider_name.title()} account"
+    )
+    name = _prompt_text("Account name", default_name)
+    pools = tuple(
+        pool_name
+        for pool_name, details in provider_document["accountPools"].items()
+        if provider_name in details["providers"]
+    )
+    default_pool = pools.index("shared") if "shared" in pools else 0
+    pool = _prompt_choice(
+        "Choose where this account is available:",
+        tuple((pool_name, pool_name) for pool_name in pools),
+        default=default_pool,
+    )
+    priority = _prompt_choice(
+        "Choose account priority:",
+        (
+            ("Primary", "primary"),
+            ("Secondary", "secondary"),
+            ("Reserve", "reserve"),
+        ),
+    )
+    print(
+        "\nAccount summary:\n"
+        f"  Name:     {name}\n"
+        f"  Provider: {provider_name}\n"
+        f"  Pool:     {pool}\n"
+        f"  Priority: {priority}"
+    )
+    if not _prompt_confirm():
+        print("No account was registered.")
+        return 0
+    _mutate_account(
+        argparse.Namespace(
+            account_command="add",
+            name=name,
+            provider=provider_name,
+            credential_ref=credential.path.name,
+            pool=pool,
+            priority=priority,
+        ),
+        paths,
+        config,
+    )
+    print(f"Provider account ready: {name}")
+    return 0
+
+
+def _run_external(
+    name: str,
+    arguments: list[str],
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> int:
     candidate = WORKFLOW_ROOT / "bin" / name
     executable = str(candidate) if candidate.is_file() else shutil.which(name)
     if executable is None:
         raise CliError(f"required command is not installed: {name}")
     working_directory = Path.cwd() if name == "orichum-graph" else WORKFLOW_ROOT
+    child_environment = os.environ.copy()
+    if environment is not None:
+        child_environment.update(environment)
     completed = subprocess.run(
         [executable, *arguments],
         check=False,
         cwd=working_directory,
-        env=os.environ.copy(),
+        env=child_environment,
     )
     return completed.returncode
 
@@ -1871,6 +2086,11 @@ def _deferred(label: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orichum")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"Orichum {_release_version()}",
+    )
     commands = parser.add_subparsers(dest="command")
     run = commands.add_parser("run")
     run.add_argument("arguments", nargs=argparse.REMAINDER)
@@ -1911,6 +2131,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="provider_command", required=True
     )
     provider_action.add_parser("list")
+    provider_action.add_parser("configure")
     login = provider_action.add_parser("login")
     login.add_argument("arguments", nargs=argparse.REMAINDER)
     provider_action.add_parser("accounts")
@@ -1968,6 +2189,21 @@ def build_parser() -> argparse.ArgumentParser:
     sessions_action = sessions.add_subparsers(dest="sessions_command")
     sessions_routes = sessions_action.add_parser("routes")
     sessions_routes.add_argument("session_id")
+    sessions_cleanup = sessions_action.add_parser(
+        "cleanup",
+        help="preview or remove inactive physical launch snapshots",
+    )
+    sessions_cleanup.add_argument(
+        "--older-than",
+        type=int,
+        default=7,
+        help="minimum snapshot age in days (default: 7)",
+    )
+    sessions_cleanup.add_argument(
+        "--yes",
+        action="store_true",
+        help="remove the previewed snapshots",
+    )
     session = commands.add_parser("session")
     session_action = session.add_subparsers(
         dest="session_command", required=True
@@ -2010,10 +2246,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         if (
             parsed.command == "stack"
             and parsed.stack_command == "configure"
-            and (not sys.stdin.isatty() or not sys.stdout.isatty())
+            and not _interactive_terminal()
         ):
             raise CliError(
                 "stack configuration requires an interactive terminal"
+            )
+        if (
+            parsed.command == "provider"
+            and parsed.provider_command == "configure"
+            and not _interactive_terminal()
+        ):
+            raise CliError(
+                "provider configuration requires an interactive terminal"
             )
         paths, config = _load()
         if parsed.command == "provider" and parsed.provider_command == "login":
@@ -2068,6 +2312,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             raise AssertionError("session launch returned unexpectedly")
         if parsed.command in {"session", "sessions"}:
+            if (
+                parsed.command == "sessions"
+                and parsed.sessions_command == "cleanup"
+            ):
+                cleaned = cleanup_physical_runs(
+                    paths["state"],
+                    older_than_days=parsed.older_than,
+                    apply=parsed.yes,
+                )
+                print(
+                    _physical_cleanup_report(
+                        cleaned,
+                        older_than_days=parsed.older_than,
+                        applied=parsed.yes,
+                    ),
+                    end="",
+                )
+                return 0
             route_request = (
                 parsed.command == "session"
                 or parsed.sessions_command == "routes"
@@ -2163,6 +2425,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command == "provider":
             if parsed.provider_command == "list":
                 print(_provider_list(config), end="")
+            elif parsed.provider_command == "configure":
+                return _provider_configure(paths, config)
             elif parsed.provider_command == "accounts":
                 accounts = load_accounts(paths["config"] / "accounts.json")
                 validate_account_bindings(

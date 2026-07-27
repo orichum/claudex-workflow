@@ -21,6 +21,7 @@ from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.orichum_sessions import (
     LogicalSessionError,
     RouteBinding,
+    cleanup_physical_runs,
     create_logical_session,
     list_logical_sessions,
     load_logical_session,
@@ -41,6 +42,64 @@ class OrichumSessionTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.state = Path(self.temporary.name).resolve() / "state"
         self.state.mkdir(mode=0o700)
+
+    def test_physical_run_cleanup_previews_then_removes_only_stale_runs(
+        self,
+    ) -> None:
+        sessions = self.state / "sessions"
+        sessions.mkdir(mode=0o700)
+        stale = sessions / "run.stale"
+        recent = sessions / "run.recent"
+        for run in (stale, recent):
+            run.mkdir(mode=0o700)
+            (run / ".complete").write_text("{}", encoding="utf-8")
+            (run / ".complete").chmod(0o600)
+        os.utime(stale / ".complete", (1_700_000_000, 1_700_000_000))
+
+        preview = cleanup_physical_runs(
+            self.state,
+            older_than_days=7,
+            apply=False,
+            now=1_701_000_000,
+        )
+
+        self.assertEqual([item.run_id for item in preview], ["run.stale"])
+        self.assertEqual(preview[0].status, "eligible")
+        self.assertTrue(stale.is_dir())
+        removed = cleanup_physical_runs(
+            self.state,
+            older_than_days=7,
+            apply=True,
+            now=1_701_000_000,
+        )
+        self.assertEqual(removed[0].status, "removed")
+        self.assertFalse(stale.exists())
+        self.assertTrue(recent.is_dir())
+
+    def test_physical_run_cleanup_skips_live_translator(self) -> None:
+        sessions = self.state / "sessions"
+        sessions.mkdir(mode=0o700)
+        active = sessions / "run.active"
+        active.mkdir(mode=0o700)
+        (active / ".complete").write_text("{}", encoding="utf-8")
+        (active / ".complete").chmod(0o600)
+        (active / "claudex-proxy-port").write_text("12345\n", encoding="ascii")
+        (active / "claudex-proxy-port").chmod(0o600)
+        os.utime(active / ".complete", (1_700_000_000, 1_700_000_000))
+
+        with mock.patch(
+            "integrations.common.orichum_sessions._port_is_live",
+            return_value=True,
+        ):
+            result = cleanup_physical_runs(
+                self.state,
+                older_than_days=7,
+                apply=True,
+                now=1_701_000_000,
+            )
+
+        self.assertEqual(result, ())
+        self.assertTrue(active.is_dir())
 
     def binding(
         self,
