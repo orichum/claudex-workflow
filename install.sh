@@ -1764,8 +1764,7 @@ if [[ "$prior_install_state_verified" == true ]]; then
   )"
   if [[ "$routing_decision" == reused && \
         ( "$cliproxy_listener_owned" != true || \
-          "$cliproxy_ready_before" != true || \
-          "$claudex_proxy_listener_owned" != true ) ]]; then
+          "$cliproxy_ready_before" != true ) ]]; then
     routing_decision=repaired
   fi
 fi
@@ -2228,6 +2227,10 @@ if [[ "$model_discovery_succeeded" == true || \
   else
     claudex_proxy_action=reused
   fi
+fi
+if [[ "$routing_action" == reused ]] && \
+   [[ "$claudex_proxy_action" == reconciled ]]; then
+  routing_action=repaired
 fi
 
 if [[ "$endpoint_lock_owned" == true ]]; then

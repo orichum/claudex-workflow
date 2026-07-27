@@ -13,6 +13,30 @@ from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
+routing_decision_start = source.index("routing_decision=upgraded")
+routing_decision_end = source.index(
+    "\nfi\n\nmempalace_recorded_version", routing_decision_start
+)
+routing_decision = source[routing_decision_start:routing_decision_end]
+if "claudex_proxy_listener_owned" in routing_decision:
+    raise SystemExit(
+        "routing status still treats an early route-proxy readiness sample "
+        "as a completed repair"
+    )
+route_action_start = source.index("claudex_proxy_action=pending-provider-login")
+route_action_end = source.index(
+    "\nif [[ \"$endpoint_lock_owned\" == true ]]", route_action_start
+)
+route_action = source[route_action_start:route_action_end]
+if (
+    '[[ "$routing_action" == reused ]]' not in route_action
+    or '[[ "$claudex_proxy_action" == reconciled ]]' not in route_action
+    or "routing_action=repaired" not in route_action
+):
+    raise SystemExit(
+        "routing status does not report an actual route-proxy reconciliation"
+    )
+
 start = source.index('elif [[ -n "$prior_model_generation" ]]')
 end = source.index('routing_action=reused', start)
 fallback = source[start:end]
