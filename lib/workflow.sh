@@ -284,13 +284,19 @@ install_or_reuse_orichum_python() (
     IFS=$'\t' read -r prior_version candidate_real <<<"$prior_identity"
   fi
   if [[ "$resolve_upstream" == false && \
-        -n "$recorded_version" && \
-        "$prior_version" == "$recorded_version" ]]; then
-    if [[ -z "$expected_artifact_sha" ]] || \
-       [[ "$(sha256_file "$candidate_real")" == "$expected_artifact_sha" ]]; then
+        "$recorded_version" =~ ^3\.14\.[0-9]+$ ]]; then
+    if [[ "$prior_version" == "$recorded_version" ]] && \
+       {
+         [[ -z "$expected_artifact_sha" ]] || \
+           [[ "$(sha256_file "$candidate_real")" == "$expected_artifact_sha" ]]
+       }; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0
     fi
+    [[ "$expected_artifact_sha" =~ ^[a-f0-9]{64}$ ]] || {
+      workflow_die "recorded private CPython artifact hash is invalid"
+      return 1
+    }
     force_repair=true
   fi
   if [[ "$resolve_upstream" == false && \
@@ -301,7 +307,8 @@ install_or_reuse_orichum_python() (
         uv python list --only-downloads --output-format json \
           --no-config 3.14
       )"; then
-      if [[ -n "$prior_version" && \
+      if [[ "$resolve_upstream" == true && \
+            -n "$prior_version" && \
             "${INSTALL_MODE:-fast}" != upgrade ]]; then
         printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
         return 0
@@ -343,7 +350,8 @@ install_or_reuse_orichum_python() (
   trap 'rm -rf -- "$stage_root"' EXIT
   if ! uv python install --install-dir "$stage_root" \
       --no-bin --no-config "$latest_version" 1>&2; then
-    if [[ -n "$prior_version" && \
+    if [[ "$resolve_upstream" == true && \
+          -n "$prior_version" && \
           "${INSTALL_MODE:-fast}" != upgrade ]]; then
       printf 'reused\t%s\t%s\t\n' "$prior_version" "$candidate_real"
       return 0

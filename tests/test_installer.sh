@@ -559,6 +559,45 @@ rg -Fq 'python install ' "$fake_uv_log"
 remove_orichum_python_generation "$provisioned_data" "$python_generation"
 cp -p "$python_runtime_backup" "$python_runtime"
 
+newer_recorded_runtime="$provisioned_data/python/cpython-3.14.7/bin/python3.14"
+install -d -m 0700 "$(dirname "$newer_recorded_runtime")"
+sed 's/3\.14\.6/3.14.7/' "$python_runtime_backup" \
+  >"$newer_recorded_runtime"
+chmod 0755 "$newer_recorded_runtime"
+ln -sfn "$newer_recorded_runtime" \
+  "$provisioned_data/bin/orichum-python"
+: >"$fake_uv_log"
+IFS=$'\t' read -r \
+  python_action python_version python_candidate python_generation < <(
+  PATH="$fake_uv_bin:$PATH" \
+  FAKE_UV_LOG="$fake_uv_log" \
+  FAKE_UV_VERSION=3.14.6 \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6 "$python_recorded_sha"
+)
+[[ "$python_action" == repaired ]]
+[[ "$python_version" == 3.14.6 ]]
+[[ "$(sha256_file "$python_candidate")" == "$python_recorded_sha" ]]
+remove_orichum_python_generation "$provisioned_data" "$python_generation"
+ln -sfn "$python_runtime" "$provisioned_data/bin/orichum-python"
+rm -rf -- "$(dirname "$(dirname "$newer_recorded_runtime")")"
+
+printf '# drift again\n' >>"$python_runtime"
+if PATH="$fake_uv_bin:$PATH" \
+   FAKE_UV_LOG="$fake_uv_log" \
+   FAKE_UV_VERSION=3.14.6 \
+   FAKE_UV_INSTALL_FAIL=true \
+    install_or_reuse_orichum_python \
+      "$provisioned_data" false 3.14.6 "$python_recorded_sha" \
+      >"$fixture/python-repair.stdout" \
+      2>"$fixture/python-repair.stderr"; then
+  printf 'failed exact Python repair reused a drifted runtime\n' >&2
+  exit 1
+fi
+rg -Fq 'could not install private CPython 3.14.6' \
+  "$fixture/python-repair.stderr"
+cp -p "$python_runtime_backup" "$python_runtime"
+
 if INSTALL_MODE=upgrade \
    PATH="$fake_uv_bin:$PATH" \
    FAKE_UV_LOG="$fake_uv_log" \

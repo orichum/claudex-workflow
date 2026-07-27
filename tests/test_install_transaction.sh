@@ -650,7 +650,7 @@ publish_install_state = source.index(
 )
 install_state_active = source.index(
     "install_state_transaction_active=true",
-    publish_install_state,
+    doctor,
 )
 config_inactive = source.index(
     "config_transaction_active=false", finalize_config
@@ -658,8 +658,8 @@ config_inactive = source.index(
 if not (
     activate_config
     < doctor
-    < publish_install_state
     < install_state_active
+    < publish_install_state
     < finalize_config
     < config_inactive
     < transaction_end

@@ -1868,11 +1868,11 @@ else
   ORICHUM_DATA_HOME="$WORKFLOW_DATA_ROOT" \
     "$USER_BIN_DIR/orichum" doctor
 fi
+install_state_transaction_active=true
 python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
   write "$install_state_path" "$install_state_platform" \
   "$install_state_components" || \
   workflow_die "verified installer state could not be published"
-install_state_transaction_active=true
 finalize_installed_control_plane \
   "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$control_plane_journal" \
   "$WORKFLOW_LOCK_FD" || \
