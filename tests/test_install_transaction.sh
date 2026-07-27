@@ -31,6 +31,18 @@ if missing:
     )
 PY
 
+model_file_data="$fixture/model-file-data"
+model_file_generation="$model_file_data/model-config/generation.test"
+install -d -m 0700 "$model_file_generation"
+printf '{}\n' >"$model_file_generation/models.json"
+printf 'default_model = "test"\n' \
+  >"$model_file_generation/claudex.toml"
+printf '{}\n' >"$model_file_generation/effective-models.json"
+ln -s generation.test "$model_file_data/model-config/current"
+[[ "$(model_config_file \
+  "$model_file_data" effective-models.json)" == \
+  "$model_file_data/model-config/current/effective-models.json" ]]
+
 snapshot="$fixture/snapshot"
 install -d -m 0700 "$snapshot" "$fixture/bin"
 
@@ -620,6 +632,27 @@ if not (
     < restore_install_state
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
+
+restore_start = source.index("restore_claudex_proxy_service()")
+restore_end = source.index("\n}\n\nrollback_install_transaction()", restore_start)
+restore_service = source[restore_start:restore_end]
+platform_branch = restore_service.index('if [[ "$platform" == darwin ]]')
+bootstrap = restore_service.index("launchctl bootstrap", platform_branch)
+runtime_branch = restore_service.index(
+    'if [[ "${claudex_proxy_runtime_mutated:-false}" == true ]]'
+)
+if "claudex_proxy_loaded_target_is_expected" in restore_service[
+    runtime_branch:platform_branch
+] or "claudex_proxy_loaded_target_is_expected" in restore_service[
+    platform_branch:bootstrap
+]:
+    raise SystemExit(
+        "darwin rollback requires a loaded target after bootout"
+    )
+if "claudex_proxy_service_is_owned" not in restore_service:
+    raise SystemExit(
+        "route-proxy rollback does not validate the restored service file"
+    )
 
 stage_config = source.index(
     "stage_installed_control_plane",

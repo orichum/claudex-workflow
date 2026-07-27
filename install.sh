@@ -1227,6 +1227,9 @@ restore_claudex_proxy_service() {
     "$snapshot_dir" claudex-proxy-service || recovery_ready=false
   snapshot_path_matches "$claudex_proxy_service_file" \
     "$snapshot_dir" claudex-proxy-service || recovery_ready=false
+  claudex_proxy_service_is_owned \
+    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+    "$WORKFLOW_ROOT" || recovery_ready=false
 
   if [[ "$recovery_ready" != true ]] || \
      [[ "${claudex_proxy_recovery_prerequisites_ready:-false}" != true ]]; then
@@ -1239,7 +1242,6 @@ restore_claudex_proxy_service() {
       2>/dev/null || true)"
     [[ -n "$restored_model" ]] || return 1
     if [[ "${claudex_proxy_runtime_mutated:-false}" == true ]]; then
-      claudex_proxy_loaded_target_is_expected || return 1
       if [[ "$platform" == darwin ]]; then
         launchctl enable \
           "gui/$(id -u)/$claudex_proxy_service_label" \
@@ -1250,6 +1252,7 @@ restore_claudex_proxy_service() {
             >/dev/null 2>&1 || recovery_ready=false
         fi
       else
+        claudex_proxy_loaded_target_is_expected || return 1
         systemctl --user daemon-reload \
           >/dev/null 2>&1 || recovery_ready=false
         if [[ "$recovery_ready" == true ]]; then

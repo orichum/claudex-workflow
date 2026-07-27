@@ -3122,7 +3122,7 @@ model_config_file() {
   local config_name="$2"
   local generation
   case "$config_name" in
-    models.json|claudex.toml) ;;
+    models.json|claudex.toml|effective-models.json) ;;
     *) workflow_die "unsupported model config file: $config_name"; return 1 ;;
   esac
   if generation="$(resolve_model_config_generation "$data_root")"; then
