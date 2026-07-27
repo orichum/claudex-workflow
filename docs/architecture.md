@@ -4,151 +4,107 @@
 
 ```mermaid
 flowchart LR
-    U["User and project directory"] --> O["Orichum"]
+    U["User in a project directory"] --> O["Orichum"]
     C["Focused configuration"] --> O
-    O --> P["Private session package"]
-    P --> CC["Claude Code"]
+    O --> S["Private session package"]
+    S --> CC["Claude Code"]
+    S --> L["Session-local LeanCTX"]
+    S --> M["Bound Mempalace wing"]
+    S --> D["Optional MCP_DOCKER profile"]
 ```
 
-Orichum resolves the focused configuration for the launch directory and builds
-a private session package. It contains immutable route state, the project MCP
-file, LeanCTX configuration, and the controller plugin. Claude Code receives
-that package when the session starts, so only tools relevant to the resolved
-project are exposed.
+Orichum resolves the launch directory, selects the configured stack and
+account, and materializes one private physical session. The session contains
+immutable route state, a strict MCP file, the controller plugin, and a
+project-jailed LeanCTX configuration.
 
 ## Context path
 
 ```mermaid
 flowchart LR
-    C["Claude Code controller"] --> L["LeanCTX\nsource and shell context"]
-    C --> G["Graphify\nrelationships and impact"]
-    C --> M["Mempalace\ndurable decisions"]
-    L --> S["Exact repository source"]
-    G --> GS["Immutable session graph"]
-    M --> MP["Project palace and wing"]
+    C["Claude Code controller"] --> L["LeanCTX"]
+    L --> R["Live reads, search, tree, graph, impact, callgraph"]
+    C --> M["Mempalace"]
+    M --> H["Durable project history and decisions"]
+    C --> D["MCP_DOCKER"]
+    D --> X["Project-specific live services"]
 ```
 
-LeanCTX is a per-session headless stdio MCP, not a resident service. Orichum
-pins it to the active Git repository, gives it private session-local storage,
-and exposes a fixed six-tool surface for source context, patches, and
-observational shell output. `ctx_patch` and `ctx_shell` keep normal Claude Code
-approval. `ctx_call`, LeanCTX proxying, graph, memory, global hooks, shell
-interception, and autonomous features are disabled. Native Claude Code tools
-remain available as the fallback and for exact verification.
+LeanCTX owns live code intelligence. Each physical session receives a private
+headless MCP pinned to the active repository, or to the verified configured
+parent when launched above several repositories. Its fixed surface is:
+
+`ctx_read`, `ctx_search`, `ctx_tree`, `ctx_expand`, `ctx_graph`, `ctx_impact`,
+`ctx_callgraph`, `ctx_patch`, and `ctx_shell`.
+
+The graph and index are built lazily when a tool needs them. There is no
+repository-local generated graph, global hook, shared graph daemon, or startup
+indexing pass. Concurrent sessions keep independent LeanCTX state.
+
+Mempalace remains the durable-memory layer. It is populated explicitly when a
+project context is added or refreshed, and recalled only when prior decisions
+or conventions matter. MCP_DOCKER is attached only when the resolved project
+declares a profile.
 
 ## Launch sequence
 
 1. Resolve the longest matching project context.
-2. Validate the focused configuration and project resources.
+2. Validate configuration and project resources.
 3. Discover live provider/model routes and select eligible accounts.
 4. Freeze the logical session route and integrity digests.
-5. Materialize the controller plugin, minimal MCP configuration, and private
-   LeanCTX contract when the launch is inside a Git repository.
-6. Materialize a private controller policy containing the verified project,
-   Docker profile, GitHub account, and Mempalace wing bindings.
+5. Materialize the controller plugin, strict MCP file, and private LeanCTX
+   contract.
+6. Bind the verified project, Docker profile, GitHub account, and Mempalace
+   wing in the controller policy.
 7. Start and health-check the session's Claudex translator.
-8. Launch Claude Code with the strict MCP file and controller policy.
+8. Launch Claude Code.
 
-Resume revalidates the current control plane and services but keeps the logical
-session's frozen route. Fork creates a new binding and carries only a bounded
-handoff.
+Resume revalidates services and creates a fresh physical package while
+preserving the logical session route. Fork creates a new logical binding and
+carries only a bounded handoff.
 
 ## Model request path
 
 ```mermaid
 flowchart LR
-    CC["Claude Code"] --> X["Claudex translator"]
-    X --> R["Orichum route proxy"]
+    CC["Claude Code"] --> X["Per-session Claudex translator"]
+    X --> R["Shared Orichum route proxy"]
     B["Immutable route binding"] -.-> R
-    R --> P["CLIProxyAPI"]
-    P --> A["Named account"]
+    R --> P["Shared CLIProxyAPI"]
+    P --> A["Selected named account"]
     A --> M["Provider model"]
 ```
 
-The request path has three loopback services: one Claudex translator for the
-physical session, the shared Orichum route proxy, and shared CLIProxyAPI. The
-route binding fixes the primary route and its compatible fallback for the
-logical session.
-
-1. Claude Code sends the model request through its per-session Claudex
-   translator.
-2. Claudex translates the Claude Code request for the session's selected model
-   family.
-3. The shared route proxy reads the immutable session binding and selects its
-   frozen primary route or, when safe, its one compatible fallback.
-4. For supported requests, the route proxy keeps the preferred LeanCTX
-   primitives resident and marks unrelated client tool schemas for deferred
-   loading. It adds tool search automatically; users do not choose a tool
-   profile.
-5. Shared CLIProxyAPI uses the selected provider credential to authenticate and
-   forward the request to the provider model. The credential is routing and
-   authentication data, not another running service.
-6. The model response returns through the same components to Claude Code.
-
-After selecting a route, the proxy retains one bounded, public snapshot per
-logical session. The isolated Claude Code status line reads that loopback
-snapshot to display the active named account and failover state; credentials
-and private routing fields are not exposed.
+The route proxy selects the session's frozen primary route or one compatible
+fallback. For verified request protocols, Orichum keeps the nine LeanCTX tools
+resident and defers unrelated optional tool schemas. The model therefore sees
+one deterministic code-context surface instead of choosing between overlapping
+optimizers.
 
 ## Deterministic tool routing
 
-| Request or tool | Route |
+| Need | Tool |
 |---|---|
-| `ctx_read` anchored context | `ctx_patch` |
-| `ctx_shell` | Observational commands |
-| Native `Bash` | State changes |
-| Native `Read` / `Edit` / `Write` | Fallback only |
-| Graphify | Relationships |
-| Mempalace | Durable history |
-| MCP_DOCKER | Matching live project services |
+| Read, search, tree, or exact expansion | LeanCTX |
+| Relationships, symbols, call paths, or change impact | LeanCTX graph tools |
+| Anchored supported text edit | `ctx_patch` |
+| Observational shell output | `ctx_shell` |
+| Git, package, service, deployment, or other state change | Native `Bash` |
+| Unsupported or binary file operation | Native file tools |
+| Durable history or prior decisions | Mempalace |
+| Project live services | MCP_DOCKER |
 
-The controller uses an anchored `ctx_read` before a LeanCTX `ctx_patch` so text
-changes are tied to current source context. `ctx_shell` is for observation;
-state-changing shell work stays in native `Bash` and follows its normal
-approval path. Native file tools remain available when LeanCTX is absent,
-unsafe, or unsuitable.
-
-## Repository graph lifecycle
-
-```mermaid
-flowchart LR
-    R["Git repository"] --> I["Repository identity and state"]
-    I --> G["Private central Graphify output"]
-    G --> S["Private physical-session snapshot"]
-    S --> MCP["Per-session Graphify MCP"]
-    Q["On-demand graph query"] --> MCP
-    H["Post-commit or post-checkout hook"] -. "detached refresh" .-> G
-```
-
-Clean repositories at the same commit share one revision graph even when their
-clone paths differ. A dirty checkout uses a working graph keyed by its
-persistent checkout identity and content fingerprint, so uncommitted states do
-not leak between clones or linked worktrees. Graph nodes keep source paths
-relative to the repository; generated output is stored below Orichum's private
-data directory.
-
-Session setup only accepts a central graph that already matches the exact
-repository state. Each physical session securely copies those validated bytes
-to its private `run_dir/graph.json`, records the digest in immutable context,
-and points its MCP at that mode-`0600` snapshot. It never extracts or updates a
-graph. A running physical session therefore stays on its graph generation even
-when central storage changes. A resume or other new physical run snapshots the
-then-current valid central graph, or omits Graphify when no stable match is
-available. Graphify queries are made on demand through the bound MCP, and graph
-commands do not invoke Mempalace.
+Native tools remain a fallback, not a second optimizer. `ctx_patch` and
+`ctx_shell` retain Claude Code's normal approval behavior.
 
 ## Boundaries
 
-- All network services are loopback-only.
-- Session files and account registries use private ownership and modes.
-- Context and model files are digest-bound to the physical run.
-- GitHub configuration is copied into per-session account-specific state.
-- LeanCTX, MCP_DOCKER, Mempalace, and Graphify are included only when relevant.
-- LeanCTX state and config are private to one physical session and never become
-  a global hook, daemon, graph, memory store, or request proxy.
-- Graphify output is central and private; repository-local output is legacy
-  migration input, not active state.
-- The controller is the sole writer; audited specialists are read-only.
+- Network services listen on loopback only.
+- Session files and account registries are private and digest-bound.
+- LeanCTX cache, index, graph, and configuration are private to one physical
+  session.
+- The controller is the sole writer; specialist agents follow the configured
+  bounded policy.
 - The route proxy performs at most one safe pre-output fallback.
 
-Orichum integrates upstream projects without changing their source code.
+Orichum integrates upstream projects without modifying their source code.

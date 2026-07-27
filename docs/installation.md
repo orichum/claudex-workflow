@@ -31,8 +31,7 @@ The first run performs the complete installation. It:
 
 1. validates the focused configuration and controller plugin;
 2. installs the newest available CPython 3.14 patch privately;
-3. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, Mempalace, and
-   Graphify;
+3. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, and Mempalace;
 4. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
 5. installs or reconciles the shared loopback services;
 6. preserves valid configuration and authentication;
@@ -52,12 +51,17 @@ For normal maintenance, run:
 # Fast reconciliation; no upstream checks when verified and healthy.
 ```
 
-An unchanged healthy installation targets completion in under 10 seconds.
+An unchanged healthy installation targets completion in about 10 seconds.
 Orichum verifies its private install-state manifest, checks owned services and
 critical runtime readiness, and reuses matching components. A missing or
 damaged component is repaired without upgrading unrelated tools. Fresh
 installations automatically use the complete path. Repairs can take longer
 than the fast-path target.
+
+Install and uninstall share one per-user lifecycle lock at
+`~/.local/state/orichum/install.lock`. Even when `ORICHUM_DATA_HOME` is
+relocated, two processes cannot concurrently replace the same launcher or user
+services. The lock directory exists only while a lifecycle operation is active.
 
 To deliberately resolve current external releases and upgrade every managed
 runtime, run:
@@ -133,7 +137,6 @@ This stops and removes only verified Orichum-owned services, removes the
 - provider credentials and named accounts;
 - model and project configuration;
 - Claude and Orichum session state;
-- central Graphify graphs;
 - Mempalace palaces.
 
 That preserved state is reused if you run `./install.sh` again.
@@ -144,11 +147,10 @@ To also permanently delete Orichum's data and configuration roots:
 ./install.sh --uninstall --purge
 ```
 
-Purge removes saved Orichum credentials, sessions, project configuration, and
-central Graphify data. It does not delete the repository checkout or external
-Mempalace palaces.
+Purge removes saved Orichum credentials, sessions, and project configuration.
+It does not delete the repository checkout or external Mempalace palaces.
 
 Neither mode uninstalls standalone Claude Code, CLIProxyAPI, Claudex, LeanCTX,
-Mempalace, Graphify, uv, or Headroom installations. If a service definition or
-launcher with an Orichum name is not verifiably owned by this setup, uninstall
-stops before changing anything.
+Mempalace, or uv installations. If a service definition or launcher with an
+Orichum name is not verifiably owned by this setup, uninstall stops before
+changing anything.

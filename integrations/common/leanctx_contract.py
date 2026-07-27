@@ -8,13 +8,16 @@ AUTO_APPROVED_TOOLS = (
     "ctx_search",
     "ctx_tree",
     "ctx_expand",
+    "ctx_graph",
+    "ctx_impact",
+    "ctx_callgraph",
 )
 TOOLS = (*AUTO_APPROVED_TOOLS, "ctx_patch", "ctx_shell")
 
 _CONFIG = """compression_level = "lite"
 minimal_overhead = true
-tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand", "ctx_patch", "ctx_shell"]
-disabled_tools = ["ctx_call", "ctx_callgraph", "ctx_compose", "ctx_session", "shell"]
+tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand", "ctx_graph", "ctx_impact", "ctx_callgraph", "ctx_patch", "ctx_shell"]
+disabled_tools = ["ctx_call", "ctx_compose", "ctx_session", "shell"]
 auto_capture = false
 buddy_enabled = false
 enable_wakeup_ctx = false

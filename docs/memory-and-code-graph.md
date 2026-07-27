@@ -1,136 +1,60 @@
-# Memory and code graph
+# Memory and code intelligence
 
-LeanCTX, Mempalace, and Graphify solve different problems:
+Orichum separates current code from durable memory:
 
-- LeanCTX retrieves compact current source and shell-independent search
-  context for the live session.
-- Mempalace recalls durable project decisions and conventions.
-- Graphify describes current repository structure and relationships.
+| Question | Source |
+|---|---|
+| What does the current checkout contain? | LeanCTX |
+| What calls this symbol or depends on this change? | LeanCTX graph, impact, and callgraph tools |
+| What decision or convention did this project establish earlier? | Mempalace |
 
-## Initial population
+## Initial project setup
 
-`orichum context add` or an explicit `orichum context populate ROOT` discovers
-independent repositories, follows declared submodules, skips duplicate linked
-worktrees, mines repository content into Mempalace, synchronizes central
-Graphify graphs, and installs Orichum's Graphify refresh hooks.
-
-Population is a foreground, explicit operation. Progress and elapsed time are
-visible; it is not a resident indexing service.
-
-Generated Graphify data and legacy repository-local `graphify-out` directories
-are excluded from Mempalace mining. This avoids embedding a large generated
-graph back into memory. It does not remove code structure from the workflow:
-Graphify remains available through its own MCP.
-
-Graph-only synchronization is also available independently of context
-population:
+`orichum context add` and `orichum context populate ROOT` discover repositories,
+skip duplicate linked worktrees, and mine the outer repository sources into the
+configured Mempalace wing. Population is explicit and foreground-only; progress
+and elapsed time are shown.
 
 ```bash
-orichum graph .
-orichum graph ~/xebia
-orichum graph status .
+orichum context add ~/projects --pool shared
+orichum context populate ~/projects
 ```
 
-These commands do not invoke Mempalace.
-
-## Identity and central storage
-
-Orichum derives a repository identity from its unambiguous fetch remote,
-preferring `origin`. Credentials are removed and URL forms are normalized, so
-equivalent HTTPS and SSH clone URLs select the same identity. Repositories
-without a remote receive a persistent local identity on the first graph sync.
-Set or clear an override when automatic identity is unavailable or unsuitable:
-
-```bash
-orichum graph identity . --set github.com/xebia/X-ACE-UI
-orichum graph identity . --clear
-```
-
-Graphify runs against the repository but writes only below Orichum's private
-data directory. Use `orichum config paths` to locate that data directory and
-`orichum graph status .` to see the exact selected output. Source paths stored
-in the graph are repository-relative, so a clean graph can be reused after a
-clone is moved.
-
-Clean clones with the same repository identity and commit share one revision
-graph. Dirty checkouts use separate working graphs keyed by a
-persistent checkout identity and a fingerprint of their changes. This keeps
-uncommitted states isolated between clones and linked worktrees, even when they
-currently point to the same commit.
-
-## Lifecycle and hooks
-
-`orichum graph PATH` discovers repositories below `PATH` and creates or updates
-the graph for each repository's exact current state. It leaves no active
-Graphify output in the repository. Graphify runs with the repository as its
-working directory, while `GRAPHIFY_OUT` points at private staging. Before
-activation, Orichum validates repository-relative source paths and requires the
-graph's `built_at_commit` provenance to equal the repository revision selected
-for that graph state. Marked `post-commit` and `post-checkout` hook sections are
-installed only after a graph is successfully activated or migrated, while
-preserving unrelated user hook content. A not-applicable sync for a repository
-with no supported code installs no hooks; run an explicit sync after supported
-code is added. The hook launches a detached, serialized refresh, so Git does
-not wait for Graphify extraction. Hook output is kept in a bounded private log.
-
-Each successful sync also prunes only working graphs whose recorded checkout
-path no longer exists. Revision graphs remain reusable, and working graphs for
-existing checkouts are retained. Removing a temporary linked worktree therefore
-makes its working graph eligible for pruning on a later sync for that repository
-identity.
-
-If a recognized repository-local `graphify-out` exists and no central graph is
-active for that state, the next sync validates and migrates it transactionally.
-Unknown or unsafe entries stop migration instead of deleting data. Central
-storage is authoritative after migration; do not create or point tools at
-repository-local Graphify output.
+Population does not build code graphs. A new physical session starts with a
+private empty LeanCTX state and builds only the index or graph needed by actual
+tool calls.
 
 ## During a session
 
-- LeanCTX handles current file reads, source search, tree views, and expansion
-  from its private per-session cache. It is never the durable memory or
-  repository relationship authority.
-- The controller recalls Mempalace only when prior decisions or durable
-  conventions matter.
-- A hook binds every Mempalace call to the verified project wing.
-- Graphify queries are made on demand when a matching central graph was bound
-  at session startup.
-- Broad graph or memory payloads are not injected automatically into every
-  prompt.
+- LeanCTX reads the live checkout and owns source search, relationships,
+  symbols, call paths, and impact analysis.
+- Mempalace is consulted only when durable project history matters.
+- Mempalace hooks bind each call to the verified project wing.
+- No source, graph, or memory payload is injected into every prompt.
 
-This on-demand design keeps the tools useful without injecting source, graph,
-or memory payloads into every prompt. LeanCTX's advertised surface is fixed at
-six tools; Graphify and Mempalace remain conditional on project state.
+This keeps the workflow current and token-efficient: LeanCTX returns bounded
+live context, while Mempalace avoids repeatedly rediscovering durable
+decisions.
 
-Session startup never builds, updates, migrates, or prunes graphs. It accepts a
-central graph only when that graph is current and stable for the exact
-repository state. Each physical session then copies the validated bytes to
-private `run_dir/graph.json` with mode `0600`, records their digest in immutable
-context, and points the Graphify MCP at that snapshot rather than central
-storage.
+## Worktrees and multiple repositories
 
-An existing physical session remains on its snapshot generation when the
-central graph changes. Materialization of a resume or other new physical run
-retries once against the latest stable validated binding. A stable match is
-snapshotted and includes Graphify; if no valid binding exists or instability
-persists, the physical session is created without Graphify. Build the graph
-first, then start a new session:
+LeanCTX state is bound to the physical session's resolved root. A session
+started inside a worktree reads that worktree. A session started inside another
+clone reads that clone; no absolute-path graph artifact is shared between
+them.
 
-```bash
-orichum graph .
-orichum
-```
+When launched from a configured parent such as `~/xebia`, LeanCTX is jailed to
+that parent and can inspect repositories below it. Enter a specific repository
+before launching when you want the narrowest index and best context efficiency.
 
 ## Maintenance
 
-Graphify's installed Git hooks refresh normal repository changes. Run
-`orichum graph .` for an explicit graph refresh. Run full population only after
-adding repositories or when intentionally refreshing both project memory and
-graphs:
-
 ```bash
-orichum graph .
-orichum context populate ~/xebia
+orichum context populate ~/projects
 orichum context validate
+orichum leanctx stats
 orichum doctor
 ```
+
+Repopulate Mempalace after adding repositories or when you intentionally want
+to refresh durable project memory. LeanCTX needs no manual refresh command.

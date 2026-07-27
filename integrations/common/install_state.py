@@ -26,7 +26,6 @@ COMPONENTS = frozenset({
     "claudex",
     "leanctx",
     "mempalace",
-    "graphify",
     "routing",
     "controllerPlugin",
 })

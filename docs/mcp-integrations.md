@@ -1,75 +1,49 @@
 # MCP integrations
 
-Orichum creates a private minimal MCP configuration for each physical session.
+Orichum creates a private strict MCP configuration for each physical session.
 Only services relevant to the resolved project are included.
 
 | MCP | Loaded when | Purpose |
 |---|---|---|
-| LeanCTX | Launch is inside a Git repository and Orichum's managed binary is valid | Compact source context, anchored text patches, and observational shell output |
-| MCP_DOCKER | Context has a Docker profile and Docker is available | Project-specific Jira and other live-service tools |
-| Mempalace | Context palace exists and passes ownership checks | Durable project recall and bounded memory writes |
-| Graphify | A current central graph exactly matches the repository state | On-demand code-structure query before broad raw search |
+| LeanCTX | Managed binary and project root are valid | Live reads, search, tree, graph, impact, callgraph, patches, and observational shell output |
+| MCP_DOCKER | Project context declares a Docker profile | Project-specific Jira and other live-service tools |
+| Mempalace | Project palace passes ownership checks | Durable project recall and bounded memory writes |
 
 ## MCP_DOCKER profiles
 
-The project context names the profile:
+The parent-directory context selects the profile:
 
 ```bash
 orichum context add ~/xebia --docker xebia
 orichum context add ~/complion --docker realtime
 ```
 
-Every repository below that parent inherits the matching profile. A project
-without a Docker profile simply omits MCP_DOCKER; it is not forced to use a
-global read-only profile.
+Repositories below that parent inherit the same profile. A context without
+`--docker` simply omits MCP_DOCKER.
 
-Create, update, comment, delete, transition, and other write tools remain
-available when the selected Docker profile exposes them. Claude Code's normal
-tool approval and the live service's own authorization still apply.
+Profile tools may include create, update, comment, delete, and transition
+operations. Claude Code approval and the live service's authorization still
+apply. Orichum does not activate or switch the user's global Docker MCP profile;
+the selected profile is passed directly to that session's gateway command.
 
 ## Isolation
 
-The generated MCP file belongs to one verified session context and is launched
-with strict MCP configuration.
+- The MCP file belongs to one verified physical session.
+- LeanCTX is jailed to the resolved root and stores all state in
+  `run_dir/leanctx`.
+- Mempalace calls are bound to the verified project wing.
+- Docker profile and GitHub identity are frozen into the session policy.
+- Concurrent sessions may use different profiles, accounts, repositories, and
+  LeanCTX indexes without changing global state.
 
-Orichum also appends the verified project root, Docker profile, GitHub account,
-and Mempalace wing to that physical session's controller policy. The named
-Docker profile is already selected by the session's gateway command; the
-controller must not activate or switch profiles globally. This keeps concurrent
-`xebia`, `realtime`, and profile-free sessions isolated from one another.
+LeanCTX advertises exactly nine tools. Its read, search, tree, expansion,
+graph, impact, and callgraph tools are preapproved. `ctx_patch` and `ctx_shell`
+retain normal approval because they edit text or execute commands. The
+universal `ctx_call` gateway and LeanCTX autonomy, daemon, proxy, memory,
+provider, and global-hook features are disabled.
 
-LeanCTX receives a project jail at the active Git root and a private
-`run_dir/leanctx` directory containing its deterministic mode-`0600` config and
-session-local data. Orichum exposes a fixed surface for compact reads, source
-search, trees, lossless expansion, text patches, and compressed shell output.
-The universal `ctx_call`
-gateway is disabled, so hidden LeanCTX tools cannot be reached indirectly.
-Claude Code preapproves the four read-only context tools. `ctx_patch` and
-`ctx_shell` keep normal Claude Code approval because they change text or
-execute commands. The exact read-only Graphify surface and wing-bound
-Mempalace reads are also preapproved; Graphify is an immutable session snapshot,
-and the Mempalace hook verifies the project binding before every call.
-Mempalace writes and MCP_DOCKER operations keep normal Claude Code approval.
-Orichum does not invoke LeanCTX setup commands or enable its hooks, daemon,
-proxy, graph, memory, providers, or autonomy. If the managed binary is missing,
-unsafe, or the launch is outside a Git repository, LeanCTX is omitted and
-native Claude Code tools remain available.
+Mempalace read tools are preapproved after the wing-binding hook validates
+them. Mempalace writes and MCP_DOCKER operations retain normal approval.
 
-Mempalace inputs are rewritten to the verified project wing. For Graphify, the
-matching graph in private central storage is a validated source, not the MCP's
-live target. Each physical session copies its bytes into private
-`run_dir/graph.json` with mode `0600`, records the digest in immutable context,
-and points `mcp.json` at that snapshot.
-
-Session startup does not build or refresh a graph. Materialization retries once
-against the latest stable validated binding. If it obtains a stable match, the
-physical run snapshots the graph and includes Graphify. If no valid binding
-exists or instability persists, it creates the physical session without
-Graphify. Run `orichum graph .` explicitly and start or resume into a new
-physical run when a graph is needed. An existing physical session keeps its
-immutable snapshot even if the central graph is later replaced. Queries are
-still on demand after Graphify is loaded; no graph payload is injected into
-every prompt.
-
-This avoids cross-project context, profile, memory, and graph leakage while
-allowing multiple projects, clones, worktrees, and sessions on one machine.
+This avoids cross-project profile, memory, and code-context leakage while
+keeping one deterministic live-code surface.

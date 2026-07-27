@@ -212,51 +212,25 @@ orichum_uninstall_remove_service() {
   rm -f -- "$service_file"
 }
 
-orichum_uninstall_remove_legacy_headroom() {
-  local platform="$1"
-  local data_root="$2"
-  local index
-  local -a files labels units modes
-  [[ -d "$data_root" && ! -L "$data_root" ]] || return 0
-  if [[ "$platform" == darwin ]]; then
-    files=(
-      "$HOME/Library/LaunchAgents/io.orichum.headroom.plist"
-      "$HOME/Library/LaunchAgents/com.user.claudex-headroom.plist"
-      "$HOME/Library/LaunchAgents/com.user.headroom-proxy.plist"
-    )
-    labels=(
-      io.orichum.headroom
-      com.user.claudex-headroom
-      com.user.headroom-proxy
-    )
-    units=(- - -)
-  else
-    files=(
-      "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-headroom.service"
-      "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-headroom.service"
-      "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
-    )
-    labels=(- - -)
-    units=(
-      orichum-headroom.service
-      claudex-headroom.service
-      headroom-proxy.service
-    )
-  fi
-  modes=(new legacy legacy)
-  for index in "${!files[@]}"; do
-    if [[ -e "${files[$index]}" || -L "${files[$index]}" ]]; then
-      remove_owned_headroom_installation \
-        "$platform" "$data_root" "${files[$index]}" \
-        "${labels[$index]}" "${units[$index]}" "${modes[$index]}" || \
+orichum_uninstall_validate_lifecycle_roots() {
+  (($# == 3)) || return 2
+  local data_root="$1"
+  local config_root="$2"
+  local lock_path="$3"
+  local lifecycle_root="${lock_path%/install.lock}"
+  [[ "$lock_path" == "$lifecycle_root/install.lock" ]] || {
+    workflow_die "Orichum lifecycle lock path is invalid"
+    return 1
+  }
+  for root in "$data_root" "$config_root"; do
+    case "$lifecycle_root" in
+      "$root"|"$root"/*)
+        workflow_die \
+          "refusing Orichum root that contains lifecycle state: $root"
         return 1
-    fi
+        ;;
+    esac
   done
-  if [[ -e "$data_root/headroom" || -L "$data_root/headroom" ]]; then
-    remove_owned_headroom_installation \
-      "$platform" "$data_root" "${files[0]}" \
-      "${labels[0]}" "${units[0]}" "${modes[0]}"
-  fi
 }
 
 orichum_uninstall() {
@@ -281,6 +255,8 @@ orichum_uninstall() {
     orichum_uninstall_validate_private_root \
       "$data_root" "$workflow_root" ORICHUM_DATA_HOME
   )" || return 1
+  orichum_uninstall_validate_lifecycle_roots \
+    "$data_root" "$config_root" "${WORKFLOW_LOCK_DIR:-}" || return 1
   case "$(uname -s)" in
     Darwin) platform=darwin ;;
     Linux) platform=systemd ;;
@@ -301,7 +277,6 @@ orichum_uninstall() {
   route_state="$(orichum_uninstall_preflight_service \
     "$platform" route "$route_file" "$route_label" \
     "$route_unit" "$data_root" "$workflow_root")" || return 1
-  preflight_owned_headroom_installation "$platform" "$data_root" || return 1
   orichum_uninstall_preflight_runtime "$data_root" || {
     workflow_die "refusing unsafe Orichum runtime layout"
     return 1
@@ -320,7 +295,6 @@ orichum_uninstall() {
   if [[ "$platform" == systemd ]]; then
     systemd_reload=true
   fi
-  orichum_uninstall_remove_legacy_headroom "$platform" "$data_root"
   if [[ "$systemd_reload" == true ]]; then
     systemctl --user daemon-reload >/dev/null
   fi
@@ -358,7 +332,7 @@ orichum_uninstall() {
     "  Removed launcher: $launcher" \
     "  Preserved data:   $data_root" \
     "  Preserved config: $config_root" \
-    '  Accounts, sessions, project context, graphs, and Mempalace palaces were preserved.' \
+    '  Accounts, sessions, project context, and Mempalace palaces were preserved.' \
     '  Standalone third-party installations were not changed.' \
     "  Reinstall with: $workflow_root/install.sh"
 }

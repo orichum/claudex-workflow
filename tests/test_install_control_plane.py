@@ -52,12 +52,16 @@ class InstallControlPlaneTests(unittest.TestCase):
         ).read_bytes()
         stage(self.repository, self.installed, self.candidate)
 
-    def _lock_fd(self, journal: Path) -> int:
+    def _lock_path(self, journal: Path) -> Path:
         lock = Path(journal).parent / "install.lock"
         try:
             lock.mkdir(mode=0o700)
         except FileExistsError:
             pass
+        return lock
+
+    def _lock_fd(self, journal: Path) -> int:
+        lock = self._lock_path(journal)
         descriptor = os.open(
             lock,
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
@@ -70,6 +74,7 @@ class InstallControlPlaneTests(unittest.TestCase):
             self.candidate,
             self.installed,
             journal,
+            self._lock_path(journal),
             self._lock_fd(journal),
         )
 
@@ -77,6 +82,7 @@ class InstallControlPlaneTests(unittest.TestCase):
         rollback(
             self.installed,
             journal,
+            self._lock_path(journal),
             self._lock_fd(journal),
         )
 
@@ -84,11 +90,16 @@ class InstallControlPlaneTests(unittest.TestCase):
         recover(
             self.installed,
             journal,
+            self._lock_path(journal),
             self._lock_fd(journal),
         )
 
     def _finalize(self, journal: Path) -> None:
-        finalize(journal, self._lock_fd(journal))
+        finalize(
+            journal,
+            self._lock_path(journal),
+            self._lock_fd(journal),
+        )
 
     def _assert_original_state(self) -> None:
         self.assertEqual(
@@ -103,33 +114,58 @@ class InstallControlPlaneTests(unittest.TestCase):
             )
         )
 
-    def test_stage_leaves_graph_storage_and_legacy_outputs_outside_candidate(
+    def test_activation_replaces_and_rollback_restores_controller_policy(
         self,
     ) -> None:
-        graph_root = self.installed / "graphs"
-        legacy = self.installed / "graphify-out"
-        graph_root.mkdir(mode=0o700)
-        legacy.mkdir(mode=0o700)
-        (graph_root / "owner-marker").write_text(
-            "central\n", encoding="utf-8"
+        installed_policy = self.installed / "controller-policy.md"
+        stale = b"# stale controller policy\n"
+        installed_policy.write_text(
+            stale.decode(),
+            encoding="utf-8",
         )
-        (legacy / "owner-marker").write_text(
-            "legacy\n", encoding="utf-8"
-        )
+        installed_policy.chmod(0o600)
         shutil.rmtree(self.candidate)
 
         stage(self.repository, self.installed, self.candidate)
 
-        self.assertFalse((self.candidate / "graphs").exists())
-        self.assertFalse((self.candidate / "graphify-out").exists())
+        expected = (
+            self.repository / "config" / "controller-policy.md"
+        ).read_bytes()
         self.assertEqual(
-            (graph_root / "owner-marker").read_text(encoding="utf-8"),
-            "central\n",
+            (self.candidate / "controller-policy.md").read_bytes(),
+            expected,
         )
-        self.assertEqual(
-            (legacy / "owner-marker").read_text(encoding="utf-8"),
-            "legacy\n",
+        journal = self.root / "policy-journal"
+        self._activate(journal)
+        self.assertEqual(installed_policy.read_bytes(), expected)
+        self._rollback(journal)
+        self.assertEqual(installed_policy.read_bytes(), stale)
+
+    def test_rollback_accepts_previous_schema_two_journal(self) -> None:
+        journal = self.root / "legacy-schema-two-journal"
+        self._activate(journal)
+        manifest_path = journal / "installed-control-plane.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("priorPolicyPresent")
+        manifest.pop("activatedPolicyDigest")
+        manifest_path.write_text(
+            json.dumps(manifest, separators=(",", ":")) + "\n",
+            encoding="utf-8",
         )
+        manifest_path.chmod(0o600)
+        for name in (
+            "installed-controller-policy.data",
+            "installed-controller-policy.present",
+            "installed-controller-policy.absent",
+        ):
+            path = journal / name
+            if path.exists():
+                path.unlink()
+
+        self._rollback(journal)
+
+        self._assert_original_state()
+        self.assertFalse(journal.exists())
 
     def test_rollback_is_idempotent_across_activation_interruptions(
         self,
@@ -137,6 +173,7 @@ class InstallControlPlaneTests(unittest.TestCase):
         for checkpoint in (
             "prepared",
             "bootstrap:accounts.json",
+            "controller-policy-installed",
             "stack-saved",
             "committed",
         ):
@@ -157,6 +194,7 @@ class InstallControlPlaneTests(unittest.TestCase):
                             self.candidate,
                             self.installed,
                             snapshot,
+                            self._lock_path(snapshot),
                             self._lock_fd(snapshot),
                         )
                 self._rollback(snapshot)
@@ -183,6 +221,9 @@ class InstallControlPlaneTests(unittest.TestCase):
                 self.candidate,
                 self.installed,
                 linked_state / "install-control-plane",
+                self._lock_path(
+                    linked_state / "install-control-plane"
+                ),
                 self._lock_fd(
                     linked_state / "install-control-plane"
                 ),
@@ -442,9 +483,11 @@ control.activate(
     Path(sys.argv[1]),
     Path(sys.argv[2]),
     Path(sys.argv[3]),
-    int(sys.argv[4]),
+    Path(sys.argv[4]),
+    int(sys.argv[5]),
 )
 """
+        lock_path = self._lock_path(journal)
         lock_fd = self._lock_fd(journal)
         killed = subprocess.run(
             [
@@ -454,6 +497,7 @@ control.activate(
                 str(self.candidate),
                 str(self.installed),
                 str(journal),
+                str(lock_path),
                 str(lock_fd),
             ],
             cwd=self.repository,
@@ -482,7 +526,12 @@ control.activate(
             InstallControlPlaneError,
             "different installed configuration root",
         ):
-            recover(other, journal, self._lock_fd(journal))
+            recover(
+                other,
+                journal,
+                self._lock_path(journal),
+                self._lock_fd(journal),
+            )
 
         self.assertTrue(journal.exists())
         self.assertTrue((self.installed / "accounts.json").exists())
@@ -510,7 +559,12 @@ control.activate(
             InstallControlPlaneError,
             "held installer lock",
         ):
-            recover(self.installed, replacement_journal, descriptor)
+            recover(
+                self.installed,
+                replacement_journal,
+                held_lock,
+                descriptor,
+            )
 
         self.assertTrue(replacement_journal.exists())
         self.assertFalse(
@@ -551,6 +605,7 @@ control.activate(
                 self.candidate,
                 self.installed,
                 state / "install-control-plane",
+                held_lock,
                 descriptor,
             )
 

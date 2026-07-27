@@ -64,6 +64,26 @@ SH
 
 chmod 0755 "$FAKE_BIN/uname" "$FAKE_BIN/launchctl" "$FAKE_BIN/systemctl"
 
+# shellcheck source=../lib/workflow.sh
+source "$ROOT/lib/workflow.sh"
+# shellcheck source=../lib/uninstall.sh
+source "$ROOT/lib/uninstall.sh"
+declare -F orichum_uninstall_validate_lifecycle_roots >/dev/null
+if orichum_uninstall_validate_lifecycle_roots \
+    "$TEST_ROOT/home/.local" "$TEST_ROOT/config" \
+    "$TEST_ROOT/home/.local/state/orichum/install.lock" \
+    >/dev/null 2>&1; then
+  printf 'data root containing the lifecycle lock was accepted\n' >&2
+  exit 1
+fi
+if orichum_uninstall_validate_lifecycle_roots \
+    "$TEST_ROOT/data" "$TEST_ROOT/home" \
+    "$TEST_ROOT/home/.local/state/orichum/install.lock" \
+    >/dev/null 2>&1; then
+  printf 'config root containing the lifecycle lock was accepted\n' >&2
+  exit 1
+fi
+
 render_services() {
   local platform="$1"
   local home="$2"
@@ -104,11 +124,10 @@ seed_installation() {
   local loaded_root="$fixture_root/loaded"
 
   install -d \
-    "$home" "$data_root"/{auth,bin,claude-config,graphs,logs,model-config,python,state,tools} \
+    "$home" "$data_root"/{auth,bin,claude-config,logs,model-config,python,state,tools} \
     "$config_root" "$user_bin" "$loaded_root"
   printf 'credential\n' >"$data_root/auth/account.json"
   printf 'session\n' >"$data_root/state/session.json"
-  printf 'graph\n' >"$data_root/graphs/graph.json"
   printf 'claude session\n' >"$data_root/claude-config/history.jsonl"
   printf 'model\n' >"$data_root/model-config/current-state"
   printf 'project\n' >"$config_root/projects.json"
@@ -156,6 +175,22 @@ run_uninstall() {
     "$ROOT/install.sh" --uninstall "$@"
 }
 
+locked_root="$TEST_ROOT/lifecycle-locked"
+seed_installation darwin "$locked_root"
+lifecycle_lock="$locked_root/home/.local/state/orichum/install.lock"
+install -d -m 0700 "$lifecycle_lock"
+printf '%s\n' "$$" >"$lifecycle_lock/pid"
+printf '%s\n' "test-owner" >"$lifecycle_lock/identity"
+if run_uninstall darwin "$locked_root" \
+    >"$locked_root/locked-output.log" 2>&1; then
+  printf 'uninstall ignored the shared lifecycle lock\n' >&2
+  exit 1
+fi
+grep -Fq 'another installer owns' "$locked_root/locked-output.log"
+[[ -L "$locked_root/user-bin/orichum" ]]
+[[ -f "$locked_root/data/bin/cli-proxy-api" ]]
+rm -rf -- "$lifecycle_lock"
+
 darwin_root="$TEST_ROOT/darwin-default"
 seed_installation darwin "$darwin_root"
 printf 'standalone\n' >"$darwin_root/standalone-tool"
@@ -164,7 +199,6 @@ run_uninstall darwin "$darwin_root"
 for preserved in \
     auth/account.json \
     state/session.json \
-    graphs/graph.json \
     claude-config/history.jsonl \
     model-config/current-state; do
   [[ -f "$darwin_root/data/$preserved" ]]

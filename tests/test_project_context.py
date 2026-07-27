@@ -792,69 +792,25 @@ class ContextCommandTests(unittest.TestCase):
             "SKIP_DIRS = set()\n", encoding="utf-8"
         )
         self.tool_calls_path = self.root / "fake-tool-calls.jsonl"
-        for name in ("mempalace", "graphify"):
-            tool = self.tool_directory / name
-            tool.write_text(
-                """#!/usr/bin/env python3
+        tool = self.tool_directory / "mempalace"
+        tool.write_text(
+            """#!/usr/bin/env python3
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
-tool = Path(sys.argv[0]).name
 with Path(os.environ["FAKE_TOOL_CALLS"]).open("a", encoding="utf-8") as log:
-    log.write(json.dumps({"tool": tool, "args": sys.argv[1:], "cwd": os.getcwd()}) + "\\n")
+    log.write(json.dumps({
+        "tool": "mempalace",
+        "args": sys.argv[1:],
+        "cwd": os.getcwd(),
+    }) + "\\n")
 
-if tool == "mempalace":
-    palace = Path(sys.argv[sys.argv.index("--palace") + 1])
-    if "mine" in sys.argv:
-        (palace / "population-artifact").write_text("populated", encoding="utf-8")
-    print("raw mempalace success output")
-    raise SystemExit(0)
-
-operation = sys.argv[1]
-if operation in {"extract", "update"}:
-    print("raw graphify success output")
-    repository = Path(sys.argv[2]).resolve()
-    failure = os.environ.get("FAKE_GRAPHIFY_FAIL")
-    if failure and failure in {"1", repository.name}:
-        print("fixture graphify failure", file=sys.stderr)
-        raise SystemExit(1)
-    output = Path(os.environ["GRAPHIFY_OUT"])
-    if not output.is_absolute():
-        print("fixture requires absolute GRAPHIFY_OUT", file=sys.stderr)
-        raise SystemExit(1)
-    commit = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    source_file = subprocess.run(
-        ["git", "-C", str(repository), "ls-files"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()[0]
-    graph = output / "graph.json"
-    graph.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    graph.write_text(
-        json.dumps({
-            "built_at_commit": commit,
-            "provenance": {
-                "repository": str(repository),
-                "commit": commit,
-            },
-            "nodes": [{
-                "id": "fixture",
-                "source_file": source_file,
-            }],
-            "links": [],
-        }),
-        encoding="utf-8",
-    )
-if operation in {"extract", "update"} and os.environ.get("FAKE_CONFIG_MUTATION"):
+palace = Path(sys.argv[sys.argv.index("--palace") + 1])
+if "mine" in sys.argv:
+    (palace / "population-artifact").write_text("populated", encoding="utf-8")
+if "mine" in sys.argv and os.environ.get("FAKE_CONFIG_MUTATION"):
     config = Path(os.environ["FAKE_CONFIG_MUTATION"])
     root = Path(os.environ["FAKE_CONFIG_ROOT"])
     config.write_text(json.dumps({"contexts": [{
@@ -863,11 +819,15 @@ if operation in {"extract", "update"} and os.environ.get("FAKE_CONFIG_MUTATION")
         "memoryPalace": str(root.parent / "concurrent-palace"),
         "memoryWing": "concurrent",
     }]}) + "\\n", encoding="utf-8")
+if "mine" in sys.argv and os.environ.get("FAKE_MEMPALACE_FAIL"):
+    print("fixture MemPalace failure", file=sys.stderr)
+    raise SystemExit(1)
+print("raw mempalace success output")
 raise SystemExit(0)
 """,
-                encoding="utf-8",
-            )
-            tool.chmod(0o755)
+            encoding="utf-8",
+        )
+        tool.chmod(0o755)
         self.config_path = self.root / "project-context.json"
         self.config_path.write_text('{\n  "contexts": []\n}\n', encoding="utf-8")
         os.chmod(self.config_path, 0o640)
@@ -1316,7 +1276,6 @@ raise SystemExit(0)
         self.assertIn("[mempalace] verifying store", added.stdout)
         self.assertIn("MemPalace: populated wing workspace", added.stdout)
         self.assertNotIn("raw mempalace success output", added.stdout)
-        self.assertNotIn("raw graphify success output", added.stdout)
 
     def test_population_failure_does_not_commit_new_mapping(self):
         self.init_git(self.workspace)
@@ -1326,7 +1285,7 @@ raise SystemExit(0)
             str(self.workspace),
             "--docker",
             "dev",
-            environment={"FAKE_GRAPHIFY_FAIL": "1"},
+            environment={"FAKE_MEMPALACE_FAIL": "1"},
         )
 
         self.assertNotEqual(failed.returncode, 0)
@@ -1335,36 +1294,28 @@ raise SystemExit(0)
             failed.stderr.splitlines()[0],
             "ERROR: project context operation rejected",
         )
-        self.assertIn("Graphify failed with exit code 1", failed.stderr)
+        self.assertIn("MemPalace mine", failed.stderr)
+        self.assertIn("exit code 1", failed.stderr)
         self.assertNotIn("Traceback", failed.stderr)
 
-    def test_later_repository_failure_keeps_completed_population_progress(self):
+    def test_multiple_repositories_are_reported_without_eager_indexing(self):
         first = self.workspace / "first"
         second = self.workspace / "second"
         self.init_git(first)
         self.init_git(second)
 
-        failed = self.run_context(
+        populated = self.run_context(
             "add",
             str(self.workspace),
             "--docker",
             "dev",
-            environment={"FAKE_GRAPHIFY_FAIL": "second"},
         )
 
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertEqual(self.load_contexts(), [])
-        self.assertIn("[mempalace] store verified", failed.stdout)
-        self.assertIn("[graphify 1/2] created first", failed.stdout)
-        self.assertIn("[graphify 2/2] created second", failed.stdout)
-        self.assertIn(
-            "Graphify failed with exit code 1", failed.stderr
-        )
-        self.assertEqual(
-            len(tuple((self.data_home / "graphs").glob("**/graph.json"))),
-            1,
-        )
-        self.assertLessEqual(len(failed.stderr), 4_100)
+        self.assertEqual(populated.returncode, 0, populated.stderr)
+        self.assertIn("[discover] 1/2 first — repository source", populated.stdout)
+        self.assertIn("[discover] 2/2 second — repository source", populated.stdout)
+        self.assertIn("[mempalace] store verified", populated.stdout)
+        self.assertNotIn("graph", populated.stdout.lower())
 
     def test_final_revalidation_failure_keeps_all_population_progress(self):
         first = self.workspace / "first"
@@ -1396,9 +1347,8 @@ raise SystemExit(0)
             ],
         )
         self.assertIn("[mempalace] store verified", failed.stdout)
-        self.assertIn("[graphify 1/2] created first", failed.stdout)
-        self.assertIn("[graphify 2/2] created second", failed.stdout)
-        self.assertNotIn("| REPOSITORY", failed.stdout)
+        self.assertIn("[discover] 1/2 first — repository source", failed.stdout)
+        self.assertIn("[discover] 2/2 second — repository source", failed.stdout)
         self.assertLessEqual(len(failed.stderr), 4_100)
 
     def test_populate_rejects_an_unconfigured_root(self):
@@ -1467,11 +1417,7 @@ raise SystemExit(0)
 
         self.assertEqual(populated.returncode, 0, populated.stderr)
         self.assertIn(str(repository), populated.stdout)
-        self.assertFalse((repository / "graphify-out").exists())
-        self.assertEqual(
-            len(tuple((self.data_home / "graphs").glob("**/graph.json"))),
-            1,
-        )
+        self.assertIn("repository source", populated.stdout)
 
     def test_palace_artifacts_survive_population_failure(self):
         self.init_git(self.workspace)
@@ -1484,7 +1430,7 @@ raise SystemExit(0)
             "dev",
             "--palace",
             str(palace),
-            environment={"FAKE_GRAPHIFY_FAIL": "1"},
+            environment={"FAKE_MEMPALACE_FAIL": "1"},
         )
 
         self.assertNotEqual(failed.returncode, 0)

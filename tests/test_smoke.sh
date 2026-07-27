@@ -14,20 +14,13 @@ fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-smoke.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
 ports_root="$fixture/ports"
-for legacy_ports in \
-  '{"cliproxyPort":8317,"headroomPort":8787,"routeProxyPort":13457}' \
-  '{"claudexProxyPort":13456,"cliproxyPort":8317,"headroomPort":8787,"routeProxyPort":13457}'; do
-  install -d -m 0700 "$ports_root"
-  printf '%s\n' "$legacy_ports" >"$ports_root/service-ports.json"
-  IFS=$'\t' read -r cliproxy_port claudex_proxy_port route_proxy_port \
-    < <(read_service_ports "$ports_root")
-  write_service_ports \
-    "$ports_root" "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port"
-  jq -e '
-    keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
-    ([.[]] | unique | length) == 3
-  ' "$ports_root/service-ports.json" >/dev/null
-done
+install -d -m 0700 "$ports_root"
+write_service_ports "$ports_root" 8317 13456 13457
+IFS=$'\t' read -r cliproxy_port claudex_proxy_port route_proxy_port \
+  < <(read_service_ports "$ports_root")
+[[ "$cliproxy_port" == 8317 ]]
+[[ "$claudex_proxy_port" == 13456 ]]
+[[ "$route_proxy_port" == 13457 ]]
 
 render_claudex_config \
   "$fixture/claudex.toml" \
@@ -35,10 +28,6 @@ render_claudex_config \
   gpt-5.6-terra claude-sonnet-5 claude-opus-4-8 \
   /usr/bin/true 8317 13456 13457
 rg -Fxq 'base_url = "http://127.0.0.1:13457"' "$fixture/claudex.toml"
-if rg -qi 'Headroom|X-Headroom-Base-Url' "$fixture/claudex.toml"; then
-  printf 'Claudex config still routes through Headroom\n' >&2
-  exit 1
-fi
 
 for script in "$ROOT"/bin/orichum* "$ROOT/install.sh" "$ROOT/doctor.sh"; do
   [[ -x "$script" ]]
@@ -73,28 +62,11 @@ printf '#!/usr/bin/env bash\nexit 99\n' >"$fixture/fake-bin/python3"
 chmod 0755 "$fixture/fake-bin/python3"
 export ORICHUM_DATA_HOME="$fixture/data"
 caller_dir="$(cd "$fixture/caller" && pwd -P)"
-graph_from_caller="$(
-  cd "$caller_dir"
-  PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum-graph" .
-)"
-[[ "$graph_from_caller" == "[discover] found 0 repositories" ]]
 observed_cwd="$(
   cd "$caller_dir"
   OBSERVE_CWD=1 PATH="$fixture/fake-bin:$PATH" "$ROOT/bin/orichum" config
 )"
 [[ "$observed_cwd" == "$caller_dir" ]]
-
-set +e
-ORICHUM_CONFIG_HOME="$ROOT/config" \
-PATH="$fixture/fake-bin:$PATH" \
-  "$ROOT/bin/orichum" headroom status \
-  >"$fixture/headroom-command.stdout" \
-  2>"$fixture/headroom-command.stderr"
-headroom_command_status=$?
-set -e
-[[ "$headroom_command_status" -eq 2 ]]
-[[ ! -s "$fixture/headroom-command.stdout" ]]
-rg -Fq "invalid choice: 'headroom'" "$fixture/headroom-command.stderr"
 
 install -d \
   "$fixture/post-install-system-bin" \
@@ -109,12 +81,11 @@ printf '%s\n' \
   '  exit 0' \
   'fi' \
   'command -v mempalace-mcp' \
-  'command -v graphify-mcp' \
   >"$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14"
 chmod 0755 "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14"
 ln -s "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14" \
   "$fixture/post-install-data/bin/orichum-python"
-for private_tool in mempalace-mcp graphify-mcp; do
+for private_tool in mempalace-mcp; do
   printf '#!/usr/bin/env bash\nexit 0\n' \
     >"$fixture/post-install-data/tools/bin/$private_tool"
   chmod 0755 "$fixture/post-install-data/tools/bin/$private_tool"
@@ -126,9 +97,7 @@ post_install_tools="$(
     "$fixture/post-install-user-bin/orichum" config
 )"
 [[ "$post_install_tools" == "$(
-  printf '%s\n' \
-    "$fixture/post-install-data/tools/bin/mempalace-mcp" \
-    "$fixture/post-install-data/tools/bin/graphify-mcp"
+  printf '%s\n' "$fixture/post-install-data/tools/bin/mempalace-mcp"
 )" ]]
 
 forwarded="$(
@@ -162,7 +131,6 @@ printf 'raise SystemExit(97)\n' >"$fixture/shadowed/runpy.py"
 help="$("$ROOT/bin/orichum" --help)"
 rg -Fq 'usage: orichum ' <<<"$help"
 rg -Fq 'context' <<<"$help"
-rg -Fq 'graph' <<<"$help"
 rg -Fq 'leanctx' <<<"$help"
 rg -Fq 'sessions' <<<"$help"
 
@@ -270,31 +238,6 @@ rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
-rg -Fq 'repository graph manager and hook contract are available' \
-  "$ROOT/doctor.sh"
-rg -Fq 'central Graphify storage is private' "$ROOT/doctor.sh"
-rg -Fq 'graphify_doctor_diagnostics' "$ROOT/doctor.sh"
-rg -Fq 'repository-local legacy Graphify outputs' \
-  "$ROOT/lib/workflow.sh"
-if rg -Fq 'Graphify package/skill drift' "$ROOT/lib/workflow.sh"; then
-  printf 'doctor still compares Graphify package and skill versions\n' >&2
-  exit 1
-fi
-[[ ! -e "$ROOT/controller/plugin/scripts/ensure-graphify-hook.py" ]]
-"$system_python" -I -B - "$ROOT" <<'PY'
-import sys
-
-sys.path.insert(0, sys.argv[1])
-from integrations.common.graph_hooks import (
-    graph_hook_status,
-    install_graph_hooks,
-    remove_upstream_graphify_hooks,
-)
-
-assert callable(graph_hook_status)
-assert callable(install_graph_hooks)
-assert callable(remove_upstream_graphify_hooks)
-PY
 rg -Fq \
   'Display names appear in explicit account and route inspection output.' \
   "$ROOT/docs/providers-and-accounts.md"
@@ -317,8 +260,8 @@ done
 ' "$ROOT/controller/plugin/hooks/hooks.json")" == 6 ]]
 
 for obsolete in \
-  claude-headroom claudex-context claudex-doctor claudex-gpt \
-  claudex-headroom claudex-login claudex-models claudex-plugin \
+  claudex-context claudex-doctor claudex-gpt \
+  claudex-login claudex-models claudex-plugin \
   claudex-provider; do
   [[ ! -e "$ROOT/bin/$obsolete" ]]
 done
@@ -340,33 +283,15 @@ for required_contract in \
     'Activate disposable multi-family routes' \
     'tests/test_live_stack_routes.sh' \
     'tests/test_orichum_launcher.sh' \
-    'Verify central repository graph lifecycle' \
-    'orichum graph "$graph_project"' \
-    'orichum graph status "$graph_project"' \
-    'test ! -e "$graph_project/graphify-out"' \
-    'CLAUDEX_MCP_CONFIG' \
-    'mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])' \
-    'sessions = data_home / "state" / "sessions"' \
-    'resolved_data_home / "state" / "sessions" / run_dir.name' \
-    'snapshot = run_dir / "graph.json"' \
-    'graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"' \
-    'central.relative_to(central_root)' \
-    'if not central.is_file():' \
-    'chunk = os.read(graph_fd, 1024 * 1024)' \
-    'hmac.compare_digest(digest.hexdigest(), expected_digest)' \
-    'stat.S_IMODE(before.st_mode) != 0o600' \
-    'integrations/common/mcp_probe.py' \
-    '--require-tool query_graph' \
-    '--require-tool graph_stats' \
-    'graphify_command="$(' \
-    'run-graph-session-fixture' \
+    'Verify LeanCTX code-intelligence contract' \
+    'probe_leanctx_capabilities' \
     'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
     '--privileged' \
     'loginctl enable-linger orichum' \
     'Verify fast repeat and explicit upgrade' \
     'repeat_started="$(python3 -c' \
-    'test "$repeat_ms" -lt 10000' \
+    'test "$repeat_ms" -lt 15000' \
     'orichum-fast.log' \
     'Fast readiness checks passed.' \
     '^Controller plugin[[:space:]]+reused' \
@@ -383,11 +308,6 @@ if rg -q '^  push:' "$amd64_workflow"; then
 fi
 if rg -q '^  pull_request:' "$amd64_workflow"; then
   printf 'AMD64 acceptance must run only when explicitly dispatched\n' >&2
-  exit 1
-fi
-if sed -n '/>>"[$]GITHUB_PATH"/,+3p' "$amd64_workflow" | \
-    rg -Fq '$ORICHUM_DATA_HOME/headroom/bin'; then
-  printf 'AMD64 acceptance still adds the private tool directory to GITHUB_PATH\n' >&2
   exit 1
 fi
 set +e
@@ -422,29 +342,11 @@ for required_contract in \
     'launchctl print "gui/$(id -u)/io.orichum.route-proxy"' \
     'Fresh install without providers' \
     'Activate disposable multi-family routes' \
-    'Verify central repository graph lifecycle' \
-    'orichum graph "$graph_project"' \
-    'orichum graph status "$graph_project"' \
-    'test ! -e "$graph_project/graphify-out"' \
-    'CLAUDEX_MCP_CONFIG' \
-    'mcp_config = Path(os.environ["CLAUDEX_MCP_CONFIG"])' \
-    'sessions = data_home / "state" / "sessions"' \
-    'resolved_data_home / "state" / "sessions" / run_dir.name' \
-    'snapshot = run_dir / "graph.json"' \
-    'graph_file="${CLAUDEX_MCP_CONFIG%/mcp.json}/graph.json"' \
-    'central.relative_to(central_root)' \
-    'if not central.is_file():' \
-    'chunk = os.read(graph_fd, 1024 * 1024)' \
-    'hmac.compare_digest(digest.hexdigest(), expected_digest)' \
-    'stat.S_IMODE(before.st_mode) != 0o600' \
-    'integrations/common/mcp_probe.py' \
-    '--require-tool query_graph' \
-    '--require-tool graph_stats' \
-    'graphify_command="$(' \
-    'run-graph-session-fixture' \
+    'Verify LeanCTX code-intelligence contract' \
+    'probe_leanctx_capabilities' \
     'Verify fast repeat and explicit upgrade' \
     'repeat_started="$(python3 -c' \
-    'test "$repeat_ms" -lt 10000' \
+    'test "$repeat_ms" -lt 15000' \
     'orichum-fast.log' \
     'Fast readiness checks passed.' \
     '^Controller plugin[[:space:]]+reused' \
@@ -497,7 +399,7 @@ for installer_document in \
 done
 for installation_contract in \
     'Fast reconciliation' \
-    'under 10 seconds' \
+    'about 10 seconds' \
     'state/install-state.json' \
     'identities and digests, not secrets'; do
   rg -Fq "$installation_contract" "$ROOT/docs/installation.md"

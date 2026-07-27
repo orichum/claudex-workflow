@@ -1,0 +1,43 @@
+name: Contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Fast contract
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install contract dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes jq ripgrep
+
+      - name: Verify release boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest \
+            tests.test_install_control_plane \
+            tests.test_leanctx_monitor \
+            tests.test_mcp_probe \
+            tests.test_route_proxy \
+            tests.test_session_config \
+            tests.test_tool_deferral
+          bash tests/test_smoke.sh

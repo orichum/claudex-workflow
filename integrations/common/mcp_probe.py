@@ -15,7 +15,12 @@ class ProbeError(RuntimeError):
 
 
 class McpClient:
-    def __init__(self, command: list[str], timeout: float):
+    def __init__(
+        self,
+        command: list[str],
+        timeout: float,
+        cwd: str | None = None,
+    ):
         self.timeout = timeout
         self.request_id = 0
         try:
@@ -26,6 +31,7 @@ class McpClient:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                cwd=cwd,
             )
         except OSError as error:
             raise ProbeError("MCP server could not be started") from error
@@ -69,7 +75,18 @@ class McpClient:
             if response.get("id") != request_id:
                 continue
             if "error" in response:
-                raise ProbeError(f"MCP request failed: {method}")
+                error = response["error"]
+                message = (
+                    error.get("message")
+                    if isinstance(error, dict)
+                    else None
+                )
+                suffix = (
+                    f": {message[:240]}"
+                    if isinstance(message, str) and message
+                    else ""
+                )
+                raise ProbeError(f"MCP request failed: {method}{suffix}")
             result = response.get("result")
             if not isinstance(result, dict):
                 raise ProbeError(f"MCP response is invalid: {method}")
@@ -107,9 +124,11 @@ def probe(
     command: list[str],
     required_tools: list[str],
     exact_tools: list[str],
+    tool_calls: list[dict[str, Any]],
     timeout: float,
+    cwd: str | None = None,
 ) -> None:
-    client = McpClient(command, timeout)
+    client = McpClient(command, timeout, cwd)
     try:
         initialized = client.request("initialize", {
             "protocolVersion": "2025-06-18",
@@ -158,6 +177,38 @@ def probe(
                 raise ProbeError(
                     f"unexpected MCP tool is available: {unexpected[0]}"
                 )
+        for call in tool_calls:
+            name = call.get("name")
+            arguments = call.get("arguments", {})
+            expected = call.get("contains")
+            if (
+                not isinstance(name, str)
+                or not name
+                or not isinstance(arguments, dict)
+                or (expected is not None and not isinstance(expected, str))
+            ):
+                raise ProbeError("MCP tool-call probe is invalid")
+            result = client.request(
+                "tools/call",
+                {"name": name, "arguments": arguments},
+            )
+            if result.get("isError") is True:
+                raise ProbeError(f"MCP tool call failed: {name}")
+            content = result.get("content")
+            if not isinstance(content, list):
+                raise ProbeError(f"MCP tool call returned invalid content: {name}")
+            text = "\n".join(
+                item["text"]
+                for item in content
+                if isinstance(item, dict)
+                and isinstance(item.get("text"), str)
+            )
+            if expected is not None and expected not in text:
+                observed = " ".join(text.split())[:160]
+                detail = f" (observed: {observed})" if observed else ""
+                raise ProbeError(
+                    f"MCP tool call omitted expected output: {name}{detail}"
+                )
     finally:
         client.close()
 
@@ -165,8 +216,18 @@ def probe(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--cwd")
     parser.add_argument("--require-tool", action="append", default=[])
     parser.add_argument("--exact-tool", action="append", default=[])
+    parser.add_argument(
+        "--probe-call",
+        action="append",
+        default=[],
+        help=(
+            'JSON object with "name", optional "arguments", and optional '
+            '"contains"'
+        ),
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     command = arguments.command
@@ -175,13 +236,16 @@ def main() -> int:
     if not command or arguments.timeout <= 0:
         parser.error("a command and positive timeout are required")
     try:
+        tool_calls = [json.loads(value) for value in arguments.probe_call]
         probe(
             command,
             arguments.require_tool,
             arguments.exact_tool,
+            tool_calls,
             arguments.timeout,
+            arguments.cwd,
         )
-    except ProbeError as error:
+    except (json.JSONDecodeError, ProbeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
     return 0

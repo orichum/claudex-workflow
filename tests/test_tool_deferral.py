@@ -91,7 +91,7 @@ class ToolDeferralTests(unittest.TestCase):
             client_tool("mcp__leanctx__ctx_patch"),
             client_tool("Bash"),
             client_tool("Read"),
-            client_tool("mcp__graphify__query"),
+            client_tool("mcp__leanctx__ctx_graph"),
             *client_tools(8, prefix="mcp__docker__tool_"),
         ]
         result = transform_request(request("gpt-5.6-sol", tools))
@@ -104,9 +104,12 @@ class ToolDeferralTests(unittest.TestCase):
         self.assertTrue(result.transformed)
         self.assertNotIn("defer_loading", by_name["mcp__leanctx__ctx_read"])
         self.assertNotIn("defer_loading", by_name["mcp__leanctx__ctx_patch"])
+        self.assertNotIn(
+            "defer_loading",
+            by_name["mcp__leanctx__ctx_graph"],
+        )
         self.assertNotIn("defer_loading", by_name["Bash"])
         self.assertTrue(by_name["Read"]["defer_loading"])
-        self.assertTrue(by_name["mcp__graphify__query"]["defer_loading"])
         self.assertEqual(document["tools"][-1]["type"], TOOL_SEARCH_TYPE)
 
     def test_server_tool_is_never_deferred(self) -> None:

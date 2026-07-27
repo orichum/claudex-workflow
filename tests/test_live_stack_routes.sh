@@ -541,10 +541,6 @@ def record_launch(prepared, *_args, **_kwargs):
     servers = mcp.get("mcpServers")
     if not isinstance(servers, dict) or "leanctx" not in servers:
         raise SystemExit("session did not materialize the private LeanCTX MCP")
-    if "headroom" in json.dumps(mcp).lower():
-        raise SystemExit("session MCP configuration unexpectedly references Headroom")
-    if (prepared.physical.run_dir / "headroom").exists():
-        raise SystemExit("session unexpectedly materialized a Headroom runtime")
     output.write_text(
         json.dumps(
             {

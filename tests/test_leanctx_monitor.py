@@ -52,14 +52,20 @@ class LeanctxMonitorTests(unittest.TestCase):
             {role: f"route/{role}" for role in ROLES},
         )
 
-    def create_run(self, project: Path):
+    def create_run(
+        self,
+        project: Path,
+        *,
+        context_root: Path | None = None,
+    ):
+        context_root = project if context_root is None else context_root
         context = {
             "schemaVersion": 1,
             "launchDirReal": str(project),
             "repoRootReal": str(project),
             "route": {
                 "id": project.name,
-                "contextRootReal": str(project),
+                "contextRootReal": str(context_root),
                 "dockerProfile": None,
                 "modelStack": None,
                 "memoryWing": project.name,
@@ -96,7 +102,9 @@ class LeanctxMonitorTests(unittest.TestCase):
         self.assertEqual([run.run_id for run in runs], [session.run_id])
         self.assertEqual(runs[0].project_root, self.xebia)
 
-    def test_completed_run_without_leanctx_is_ignored(self) -> None:
+    def test_completed_run_without_leanctx_is_reported_as_unattached(
+        self,
+    ) -> None:
         legacy = self.create_run(self.complion)
         for path in sorted(
             (legacy.run_dir / "leanctx").rglob("*"),
@@ -108,7 +116,37 @@ class LeanctxMonitorTests(unittest.TestCase):
 
         runs = discover_runs(REPOSITORY_ROOT, self.data_root)
 
-        self.assertEqual([run.run_id for run in runs], [current.run_id])
+        self.assertEqual(
+            {run.run_id for run in runs},
+            {legacy.run_id, current.run_id},
+        )
+        observed = next(
+            run for run in runs if run.run_id == legacy.run_id
+        )
+        self.assertFalse(observed.attached)
+        self.assertFalse(observed.has_activity)
+
+    def test_existing_leanctx_directory_without_config_is_unattached(
+        self,
+    ) -> None:
+        session = self.create_run(self.xebia)
+        (session.run_dir / "leanctx" / "config.toml").unlink()
+
+        runs = discover_runs(REPOSITORY_ROOT, self.data_root)
+
+        self.assertEqual(len(runs), 1)
+        self.assertFalse(runs[0].attached)
+
+    def test_tampered_leanctx_config_is_unattached(self) -> None:
+        session = self.create_run(self.xebia)
+        config = session.run_dir / "leanctx" / "config.toml"
+        config.write_text("tools_enabled = []\n", encoding="utf-8")
+        config.chmod(0o600)
+
+        runs = discover_runs(REPOSITORY_ROOT, self.data_root)
+
+        self.assertEqual(len(runs), 1)
+        self.assertFalse(runs[0].attached)
 
     def test_implicit_selection_uses_newest_exact_project(self) -> None:
         older = LeanctxRun(
@@ -137,7 +175,9 @@ class LeanctxMonitorTests(unittest.TestCase):
 
         self.assertEqual(selected.run_id, "run.newer")
 
-    def test_implicit_selection_prefers_newest_run_with_activity(self) -> None:
+    def test_implicit_selection_prefers_newest_run_even_without_activity(
+        self,
+    ) -> None:
         active = LeanctxRun(
             "run.active",
             self.root / "run.active",
@@ -155,7 +195,7 @@ class LeanctxMonitorTests(unittest.TestCase):
 
         selected = select_run((inactive, active), self.xebia, None)
 
-        self.assertEqual(selected.run_id, "run.active")
+        self.assertEqual(selected.run_id, "run.inactive")
 
     def test_current_run_wins_even_before_it_records_activity(self) -> None:
         active = LeanctxRun(
@@ -182,6 +222,25 @@ class LeanctxMonitorTests(unittest.TestCase):
 
         self.assertEqual(selected.run_id, "run.current")
 
+    def test_unattached_run_is_rejected_with_explicit_remediation(
+        self,
+    ) -> None:
+        run = LeanctxRun(
+            "run.unattached",
+            self.root / "run.unattached",
+            self.xebia,
+            "2026-07-27T10:00:00Z",
+            False,
+            attached=False,
+        )
+
+        with self.assertRaisesRegex(
+            LeanctxMonitorError,
+            "LeanCTX is not attached to run run.unattached; "
+            "rerun install.sh and start a new Orichum session",
+        ):
+            leanctx_monitor.require_attached(run)
+
     def test_implicit_selection_never_crosses_projects(self) -> None:
         other = LeanctxRun(
             "run.other",
@@ -196,6 +255,53 @@ class LeanctxMonitorTests(unittest.TestCase):
             "current project has no LeanCTX activity",
         ):
             select_run((other,), self.xebia, None)
+
+    def test_repository_runs_remain_distinct_below_one_context_root(
+        self,
+    ) -> None:
+        first = self.xebia / "first"
+        second = self.xebia / "second"
+        first.mkdir()
+        second.mkdir()
+        first_session = self.create_run(first, context_root=self.xebia)
+        second_session = self.create_run(second, context_root=self.xebia)
+
+        runs = discover_runs(REPOSITORY_ROOT, self.data_root)
+        first_run = next(
+            run for run in runs if run.run_id == first_session.run_id
+        )
+        second_run = next(
+            run for run in runs if run.run_id == second_session.run_id
+        )
+
+        self.assertEqual(first_run.project_root, first)
+        self.assertEqual(second_run.project_root, second)
+        self.assertEqual(
+            select_run(runs, first, None).run_id,
+            first_session.run_id,
+        )
+
+    def test_same_second_selection_uses_completion_nanoseconds(self) -> None:
+        older = LeanctxRun(
+            "run.zzz",
+            self.root / "run.zzz",
+            self.xebia,
+            "2026-07-27T10:00:00Z",
+            True,
+            created_at_ns=1,
+        )
+        newer = LeanctxRun(
+            "run.aaa",
+            self.root / "run.aaa",
+            self.xebia,
+            "2026-07-27T10:00:00Z",
+            True,
+            created_at_ns=2,
+        )
+
+        selected = select_run((older, newer), self.xebia, None)
+
+        self.assertEqual(selected.run_id, "run.aaa")
 
     def test_explicit_selection_rejects_path_syntax(self) -> None:
         with self.assertRaisesRegex(
@@ -228,7 +334,7 @@ class LeanctxMonitorTests(unittest.TestCase):
         ):
             discover_runs(REPOSITORY_ROOT, self.data_root)
 
-    def test_historical_leanctx_contract_remains_monitorable(self) -> None:
+    def test_historical_leanctx_contract_is_listed_as_unattached(self) -> None:
         session = self.create_run(self.xebia)
         config = session.run_dir / "leanctx" / "config.toml"
         config.write_text(
@@ -240,6 +346,7 @@ class LeanctxMonitorTests(unittest.TestCase):
         runs = discover_runs(REPOSITORY_ROOT, self.data_root)
 
         self.assertEqual([run.run_id for run in runs], [session.run_id])
+        self.assertFalse(runs[0].attached)
 
     def test_symlinked_run_is_rejected(self) -> None:
         sessions = self.data_root / "state" / "sessions"

@@ -15,8 +15,8 @@ First release candidate of the unified Orichum harness.
 - Named provider accounts, priorities, account pools, and bounded same-model
   recovery.
 - Immutable logical sessions with resume and explicit cross-stack forks.
-- Deterministic LeanCTX tool routing, central repository-aware Graphify data,
-  Mempalace project memory, MCP_DOCKER profiles, and isolated GitHub identities.
+- Deterministic LeanCTX source, graph, callgraph, and impact routing; Mempalace
+  project memory; MCP_DOCKER profiles; and isolated GitHub identities.
 - Interactive provider and model-stack configuration.
 - macOS ARM64, Linux AMD64, and WSL2-with-systemd acceptance contracts.
 

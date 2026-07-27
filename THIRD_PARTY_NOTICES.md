@@ -10,7 +10,6 @@ package sources; those tools remain subject to their own licenses.
 | [Claudex](https://github.com/StringKe/claudex) | [MIT](https://github.com/StringKe/claudex/blob/main/LICENSE) | Copyright 2026 StringKe |
 | [LeanCTX](https://github.com/yvgude/lean-ctx) | [Apache-2.0](https://github.com/yvgude/lean-ctx/blob/main/LICENSE) | Copyright 2026 Yves Gugger; see its [NOTICE](https://github.com/yvgude/lean-ctx/blob/main/NOTICE) |
 | [Mempalace](https://github.com/MemPalace/mempalace) | [MIT](https://github.com/MemPalace/mempalace/blob/develop/LICENSE) | Copyright 2026 Mempalace contributors |
-| [Graphify](https://github.com/Graphify-Labs/graphify) | [Apache-2.0](https://github.com/Graphify-Labs/graphify/blob/v8/LICENSE) with retained MIT portions | Copyright 2026 Safi Shamsi and the Graphify contributors; see its [NOTICE](https://github.com/Graphify-Labs/graphify/blob/v8/NOTICE) and [retained MIT license](https://github.com/Graphify-Labs/graphify/blob/v8/LICENSE-MIT) |
 | [Frontend Design skill](controller/plugin/skills/frontend-design) | [Apache-2.0](controller/plugin/skills/frontend-design/LICENSE.txt) | Bundled under its included license |
 
 Claude Code and Docker MCP Toolkit are external products used by Orichum. They
