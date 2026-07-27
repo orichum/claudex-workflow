@@ -209,7 +209,7 @@ jobs:
               "$RUNNER_TEMP/orichum-fast.log"
           done
           grep -Eq \
-            '^Routing[[:space:]]+repaired[[:space:]]*$' \
+            '^Routing[[:space:]]+reused[[:space:]]*$' \
             "$RUNNER_TEMP/orichum-fast.log"
           grep -Eq \
             '^Controller plugin[[:space:]]+reused[[:space:]]*$' \
