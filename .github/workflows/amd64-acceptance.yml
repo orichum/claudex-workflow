@@ -1,7 +1,6 @@
 name: Native AMD64 acceptance
 
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:

@@ -293,7 +293,6 @@ amd64_workflow="$ROOT/.github/workflows/amd64-acceptance.yml"
 [[ -f "$amd64_workflow" ]]
 for required_contract in \
     'name: Native AMD64 acceptance' \
-    'pull_request:' \
     'workflow_dispatch:' \
     'permissions:' \
     'contents: read' \
@@ -338,6 +337,10 @@ if rg -q '^  push:' "$amd64_workflow"; then
   printf 'AMD64 acceptance must not repeat verified PR work after merge\n' >&2
   exit 1
 fi
+if rg -q '^  pull_request:' "$amd64_workflow"; then
+  printf 'AMD64 acceptance must run only when explicitly dispatched\n' >&2
+  exit 1
+fi
 if sed -n '/>>"[$]GITHUB_PATH"/,+3p' "$amd64_workflow" | \
     rg -Fq '$ORICHUM_DATA_HOME/headroom/bin'; then
   printf 'AMD64 acceptance still adds the private tool directory to GITHUB_PATH\n' >&2
@@ -364,7 +367,6 @@ macos_workflow="$ROOT/.github/workflows/macos-arm64-acceptance.yml"
 [[ -f "$macos_workflow" ]]
 for required_contract in \
     'name: Native macOS ARM64 acceptance' \
-    'pull_request:' \
     'workflow_dispatch:' \
     'permissions:' \
     'contents: read' \
@@ -402,6 +404,10 @@ for required_contract in \
 done
 if rg -q '^  push:' "$macos_workflow"; then
   printf 'macOS acceptance must not repeat verified PR work after merge\n' >&2
+  exit 1
+fi
+if rg -q '^  pull_request:' "$macos_workflow"; then
+  printf 'macOS acceptance must run only when explicitly dispatched\n' >&2
   exit 1
 fi
 if rg -Fq 'Run repository test suites' "$macos_workflow"; then

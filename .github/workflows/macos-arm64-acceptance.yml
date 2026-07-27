@@ -1,7 +1,6 @@
 name: Native macOS ARM64 acceptance
 
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:
