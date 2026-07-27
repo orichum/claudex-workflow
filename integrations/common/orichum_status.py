@@ -9,6 +9,8 @@ import math
 import os
 from pathlib import Path
 import sys
+import tempfile
+import time
 from typing import IO, Mapping, Sequence
 
 from .account_registry import Account, AccountError, load_accounts
@@ -17,6 +19,7 @@ from .orichum_sessions import (
     LogicalSessionError,
     load_logical_session,
 )
+from .provider_credentials import CredentialError, load_credential_fields
 
 
 _FAMILY_LABELS = {
@@ -26,6 +29,11 @@ _FAMILY_LABELS = {
     "kimi": "Kimi",
 }
 _MAX_INPUT_BYTES = 64 * 1024
+_QUOTA_CACHE_SECONDS = 60
+_QUOTA_STALE_SECONDS = 15 * 60
+_QUOTA_TIMEOUT_SECONDS = 2
+_CODEX_WINDOWS = {18000: "five_hour", 604800: "seven_day"}
+_CREDENTIAL_PROVIDER = {"anthropic": "claude", "openai": "codex"}
 
 
 def _text(value: object, fallback: str) -> str:
@@ -57,6 +65,216 @@ def _nested_percentage(document: object, *path: str) -> str:
             return "—"
         value = value.get(key)
     return _percentage(value)
+
+
+def _quota_percentage(
+    payload: object,
+    provider_quota: Mapping[str, object] | None,
+    *path: str,
+) -> str:
+    native = _nested_percentage(payload, *path)
+    if native != "—" or provider_quota is None:
+        return native
+    return _percentage(provider_quota.get(path[-2]))
+
+
+def _percentage_number(value: object) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and 0 <= number <= 100 else None
+
+
+def _parse_provider_quota(
+    provider: str, document: object
+) -> dict[str, float]:
+    if not isinstance(document, Mapping):
+        return {}
+    windows: dict[str, float] = {}
+    if provider == "anthropic":
+        for key in ("five_hour", "seven_day"):
+            window = document.get(key)
+            if not isinstance(window, Mapping):
+                continue
+            percentage = _percentage_number(window.get("utilization"))
+            if percentage is not None:
+                windows[key] = percentage
+        return windows
+    if provider != "openai":
+        return {}
+    rate_limit = document.get("rate_limit")
+    if not isinstance(rate_limit, Mapping):
+        return {}
+    for name in ("primary_window", "secondary_window"):
+        window = rate_limit.get(name)
+        if not isinstance(window, Mapping):
+            continue
+        seconds = window.get("limit_window_seconds")
+        if type(seconds) is not int:
+            continue
+        key = _CODEX_WINDOWS.get(seconds)
+        percentage = _percentage_number(window.get("used_percent"))
+        if key is not None and percentage is not None:
+            windows[key] = percentage
+    return windows
+
+
+def _request_provider_quota(
+    account: Account,
+    credential: Mapping[str, object],
+) -> dict[str, float]:
+    token = credential.get("access_token")
+    if not isinstance(token, str) or not token:
+        return {}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if account.provider == "openai":
+        host = "chatgpt.com"
+        path = "/backend-api/wham/usage"
+        account_id = credential.get("account_id")
+        if isinstance(account_id, str) and account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+    elif account.provider == "anthropic":
+        host = "api.anthropic.com"
+        path = "/api/oauth/usage"
+        headers["anthropic-beta"] = "oauth-2025-04-20"
+    else:
+        return {}
+    connection = http.client.HTTPSConnection(
+        host, timeout=_QUOTA_TIMEOUT_SECONDS
+    )
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        body = response.read(_MAX_INPUT_BYTES + 1)
+        if (
+            response.status < 200
+            or response.status >= 300
+            or len(body) > _MAX_INPUT_BYTES
+        ):
+            return {}
+        return _parse_provider_quota(
+            account.provider, json.loads(body.decode("utf-8"))
+        )
+    finally:
+        connection.close()
+
+
+def _read_quota_cache(
+    path: Path,
+    account_id: str,
+    now: float,
+) -> tuple[dict[str, float], float] | None:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(document, dict)
+            or document.get("accountId") != account_id
+            or type(document.get("fetchedAt")) not in (int, float)
+            or not isinstance(document.get("windows"), dict)
+        ):
+            return None
+        windows = {
+            key: percentage
+            for key in ("five_hour", "seven_day")
+            if (
+                percentage := _percentage_number(
+                    document["windows"].get(key)
+                )
+            )
+            is not None
+        }
+        age = max(0.0, now - float(document["fetchedAt"]))
+        return windows, age
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _write_quota_cache(
+    path: Path,
+    account_id: str,
+    windows: Mapping[str, float],
+    now: float,
+) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{account_id}.",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            os.fchmod(temporary.fileno(), 0o600)
+            json.dump(
+                {
+                    "accountId": account_id,
+                    "fetchedAt": now,
+                    "windows": dict(windows),
+                },
+                temporary,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _provider_quota(
+    data_home: Path,
+    account: Account,
+    *,
+    now: float | None = None,
+) -> dict[str, float]:
+    credential_provider = _CREDENTIAL_PROVIDER.get(account.provider)
+    if credential_provider is None:
+        return {}
+    current_time = time.time() if now is None else now
+    cache_path = (
+        Path(data_home)
+        / "state"
+        / "quota-cache"
+        / f"{account.id}.json"
+    )
+    cached = _read_quota_cache(cache_path, account.id, current_time)
+    if cached is not None and cached[1] <= _QUOTA_CACHE_SECONDS:
+        return cached[0]
+    try:
+        credential = load_credential_fields(
+            Path(data_home) / "auth",
+            account.credential_ref,
+            expected_provider=credential_provider,
+            fields=("access_token", "account_id"),
+        )
+        windows = _request_provider_quota(account, credential)
+        if windows:
+            _write_quota_cache(
+                cache_path, account.id, windows, current_time
+            )
+            return windows
+    except (
+        CredentialError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+        http.client.HTTPException,
+    ):
+        pass
+    if cached is not None and cached[1] <= _QUOTA_STALE_SECONDS:
+        return cached[0]
+    return {}
 
 
 def _active_route(
@@ -105,6 +323,7 @@ def render_status(
     accounts: Sequence[Account],
     *,
     route_status: Mapping[str, object] | None,
+    provider_quota: Mapping[str, object] | None = None,
     color: bool,
 ) -> str:
     """Render two bounded lines from Claude metrics and verified Orichum state."""
@@ -129,11 +348,19 @@ def render_status(
     stack = _text(session.stack, "stack")
     family_label = _FAMILY_LABELS.get(family, family.title())
     context = _nested_percentage(payload, "context_window", "used_percentage")
-    five_hour = _nested_percentage(
-        payload, "rate_limits", "five_hour", "used_percentage"
+    five_hour = _quota_percentage(
+        payload,
+        provider_quota,
+        "rate_limits",
+        "five_hour",
+        "used_percentage",
     )
-    seven_day = _nested_percentage(
-        payload, "rate_limits", "seven_day", "used_percentage"
+    seven_day = _quota_percentage(
+        payload,
+        provider_quota,
+        "rate_limits",
+        "seven_day",
+        "used_percentage",
     )
 
     if color:
@@ -211,11 +438,24 @@ def main(
         data_home = Path(environment["ORICHUM_DATA_HOME"])
         session = load_logical_session(state_home, session_id)
         accounts = load_accounts(config_home / "accounts.json")
+        route_status = _fetch_route_status(data_home, session_id)
+        _family, account_id, _label = _active_route(
+            session, route_status
+        )
+        active_account = next(
+            (account for account in accounts if account.id == account_id),
+            None,
+        )
         rendered = render_status(
             payload,
             session,
             accounts,
-            route_status=_fetch_route_status(data_home, session_id),
+            route_status=route_status,
+            provider_quota=(
+                None
+                if active_account is None
+                else _provider_quota(data_home, active_account)
+            ),
             color=(
                 "NO_COLOR" not in environment
                 and environment.get("TERM") != "dumb"

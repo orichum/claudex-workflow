@@ -6,6 +6,7 @@ import json
 import io
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from integrations.common.account_registry import Account
 from integrations.common.model_routing import ROLES
@@ -14,6 +15,80 @@ from integrations.common.route_selection import Route
 
 
 class OrichumStatusTests(unittest.TestCase):
+    @staticmethod
+    def _status_fixture() -> tuple[
+        LogicalSession,
+        tuple[Account, ...],
+        dict[str, object],
+    ]:
+        primary = Route(
+            account_id="oc-a-0000000000000001",
+            provider="anthropic",
+            family="claude",
+            logical_model="claude-opus-4-8",
+            upstream_model="oc-r-0000000000000001/claude-opus-4-8",
+            claudex_profile="ocp-0000000000000001",
+            priority=10,
+            pool="claude",
+        )
+        fallback = Route(
+            account_id="oc-a-0000000000000002",
+            provider="anthropic",
+            family="claude",
+            logical_model="claude-opus-4-8",
+            upstream_model="oc-r-0000000000000002/claude-opus-4-8",
+            claudex_profile="ocp-0000000000000002",
+            priority=20,
+            pool="claude",
+        )
+        binding = RouteBinding(primary=primary, fallbacks=(fallback,))
+        session = LogicalSession(
+            id="oc-s-0000000000000001",
+            claude_session_id="00000000-0000-4000-8000-000000000001",
+            parent_id=None,
+            project_root=Path("/work/demo"),
+            stack="balanced",
+            controller=binding,
+            agents={role: binding for role in ROLES},
+            created_at="2026-07-27T00:00:00+00:00",
+        )
+        accounts = (
+            Account(
+                id=primary.account_id,
+                name="Work Claude",
+                provider=primary.provider,
+                credential_ref="shared.json",
+                pool="claude",
+                routing_prefix="oc-r-0000000000000001",
+                priority=10,
+                state="active",
+                original_prefix=None,
+                original_priority=None,
+            ),
+            Account(
+                id=fallback.account_id,
+                name="Backup Claude",
+                provider=fallback.provider,
+                credential_ref="backup.json",
+                pool="claude",
+                routing_prefix="oc-r-0000000000000002",
+                priority=20,
+                state="active",
+                original_prefix=None,
+                original_priority=None,
+            ),
+        )
+        route_status = {
+            "sessionId": session.id,
+            "accountId": fallback.account_id,
+            "provider": fallback.provider,
+            "family": fallback.family,
+            "logicalModel": fallback.logical_model,
+            "routeState": "fallback",
+            "reason": "retry",
+        }
+        return session, accounts, route_status
+
     def test_controller_settings_enable_the_orichum_status_line(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         settings = json.loads(
@@ -79,66 +154,10 @@ class OrichumStatusTests(unittest.TestCase):
         except ImportError as error:
             self.fail(f"Orichum status renderer is missing: {error}")
 
-        primary = Route(
-            account_id="oc-a-0000000000000001",
-            provider="anthropic",
-            family="claude",
-            logical_model="claude-opus-4-8",
-            upstream_model="oc-r-0000000000000001/claude-opus-4-8",
-            claudex_profile="ocp-0000000000000001",
-            priority=10,
-            pool="claude",
-        )
-        fallback = Route(
-            account_id="oc-a-0000000000000002",
-            provider="antigravity",
-            family="claude",
-            logical_model="claude-opus-4-8",
-            upstream_model="oc-r-0000000000000002/claude-opus-4-8",
-            claudex_profile="ocp-0000000000000002",
-            priority=20,
-            pool="claude",
-        )
-        binding = RouteBinding(primary=primary, fallbacks=(fallback,))
-        session = LogicalSession(
-            id="oc-s-0000000000000001",
-            claude_session_id="00000000-0000-4000-8000-000000000001",
-            parent_id=None,
-            project_root=Path("/work/demo"),
-            stack="balanced",
-            controller=binding,
-            agents={role: binding for role in ROLES},
-            created_at="2026-07-27T00:00:00+00:00",
-        )
-        accounts = (
-            Account(
-                id=primary.account_id,
-                name="Work Claude",
-                provider=primary.provider,
-                credential_ref="shared",
-                pool="claude",
-                routing_prefix="oc-r-0000000000000001",
-                priority=10,
-                state="active",
-                original_prefix=None,
-                original_priority=None,
-            ),
-            Account(
-                id=fallback.account_id,
-                name="Backup Claude",
-                provider=fallback.provider,
-                credential_ref="shared",
-                pool="claude",
-                routing_prefix="oc-r-0000000000000002",
-                priority=20,
-                state="active",
-                original_prefix=None,
-                original_priority=None,
-            ),
-        )
+        session, accounts, route_status = self._status_fixture()
         payload = {
             "model": {
-                "id": fallback.upstream_model,
+                "id": session.controller.fallbacks[0].upstream_model,
                 "display_name": "Opus 4.8",
             },
             "context_window": {"used_percentage": 41.2},
@@ -146,15 +165,6 @@ class OrichumStatusTests(unittest.TestCase):
                 "five_hour": {"used_percentage": 63},
                 "seven_day": {"used_percentage": None},
             },
-        }
-        route_status = {
-            "sessionId": session.id,
-            "accountId": fallback.account_id,
-            "provider": fallback.provider,
-            "family": fallback.family,
-            "logicalModel": fallback.logical_model,
-            "routeState": "fallback",
-            "reason": "retry",
         }
 
         self.assertEqual(
@@ -169,6 +179,101 @@ class OrichumStatusTests(unittest.TestCase):
             "Claude · Opus 4.8 │ Backup Claude [fallback: rate limit] │ "
             "context 41% │ 5h 63% │ 7d —",
         )
+
+    def test_provider_quota_fills_missing_claude_code_metrics(self) -> None:
+        from integrations.common.orichum_status import render_status
+
+        session, accounts, route_status = self._status_fixture()
+
+        self.assertEqual(
+            render_status(
+                {
+                    "model": {"display_name": "Opus 4.8"},
+                    "context_window": {"used_percentage": 41.2},
+                },
+                session,
+                accounts,
+                route_status=route_status,
+                provider_quota={"five_hour": 17, "seven_day": 38},
+                color=False,
+            ),
+            "ORICHUM │ demo │ balanced\n"
+            "Claude · Opus 4.8 │ Backup Claude [fallback: rate limit] │ "
+            "context 41% │ 5h 17% │ 7d 38%",
+        )
+
+    def test_parses_provider_quota_windows_without_assuming_order(self) -> None:
+        from integrations.common.orichum_status import _parse_provider_quota
+
+        codex = _parse_provider_quota(
+            "openai",
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 21,
+                        "limit_window_seconds": 604800,
+                    },
+                    "secondary_window": {
+                        "used_percent": 14,
+                        "limit_window_seconds": 18000,
+                    },
+                }
+            },
+        )
+        claude = _parse_provider_quota(
+            "anthropic",
+            {
+                "five_hour": {"utilization": 0.0},
+                "seven_day": {"utilization": 12.0},
+            },
+        )
+
+        self.assertEqual(codex, {"five_hour": 14.0, "seven_day": 21.0})
+        self.assertEqual(claude, {"five_hour": 0.0, "seven_day": 12.0})
+
+    def test_provider_quota_cache_uses_safe_account_scoped_values(self) -> None:
+        from integrations.common.orichum_status import _provider_quota
+
+        _session, accounts, _route_status = self._status_fixture()
+        account = accounts[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            data_home = Path(temporary)
+            auth_dir = data_home / "auth"
+            auth_dir.mkdir(mode=0o700)
+            credential = auth_dir / account.credential_ref
+            credential.write_text(
+                json.dumps(
+                    {
+                        "type": "claude",
+                        "access_token": "secret-token",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            credential.chmod(0o600)
+
+            with patch(
+                "integrations.common.orichum_status._request_provider_quota",
+                return_value={"five_hour": 17.0, "seven_day": 38.0},
+            ):
+                first = _provider_quota(data_home, account, now=1000.0)
+
+            with patch(
+                "integrations.common.orichum_status._request_provider_quota",
+                side_effect=AssertionError("fresh cache must avoid network"),
+            ):
+                second = _provider_quota(data_home, account, now=1030.0)
+
+            cache = (
+                data_home
+                / "state"
+                / "quota-cache"
+                / f"{account.id}.json"
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(first, {"five_hour": 17.0, "seven_day": 38.0})
+        self.assertEqual(second, first)
+        self.assertNotIn("secret-token", cache)
 
 
 if __name__ == "__main__":

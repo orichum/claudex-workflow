@@ -52,6 +52,38 @@ If LeanCTX is missing, unsafe, or the launch directory is not inside a Git
 repository, Orichum omits the MCP. The session continues with Claude Code's
 native read and search tools.
 
+## Monitor LeanCTX
+
+From a configured project, inspect its newest LeanCTX-enabled Orichum run:
+
+```bash
+orichum leanctx stats
+orichum leanctx watch
+orichum leanctx dashboard
+```
+
+`stats` prints a savings snapshot, `watch` opens LeanCTX's live terminal
+monitor, and `dashboard` opens the authenticated Observatory on
+`127.0.0.1`. The dashboard runs in the foreground and stops with Ctrl+C;
+Orichum does not install another service.
+
+List physical runs or select one explicitly:
+
+```bash
+orichum leanctx list
+orichum leanctx stats --run run.mrds3ghq
+orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
+```
+
+Without `--run`, Orichum selects the newest run for the current project and
+never falls back to another project. A physical `run.*` ID identifies one
+LeanCTX process and its metrics; it is different from the logical `oc-s-*`
+session ID used by `orichum resume`.
+
+The web dashboard uses a temporary configuration copy. Dashboard configuration
+changes are therefore nonpersistent and cannot mutate or invalidate a live
+session. Metrics, events, and activity still come from the selected run.
+
 ## Verify
 
 ```bash

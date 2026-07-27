@@ -22,7 +22,7 @@ python_entrypoint=(
   "$WORKFLOW_ROOT"
 )
 case "${1:-}" in
-  -h|--help|config|context|models|stack|provider|plugin|headroom|graph|doctor|session|sessions|resume|fork|run)
+  -h|--help|config|context|models|stack|provider|plugin|headroom|graph|leanctx|doctor|session|sessions|resume|fork|run)
     exec "${python_entrypoint[@]}" "$@"
     ;;
   *)

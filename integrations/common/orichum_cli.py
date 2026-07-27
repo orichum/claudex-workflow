@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+from decimal import Decimal, ROUND_HALF_UP
 import fcntl
 import http.client
 import json
@@ -18,6 +19,7 @@ import subprocess
 import sys
 from typing import Mapping, Sequence
 
+from . import leanctx_monitor
 from .account_registry import (
     Account,
     AccountError,
@@ -416,6 +418,83 @@ def _session_list(sessions: Sequence[LogicalSession]) -> str:
     return _render_table(
         ("ID", "CREATED", "PROJECT", "STACK", "FAMILY", "MODEL", "PARENT"),
         rows,
+    )
+
+
+def _leanctx_project_root(
+    config: ResolvedConfig,
+    launch_dir: Path,
+) -> Path | None:
+    context = resolve_control_plane_context(
+        config.documents["projects"],
+        launch_dir,
+    )
+    route = context.get("route")
+    root = route.get("contextRootReal") if isinstance(route, dict) else None
+    return Path(root) if isinstance(root, str) and root else None
+
+
+def _leanctx_list(
+    runs: Sequence[leanctx_monitor.LeanctxRun],
+    project_root: Path | None,
+) -> str:
+    selected = None
+    if project_root is not None:
+        matches = tuple(
+            run
+            for run in runs
+            if run.project_root == project_root.resolve(strict=False)
+        )
+        if matches:
+            selected = max(
+                matches,
+                key=lambda run: (run.created_at, run.run_id),
+            ).run_id
+    rows = [
+        (
+            run.run_id,
+            run.created_at,
+            str(run.project_root),
+            "yes" if run.has_activity else "no",
+            "yes" if run.run_id == selected else "—",
+        )
+        for run in runs
+    ]
+    return _render_table(
+        ("RUN", "CREATED", "PROJECT", "ACTIVITY", "SELECTED"),
+        rows,
+    )
+
+
+def _leanctx_stats(
+    run: leanctx_monitor.LeanctxRun,
+    stats: leanctx_monitor.LeanctxStats,
+) -> str:
+    savings = Decimal(str(stats.savings_percent)).quantize(
+        Decimal("0.1"),
+        rounding=ROUND_HALF_UP,
+    )
+    return _render_table(
+        (
+            "RUN",
+            "PROJECT",
+            "COMMANDS",
+            "INPUT",
+            "OUTPUT",
+            "SAVED",
+            "SAVINGS",
+        ),
+        (
+            (
+                run.run_id,
+                str(run.project_root),
+                f"{stats.total_commands:,}",
+                f"{stats.input_tokens:,}",
+                f"{stats.output_tokens:,}",
+                f"{stats.saved_tokens:,}",
+                f"{savings}%",
+            ),
+        ),
     )
 
 
@@ -1866,6 +1945,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     graph = commands.add_parser("graph")
     graph.add_argument("arguments", nargs=argparse.REMAINDER)
+    leanctx = commands.add_parser("leanctx")
+    leanctx_action = leanctx.add_subparsers(
+        dest="leanctx_command",
+        required=True,
+    )
+    leanctx_action.add_parser("list")
+    for name in ("stats", "watch"):
+        command = leanctx_action.add_parser(name)
+        command.add_argument("--run")
+    dashboard = leanctx_action.add_parser("dashboard")
+    dashboard.add_argument("--run")
+    dashboard.add_argument("--port", type=int)
+    dashboard.add_argument(
+        "--open",
+        dest="open_mode",
+        choices=("browser", "none", "vscode"),
+        default="browser",
+    )
     commands.add_parser("doctor")
     sessions = commands.add_parser("sessions")
     sessions_action = sessions.add_subparsers(dest="sessions_command")
@@ -1925,6 +2022,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             plugin_arguments = [parsed.plugin_command]
             plugin_arguments.extend(getattr(parsed, "arguments", ()))
             return _run_external("orichum-plugin", plugin_arguments)
+        if parsed.command == "leanctx":
+            runs = leanctx_monitor.discover_runs(
+                WORKFLOW_ROOT,
+                paths["data"],
+            )
+            if parsed.leanctx_command == "list":
+                project_root = _leanctx_project_root(config, Path.cwd())
+                print(_leanctx_list(runs, project_root), end="")
+                return 0
+            project_root = (
+                None
+                if parsed.run is not None
+                else _leanctx_project_root(config, Path.cwd())
+            )
+            selected = leanctx_monitor.select_run(
+                runs,
+                project_root,
+                parsed.run,
+            )
+            binary = leanctx_monitor.managed_binary(paths["data"])
+            if parsed.leanctx_command == "stats":
+                stats = leanctx_monitor.read_stats(binary, selected)
+                print(_leanctx_stats(selected, stats), end="")
+                return 0
+            if parsed.leanctx_command == "watch":
+                return leanctx_monitor.run_watch(binary, selected)
+            return leanctx_monitor.run_dashboard(
+                binary,
+                selected,
+                paths["state"],
+                port=parsed.port,
+                open_mode=parsed.open_mode,
+            )
         if parsed.command == "run":
             prepared = _prepare_new_session(
                 paths, config, launch_dir=Path.cwd()
@@ -2050,6 +2180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ContextError,
         CredentialError,
         LogicalSessionError,
+        leanctx_monitor.LeanctxMonitorError,
         ManagementError,
         OSError,
         RouteError,

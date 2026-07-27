@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect and update non-secret CLIProxyAPI OAuth credential metadata."""
+"""Safely inspect and update CLIProxyAPI OAuth credentials."""
 
 from __future__ import annotations
 
@@ -271,6 +271,47 @@ def resolve_credential_ref(
     if expected is not None and credential.provider != expected:
         raise CredentialError("credential provider does not match account provider")
     return credential
+
+
+def load_credential_fields(
+    auth_dir: Path,
+    credential_ref: str,
+    *,
+    expected_provider: str,
+    fields: Sequence[str],
+) -> dict[str, object]:
+    """Read only explicitly requested fields from one safely opened credential."""
+    if (
+        not isinstance(credential_ref, str)
+        or not CREDENTIAL_REF_PATTERN.fullmatch(credential_ref)
+        or Path(credential_ref).name != credential_ref
+    ):
+        raise CredentialError("credential reference is invalid")
+    expected = _validate_provider(expected_provider)
+    requested = tuple(fields)
+    if (
+        not requested
+        or len(requested) != len(set(requested))
+        or any(
+            not isinstance(field, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", field)
+            for field in requested
+        )
+    ):
+        raise CredentialError("credential field selection is invalid")
+    auth_dir = Path(auth_dir)
+    dir_fd = _open_auth_directory(auth_dir)
+    try:
+        loaded = _load_credential(auth_dir, dir_fd, credential_ref)
+    finally:
+        os.close(dir_fd)
+    if loaded.metadata.provider != expected:
+        raise CredentialError("credential provider does not match account provider")
+    return {
+        field: loaded.document[field]
+        for field in requested
+        if field in loaded.document
+    }
 
 
 @contextmanager
