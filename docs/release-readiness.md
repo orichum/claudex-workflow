@@ -17,9 +17,9 @@ Two intentionally excluded cases are not release blockers:
 Both were excluded at the user's request. Account selection, priority,
 validation, and rollover behavior remain covered deterministically.
 
-The repository does not yet declare a software license. That does not affect
-local installation or private evaluation, but an open-source release requires
-the owner to choose the legal terms; Orichum does not infer or grant them.
+Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
+declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
+independent licenses retained by integrated upstream tools.
 
 ## Live acceptance
 
