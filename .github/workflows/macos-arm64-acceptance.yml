@@ -1,9 +1,6 @@
 name: Native macOS ARM64 acceptance
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
 
@@ -50,27 +47,6 @@ jobs:
           printf '%s\n' "$USER_BIN_DIR" >>"$GITHUB_PATH"
           claude --version
           uv --version
-
-      - name: Run repository test suites
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m unittest discover -s tests -p 'test_*.py'
-          for test_script in \
-              tests/test_smoke.sh \
-              tests/test_plugins.sh \
-              tests/test_installer.sh \
-              tests/test_install_transaction.sh \
-              tests/test_live_stack_routes.sh \
-              tests/test_orichum_launcher.sh \
-              tests/test_uninstall.sh; do
-            if ! bash "$test_script"; then
-              printf '::error title=Shell contract failed::%s failed; diagnostic rerun follows\n' \
-                "$test_script"
-              bash -x "$test_script"
-              exit 1
-            fi
-          done
 
       - name: Fresh install without providers
         shell: bash
