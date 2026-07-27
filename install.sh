@@ -1762,11 +1762,6 @@ if [[ "$prior_install_state_verified" == true ]]; then
       1 orichum:routing "$routing_current_artifact" \
       "$routing_input_sha" "$routing_probe_sha"
   )"
-  if [[ "$routing_decision" == reused && \
-        ( "$cliproxy_listener_owned" != true || \
-          "$cliproxy_ready_before" != true ) ]]; then
-    routing_decision=repaired
-  fi
 fi
 
 mempalace_recorded_version=
@@ -2426,6 +2421,10 @@ if [[ "$cliproxy_restart_required" == true ]]; then
   else
     cliproxy_action=installed
   fi
+fi
+if [[ "$routing_action" == reused ]] && \
+   [[ "$cliproxy_action" == reconciled ]]; then
+  routing_action=repaired
 fi
 print_component_status_table \
   "$python_decision" "$cliproxy_decision" "$claudex_decision" \
