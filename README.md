@@ -40,10 +40,12 @@ cd orichum
 ./install.sh
 ```
 
-The installer also handles upgrades. It installs or updates Orichum's
-dependencies, reconciles the services it owns, and finishes by running the
+The first install performs the complete setup and health check. Later
+`./install.sh` runs quickly when everything is already verified and healthy.
+Use `./install.sh --upgrade` when you want Orichum to check upstream releases,
+upgrade managed tools, run their complete probes, and finish with the full
 doctor check. See [Installation and upgrades](docs/installation.md) for
-prerequisites, locations, services, port handling, and uninstall options.
+details, locations, port handling, and uninstall options.
 
 To remove the Orichum runtime while keeping accounts, sessions, project
 configuration, graphs, and Mempalace palaces for a later reinstall:
@@ -196,7 +198,7 @@ orichum doctor
 | Refresh the current code graph | `orichum graph .` |
 | Inspect graph state without changing it | `orichum graph status .` |
 | Check the installation | `orichum doctor` |
-| Upgrade Orichum | Run `./install.sh` again from the Orichum checkout |
+| Upgrade Orichum | Run `./install.sh --upgrade` from the Orichum checkout |
 
 The complete command map is in the [CLI reference](docs/cli-reference.md).
 

@@ -58,7 +58,7 @@ jobs:
             exit "$status"
           }
           trap report_acceptance_failure ERR
-          ./install.sh
+          ./install.sh | tee "$RUNNER_TEMP/orichum-fresh.log"
           managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
           test -x "$managed_python"
           test -x "$ORICHUM_DATA_HOME/bin/lean-ctx"
@@ -81,6 +81,10 @@ jobs:
             printf 'route proxy unexpectedly active without providers\n' >&2
             exit 1
           fi
+          jq -e '
+            .schemaVersion == 1 and
+            (.components.routing | not)
+          ' "$ORICHUM_DATA_HOME/state/install-state.json" >/dev/null
           for label in \
               io.orichum.headroom \
               com.user.claudex-headroom \
@@ -568,7 +572,7 @@ jobs:
           "$RUNNER_TEMP/run-graph-session-fixture" \
             "$graph_project" "$RUNNER_TEMP/graph-session.initial"
 
-      - name: Verify idempotent upgrade
+      - name: Verify fast repeat and explicit upgrade
         shell: bash
         run: |
           set -euo pipefail
@@ -578,7 +582,11 @@ jobs:
               awk '/^[[:space:]]*pid = / { print $3; exit }'
           )"
           before_python_target="$(readlink "$ORICHUM_DATA_HOME/bin/orichum-python")"
-          ./install.sh | tee "$RUNNER_TEMP/orichum-upgrade.log"
+          repeat_started="$(python3 -c 'import time; print(time.monotonic_ns())')"
+          ./install.sh | tee "$RUNNER_TEMP/orichum-fast.log"
+          repeat_finished="$(python3 -c 'import time; print(time.monotonic_ns())')"
+          repeat_ms="$(( (repeat_finished - repeat_started) / 1000000 ))"
+          test "$repeat_ms" -lt 10000
           after_ports="$(jq -cS . "$ORICHUM_DATA_HOME/service-ports.json")"
           test "$before_ports" = "$after_ports"
           test "$before_route_pid" = "$(
@@ -588,17 +596,43 @@ jobs:
           test "$before_python_target" = "$(
             readlink "$ORICHUM_DATA_HOME/bin/orichum-python"
           )"
-          grep -Fq 'Python action:  reused' "$RUNNER_TEMP/orichum-upgrade.log"
-          grep -Fq 'CLIProxyAPI: reused' "$RUNNER_TEMP/orichum-upgrade.log"
-          grep -Fq 'Route proxy: reused' "$RUNNER_TEMP/orichum-upgrade.log"
+          for component in \
+              Python CLIProxyAPI Claudex LeanCTX \
+              Mempalace Graphify Routing; do
+            grep -Eq \
+              "^${component}[[:space:]]+reused[[:space:]]*$" \
+              "$RUNNER_TEMP/orichum-fast.log"
+          done
+          grep -Eq \
+            '^Controller plugin[[:space:]]+reused[[:space:]]*$' \
+            "$RUNNER_TEMP/orichum-fast.log"
+          grep -Fq 'Fast readiness checks passed.' \
+            "$RUNNER_TEMP/orichum-fast.log"
+          if grep -Fq 'Running Orichum doctor' \
+              "$RUNNER_TEMP/orichum-fast.log"; then
+            exit 1
+          fi
           grep -Fq \
             "  Claudex runtime:   $ORICHUM_DATA_HOME/bin/claudex" \
-            "$RUNNER_TEMP/orichum-upgrade.log"
+            "$RUNNER_TEMP/orichum-fast.log"
           grep -Fq \
             "  CLIProxyAPI:       $ORICHUM_DATA_HOME/bin/cli-proxy-api" \
-            "$RUNNER_TEMP/orichum-upgrade.log"
+            "$RUNNER_TEMP/orichum-fast.log"
           grep -Fq \
             "  LeanCTX:           $ORICHUM_DATA_HOME/bin/lean-ctx" \
+            "$RUNNER_TEMP/orichum-fast.log"
+          ./install.sh --upgrade | tee "$RUNNER_TEMP/orichum-upgrade.log"
+          for component in \
+              Python CLIProxyAPI Claudex LeanCTX \
+              Mempalace Graphify Routing; do
+            grep -Eq \
+              "^${component}[[:space:]]+upgraded[[:space:]]*$" \
+              "$RUNNER_TEMP/orichum-upgrade.log"
+          done
+          grep -Eq \
+            '^Controller plugin[[:space:]]+upgraded[[:space:]]*$' \
+            "$RUNNER_TEMP/orichum-upgrade.log"
+          grep -Fq 'Running Orichum doctor' \
             "$RUNNER_TEMP/orichum-upgrade.log"
           for label in \
               io.orichum.headroom \
@@ -619,7 +653,6 @@ jobs:
           rg -Fq 'current' "$RUNNER_TEMP/graph-status.upgrade.log"
           "$RUNNER_TEMP/run-graph-session-fixture" \
             "$graph_project" "$RUNNER_TEMP/graph-session.upgrade"
-          orichum doctor
 
       - name: Verify uninstall lifecycle
         shell: bash
