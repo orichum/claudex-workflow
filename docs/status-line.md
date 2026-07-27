@@ -22,6 +22,10 @@ that account.
 - Provider quota lookups are cached locally for 60 seconds and scoped by
   Orichum account ID. Concurrent sessions using different accounts cannot
   replace one another's values.
+- If a refresh fails because of a temporary credential, provider, or network
+  problem, the last successful value may remain visible for up to 15 minutes.
+  After that, an unavailable window renders as `—`. Orichum never invents a
+  percentage when no usable provider value exists.
 - Account and route state come from the shared Orichum route proxy.
 - `[primary]` means the preferred account handled the latest request.
 - `[fallback: rate limit]` means same-family recovery selected the configured

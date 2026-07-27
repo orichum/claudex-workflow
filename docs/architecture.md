@@ -1,43 +1,20 @@
 # Architecture
 
-## Session setup and request path
+## Session creation
 
 ```mermaid
 flowchart LR
-    subgraph Launch["Session setup"]
-        CFG["Focused configuration"] --> O["Orichum"]
-        U["User"] --> O
-        O --> STATE["Immutable session state"]
-        O --> MCP["Private project MCP file"]
-        O --> LCFG["Private LeanCTX config"]
-        O --> PLUGIN["Private controller plugin"]
-        O --> C["Claude Code"]
-
-        MCP --> C
-        LCFG -. "session-jailed live context" .-> C
-        PLUGIN --> C
-        STATE -. "resume and route binding" .-> O
-    end
-
-    subgraph Runtime["Runtime request path"]
-        C --> X["Per-session Claudex translator"]
-        X --> R["Shared Orichum route proxy\ntool deferral + account failover"]
-        STATE -. "frozen primary and fallback" .-> R
-        R --> P["Shared CLIProxyAPI"]
-        P --> A["Selected named account"]
-        A --> M["Provider model"]
-    end
+    U["User and project directory"] --> O["Orichum"]
+    C["Focused configuration"] --> O
+    O --> P["Private session package"]
+    P --> CC["Claude Code"]
 ```
 
-The request path has three services: one per-session Claudex translator, the
-shared Orichum route proxy, and shared CLIProxyAPI. All are bound to
-`127.0.0.1`. Each physical session owns its translator, private run directory,
-MCP file, and materialized controller plugin.
-
-Orichum gives the private MCP file and controller plugin to Claude Code when it
-starts. The MCP file exposes only tools relevant to the resolved project. The
-controller plugin supplies the controller policy, audited specialist roles,
-workflows, and safety hooks.
+Orichum resolves the focused configuration for the launch directory and builds
+a private session package. It contains immutable route state, the project MCP
+file, LeanCTX configuration, and the controller plugin. Claude Code receives
+that package when the session starts, so only tools relevant to the resolved
+project are exposed.
 
 ## Context path
 
@@ -76,7 +53,22 @@ Resume revalidates the current control plane and services but keeps the logical
 session's frozen route. Fork creates a new binding and carries only a bounded
 handoff.
 
-## Runtime request path
+## Model request path
+
+```mermaid
+flowchart LR
+    CC["Claude Code"] --> X["Claudex translator"]
+    X --> R["Orichum route proxy"]
+    B["Immutable route binding"] -.-> R
+    R --> P["CLIProxyAPI"]
+    P --> A["Named account"]
+    A --> M["Provider model"]
+```
+
+The request path has three loopback services: one Claudex translator for the
+physical session, the shared Orichum route proxy, and shared CLIProxyAPI. The
+route binding fixes the primary route and its compatible fallback for the
+logical session.
 
 1. Claude Code sends the model request through its per-session Claudex
    translator.

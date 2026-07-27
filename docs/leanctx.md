@@ -65,7 +65,8 @@ orichum leanctx dashboard
 `stats` prints a savings snapshot, `watch` opens LeanCTX's live terminal
 monitor, and `dashboard` opens the authenticated Observatory on
 `127.0.0.1`. The dashboard runs in the foreground and stops with Ctrl+C;
-Orichum does not install another service.
+Orichum does not install another service. Press `q` to leave the terminal
+monitor.
 
 List physical runs or select one explicitly:
 
@@ -78,11 +79,14 @@ orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
 Without `--run`, Orichum selects the newest run for the current project and
 never falls back to another project. A physical `run.*` ID identifies one
 LeanCTX process and its metrics; it is different from the logical `oc-s-*`
-session ID used by `orichum resume`.
+session ID used by `orichum resume`. Historical physical runs remain
+selectable with `--run`.
 
-The web dashboard uses a temporary configuration copy. Dashboard configuration
-changes are therefore nonpersistent and cannot mutate or invalidate a live
-session. Metrics, events, and activity still come from the selected run.
+The web dashboard opens a browser by default. Use `--open none` to print its
+local URL without opening one. It uses a temporary configuration copy, so
+dashboard configuration changes are nonpersistent and cannot mutate or
+invalidate a live session. Metrics, events, and activity still come from the
+selected run.
 
 ## Verify
 
