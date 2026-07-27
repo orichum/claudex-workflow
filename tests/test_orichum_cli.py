@@ -908,10 +908,34 @@ class OrichumCliTests(unittest.TestCase):
         physical = SimpleNamespace(
             run_dir=run_dir,
             mcp_file=run_dir / "mcp.json",
+            context_file=run_dir / "context.json",
             effective_models_file=run_dir / "effective-models.json",
             plugin_dir=plugin,
             controller_model="gpt-5.6-sol",
         )
+        physical.context_file.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "launchDirReal": "/Users/example/xebia/project",
+                    "repoRootReal": "/Users/example/xebia/project",
+                    "route": {
+                        "id": "xebia",
+                        "contextRootReal": "/Users/example/xebia",
+                        "dockerProfile": "xebia",
+                        "modelStack": None,
+                        "accountPools": ["xebia", "shared"],
+                        "githubAccount": "athevar-xebia",
+                        "memoryWing": "xebia",
+                        "memoryAvailable": True,
+                        "memoryFailureCode": None,
+                        "palacePathReal": "/Users/example/.mempalace/xebia",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        physical.context_file.chmod(0o600)
         prepared = SimpleNamespace(
             logical=SimpleNamespace(
                 id="oc-s-0000000000000001",
@@ -1013,6 +1037,21 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn(
             "mcp__mempalace__mempalace_get_taxonomy",
             command[allowed_index + 1].split(","),
+        )
+        policy_index = command.index("--append-system-prompt-file")
+        launch_policy = Path(command[policy_index + 1])
+        self.assertEqual(launch_policy, run_dir / "launch-policy.md")
+        binding_prompt = launch_policy.read_text(encoding="utf-8")
+        self.assertIn('MCP_DOCKER profile: "xebia"', binding_prompt)
+        self.assertIn('GitHub account: "athevar-xebia"', binding_prompt)
+        self.assertIn('Mempalace wing: "xebia"', binding_prompt)
+        self.assertIn(
+            "already bound to this physical session", binding_prompt
+        )
+        self.assertIn(
+            "Never activate, switch, create, update, or remove Docker MCP "
+            "profiles",
+            binding_prompt,
         )
         self.assertNotIn("mcp__leanctx__*", command)
         self.assertNotIn("--dangerously-skip-permissions", command)

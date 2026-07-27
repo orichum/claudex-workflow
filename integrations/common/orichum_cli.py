@@ -1498,6 +1498,90 @@ def _github_config_for_session(
         raise CliError("project GitHub identity is unavailable") from error
 
 
+def _materialize_launch_policy(
+    policy: Path,
+    physical: SessionPaths,
+    handoff: str | None,
+) -> Path:
+    try:
+        policy_bytes = _read_stable_file(
+            policy, "controller policy", 1024 * 1024
+        )
+        context = json.loads(
+            _read_stable_file(
+                physical.context_file,
+                "session project context",
+                2 * 1024 * 1024,
+            )
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise CliError("session launch policy could not be prepared") from error
+    route = context.get("route") if isinstance(context, dict) else None
+    if not isinstance(route, dict):
+        raise CliError("session project binding is unavailable")
+    project_root = route.get("contextRootReal")
+    docker_profile = route.get("dockerProfile")
+    github_account = route.get("githubAccount")
+    memory_wing = route.get("memoryWing")
+    if (
+        not isinstance(project_root, str)
+        or not project_root
+        or (
+            docker_profile is not None
+            and (not isinstance(docker_profile, str) or not docker_profile)
+        )
+        or (
+            github_account is not None
+            and (not isinstance(github_account, str) or not github_account)
+        )
+        or not isinstance(memory_wing, str)
+        or not memory_wing
+    ):
+        raise CliError("session project binding is invalid")
+
+    def shown(value: str | None) -> str:
+        return "none" if value is None else json.dumps(value)
+
+    binding = (
+        "\n\n## Verified Orichum session bindings\n\n"
+        "These values are frozen and authoritative for this physical session:\n\n"
+        f"- Project context root: {json.dumps(project_root)}\n"
+        f"- MCP_DOCKER profile: {shown(docker_profile)}\n"
+        f"- GitHub account: {shown(github_account)}\n"
+        f"- Mempalace wing: {json.dumps(memory_wing)}\n\n"
+        "When an MCP_DOCKER profile is shown, the `docker` MCP gateway is "
+        "already bound to this physical session with that profile. Never "
+        "activate, switch, create, update, or remove Docker MCP profiles. "
+        "Diagnose empty or rejected service results against the bound "
+        "profile's credentials and upstream permissions.\n"
+    ).encode("utf-8")
+    payload = policy_bytes + binding
+    if handoff is not None:
+        payload += (
+            b"\n\n## Explicit session handoff\n\n"
+            + handoff.encode("utf-8")
+            + b"\n"
+        )
+
+    launch_policy = physical.run_dir / "launch-policy.md"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(launch_policy, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise CliError("session launch policy write stalled")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return launch_policy
+
+
 def _managed_python_entrypoint(data_home: Path) -> str:
     private_root = data_home / "python"
     entrypoint = data_home / "bin" / "orichum-python"
@@ -1661,33 +1745,9 @@ def _launch_session(
         github_config,
         claudex_config,
     )
-    launch_policy = policy
-    if handoff is not None:
-        try:
-            policy_bytes = _read_stable_file(
-                policy, "controller policy", 1024 * 1024
-            )
-        except OSError as error:
-            raise CliError("controller policy could not be read") from error
-        launch_policy = physical.run_dir / "launch-policy.md"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(launch_policy, flags, 0o600)
-        try:
-            os.fchmod(descriptor, 0o600)
-            payload = (
-                policy_bytes
-                + b"\n\n## Explicit session handoff\n\n"
-                + handoff.encode("utf-8")
-                + b"\n"
-            )
-            offset = 0
-            while offset < len(payload):
-                offset += os.write(descriptor, payload[offset:])
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    launch_policy = _materialize_launch_policy(
+        policy, physical, handoff
+    )
     command = [
         str(claudex),
         "--config",
