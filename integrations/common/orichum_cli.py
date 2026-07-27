@@ -475,27 +475,15 @@ def _leanctx_project_root(
 
 def _leanctx_list(
     runs: Sequence[leanctx_monitor.LeanctxRun],
-    project_root: Path | None,
+    selected_run_id: str | None,
 ) -> str:
-    selected = None
-    if project_root is not None:
-        matches = tuple(
-            run
-            for run in runs
-            if run.project_root == project_root.resolve(strict=False)
-        )
-        if matches:
-            selected = max(
-                matches,
-                key=lambda run: (run.created_at, run.run_id),
-            ).run_id
     rows = [
         (
             run.run_id,
             run.created_at,
             str(run.project_root),
             "yes" if run.has_activity else "no",
-            "yes" if run.run_id == selected else "—",
+            "yes" if run.run_id == selected_run_id else "—",
         )
         for run in runs
     ]
@@ -2084,6 +2072,13 @@ def _deferred(label: str) -> int:
     return 2
 
 
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orichum")
     parser.add_argument(
@@ -2092,90 +2087,192 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"Orichum {_release_version()}",
     )
     commands = parser.add_subparsers(dest="command")
-    run = commands.add_parser("run")
+    run = commands.add_parser(
+        "run",
+        help="start a project-aware session",
+    )
     run.add_argument("arguments", nargs=argparse.REMAINDER)
 
-    config = commands.add_parser("config")
+    config = commands.add_parser(
+        "config",
+        help="inspect and validate configuration",
+    )
     config_action = config.add_subparsers(dest="config_command", required=True)
-    for name in ("show", "validate", "paths"):
-        config_action.add_parser(name)
+    for name, help_text in (
+        ("show", "show merged redacted configuration"),
+        ("validate", "validate the focused control plane"),
+        ("paths", "print configuration and data paths"),
+    ):
+        config_action.add_parser(name, help=help_text)
 
-    context = commands.add_parser("context")
+    context = commands.add_parser(
+        "context",
+        help="manage project contexts",
+    )
     context_action = context.add_subparsers(dest="context_command", required=True)
-    context_action.add_parser("list")
-    context_action.add_parser("validate")
-    for name in ("add", "populate", "remove", "update"):
-        command = context_action.add_parser(name)
+    context_action.add_parser("list", help="list configured contexts")
+    context_action.add_parser(
+        "validate",
+        help="validate every configured context",
+    )
+    for name, help_text in (
+        ("add", "add and populate a project context"),
+        ("populate", "refresh memory and graphs explicitly"),
+        ("remove", "remove a context mapping"),
+        ("update", "change a context mapping"),
+    ):
+        command = context_action.add_parser(name, help=help_text)
         command.add_argument("arguments", nargs=argparse.REMAINDER)
 
-    models = commands.add_parser("models")
+    models = commands.add_parser(
+        "models",
+        help="inspect models and resolved stacks",
+    )
     model_action = models.add_subparsers(dest="models_command", required=True)
-    model_action.add_parser("list")
-    model_action.add_parser("stacks")
-    model_action.add_parser("validate")
-    resolve = model_action.add_parser("resolve")
+    model_action.add_parser("list", help="list declared models")
+    model_action.add_parser("stacks", help="list configured stacks")
+    model_action.add_parser("validate", help="validate model routing")
+    resolve = model_action.add_parser(
+        "resolve",
+        help="resolve effective routes for a stack",
+    )
     resolve.add_argument("stack", nargs="?")
 
-    stack = commands.add_parser("stack")
+    stack = commands.add_parser(
+        "stack",
+        help="configure model stacks",
+    )
     stack_action = stack.add_subparsers(
         dest="stack_command", required=True
     )
-    stack_action.add_parser("available")
-    stack_action.add_parser("list")
-    show_stack = stack_action.add_parser("show")
+    stack_action.add_parser(
+        "available",
+        help="show live provider and model choices",
+    )
+    stack_action.add_parser("list", help="list configured stacks")
+    show_stack = stack_action.add_parser(
+        "show",
+        help="inspect one stack",
+    )
     show_stack.add_argument("name")
-    stack_action.add_parser("configure")
+    stack_action.add_parser(
+        "configure",
+        help="create or edit a stack interactively",
+    )
 
-    provider = commands.add_parser("provider")
+    provider = commands.add_parser(
+        "provider",
+        help="manage provider accounts",
+    )
     provider_action = provider.add_subparsers(
         dest="provider_command", required=True
     )
-    provider_action.add_parser("list")
-    provider_action.add_parser("configure")
-    login = provider_action.add_parser("login")
+    provider_action.add_parser(
+        "list",
+        help="list configured provider adapters",
+    )
+    provider_action.add_parser(
+        "configure",
+        help="configure and register an account",
+    )
+    login = provider_action.add_parser(
+        "login",
+        help="authenticate through CLIProxyAPI",
+    )
     login.add_argument("arguments", nargs=argparse.REMAINDER)
-    provider_action.add_parser("accounts")
-    account = provider_action.add_parser("account")
+    provider_action.add_parser(
+        "accounts",
+        help="list named accounts",
+    )
+    account = provider_action.add_parser(
+        "account",
+        help="manage one named account",
+    )
     account_action = account.add_subparsers(
         dest="account_command", required=True
     )
-    add = account_action.add_parser("add")
+    add = account_action.add_parser("add", help="register an account")
     add.add_argument("name")
     add.add_argument("provider")
     add.add_argument("credential_ref")
     add.add_argument("pool")
     add.add_argument("--priority", default="primary")
-    rename = account_action.add_parser("rename")
+    rename = account_action.add_parser("rename", help="rename an account")
     rename.add_argument("selector")
     rename.add_argument("name")
-    priority = account_action.add_parser("priority")
+    priority = account_action.add_parser(
+        "priority",
+        help="change account priority",
+    )
     priority.add_argument("selector")
     priority.add_argument("priority")
-    for name in ("enable", "disable", "remove"):
-        command = account_action.add_parser(name)
+    for name, help_text in (
+        ("enable", "enable an account"),
+        ("disable", "disable an account"),
+        ("remove", "remove an account"),
+    ):
+        command = account_action.add_parser(name, help=help_text)
         command.add_argument("selector")
-    sync = account_action.add_parser("sync")
+    sync = account_action.add_parser(
+        "sync",
+        help="reconcile account credentials",
+    )
     sync.add_argument("selector", nargs="?")
 
-    plugin = commands.add_parser("plugin")
+    plugin = commands.add_parser(
+        "plugin",
+        help="manage optional Claude Code plugins",
+    )
     plugin_action = plugin.add_subparsers(dest="plugin_command", required=True)
-    plugin_action.add_parser("list")
-    for name in ("add", "remove", "sync", "update"):
-        command = plugin_action.add_parser(name)
+    plugin_action.add_parser("list", help="list declared plugins")
+    for name, help_text in (
+        ("add", "declare and install a plugin"),
+        ("remove", "remove a declared plugin"),
+        ("sync", "reconcile declared plugins"),
+        ("update", "update a declared plugin"),
+    ):
+        command = plugin_action.add_parser(name, help=help_text)
         command.add_argument("arguments", nargs=argparse.REMAINDER)
 
-    graph = commands.add_parser("graph")
+    graph = commands.add_parser(
+        "graph",
+        help="manage repository-aware Graphify data",
+    )
     graph.add_argument("arguments", nargs=argparse.REMAINDER)
-    leanctx = commands.add_parser("leanctx")
+    leanctx = commands.add_parser(
+        "leanctx",
+        help="inspect and monitor LeanCTX",
+    )
     leanctx_action = leanctx.add_subparsers(
         dest="leanctx_command",
         required=True,
     )
-    leanctx_action.add_parser("list")
-    for name in ("stats", "watch"):
-        command = leanctx_action.add_parser(name)
+    leanctx_list = leanctx_action.add_parser(
+        "list",
+        help="list recent LeanCTX runs",
+    )
+    leanctx_list.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=20,
+        help="number of newest runs to show (default: 20)",
+    )
+    leanctx_list.add_argument(
+        "--all",
+        dest="show_all",
+        action="store_true",
+        help="show every run",
+    )
+    for name, help_text in (
+        ("stats", "show exact context savings"),
+        ("watch", "open the terminal monitor"),
+    ):
+        command = leanctx_action.add_parser(name, help=help_text)
         command.add_argument("--run")
-    dashboard = leanctx_action.add_parser("dashboard")
+    dashboard = leanctx_action.add_parser(
+        "dashboard",
+        help="open the local authenticated Observatory",
+    )
     dashboard.add_argument("--run")
     dashboard.add_argument("--port", type=int)
     dashboard.add_argument(
@@ -2184,10 +2281,31 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("browser", "none", "vscode"),
         default="browser",
     )
-    commands.add_parser("doctor")
-    sessions = commands.add_parser("sessions")
+    commands.add_parser(
+        "doctor",
+        help="verify the complete local installation",
+    )
+    sessions = commands.add_parser(
+        "sessions",
+        help="inspect and clean sessions",
+    )
+    sessions.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=20,
+        help="number of newest sessions to show (default: 20)",
+    )
+    sessions.add_argument(
+        "--all",
+        dest="show_all",
+        action="store_true",
+        help="show every logical session",
+    )
     sessions_action = sessions.add_subparsers(dest="sessions_command")
-    sessions_routes = sessions_action.add_parser("routes")
+    sessions_routes = sessions_action.add_parser(
+        "routes",
+        help="inspect frozen routes for one session",
+    )
     sessions_routes.add_argument("session_id")
     sessions_cleanup = sessions_action.add_parser(
         "cleanup",
@@ -2204,16 +2322,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="remove the previewed snapshots",
     )
-    session = commands.add_parser("session")
+    session = commands.add_parser(
+        "session",
+        help="inspect one logical session",
+    )
     session_action = session.add_subparsers(
         dest="session_command", required=True
     )
-    session_routes = session_action.add_parser("routes")
+    session_routes = session_action.add_parser(
+        "routes",
+        help="inspect frozen routes",
+    )
     session_routes.add_argument("session_id")
-    resume = commands.add_parser("resume")
+    resume = commands.add_parser(
+        "resume",
+        help="resume a logical session",
+    )
     resume.add_argument("session_id")
     resume.add_argument("arguments", nargs=argparse.REMAINDER)
-    fork = commands.add_parser("fork")
+    fork = commands.add_parser(
+        "fork",
+        help="fork a session onto another stack",
+    )
     fork.add_argument("session_id")
     fork.add_argument("--stack")
     fork.add_argument("--handoff-file", type=Path)
@@ -2273,7 +2403,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if parsed.leanctx_command == "list":
                 project_root = _leanctx_project_root(config, Path.cwd())
-                print(_leanctx_list(runs, project_root), end="")
+                selected_run_id = None
+                if project_root is not None:
+                    try:
+                        selected_run_id = leanctx_monitor.select_run(
+                            runs,
+                            project_root,
+                            None,
+                            current_run_id=os.environ.get(
+                                "CLAUDEX_RUN_ID"
+                            ),
+                        ).run_id
+                    except leanctx_monitor.LeanctxMonitorError:
+                        pass
+                shown = runs if parsed.show_all else runs[: parsed.limit]
+                print(_leanctx_list(shown, selected_run_id), end="")
+                if not parsed.show_all and len(runs) > len(shown):
+                    print(
+                        f"Showing newest {len(shown)} of {len(runs)} runs. "
+                        "Use --all to show every run."
+                    )
                 return 0
             project_root = (
                 None
@@ -2284,6 +2433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runs,
                 project_root,
                 parsed.run,
+                current_run_id=os.environ.get("CLAUDEX_RUN_ID"),
             )
             binary = leanctx_monitor.managed_binary(paths["data"])
             if parsed.leanctx_command == "stats":
@@ -2346,10 +2496,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 print(_session_routes(logical, accounts), end="")
             else:
+                logical_sessions = tuple(
+                    sorted(
+                        list_logical_sessions(paths["state"]),
+                        key=lambda session: (
+                            session.created_at,
+                            session.id,
+                        ),
+                        reverse=True,
+                    )
+                )
+                shown = (
+                    logical_sessions
+                    if parsed.show_all
+                    else logical_sessions[: parsed.limit]
+                )
                 print(
-                    _session_list(list_logical_sessions(paths["state"])),
+                    _session_list(shown),
                     end="",
                 )
+                if (
+                    not parsed.show_all
+                    and len(logical_sessions) > len(shown)
+                ):
+                    print(
+                        f"Showing newest {len(shown)} of "
+                        f"{len(logical_sessions)} sessions. "
+                        "Use --all to show every session."
+                    )
             return 0
         if parsed.command == "resume":
             prepared = _prepare_resume(

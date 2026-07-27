@@ -48,7 +48,7 @@ Atlassian, GitHub, or other project services.
 
 | Boundary | Coverage |
 |---|---|
-| Python behavior | 618 `unittest` cases, including routing, accounts, sessions, hooks, tool deferral, graph safety, and status rendering |
+| Python behavior | 624 `unittest` cases, including routing, accounts, sessions, hooks, tool deferral, graph safety, and status rendering |
 | Shell behavior | All seven suites: smoke, plugin, installer, transaction, route, launcher, and uninstall |
 | Installer safety | Fresh install, idempotent upgrade, occupied-port selection, owned-service reuse, foreign-service preservation, and rollback |
 | Uninstall | Default and purge behavior in isolated homes; external tools and unrelated services are preserved |
