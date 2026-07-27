@@ -108,7 +108,7 @@ class OrichumCliTests(unittest.TestCase):
             orichum_cli.build_parser().parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.1\n")
+        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.2\n")
 
     def test_help_explains_top_level_commands(self) -> None:
         help_text = orichum_cli.build_parser().format_help()
