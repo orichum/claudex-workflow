@@ -2202,6 +2202,7 @@ private_tool_layout_is_owned() {
   local tool_dir="$2"
   local bin_dir="$3"
   local data_physical tools_physical tool_physical bin_physical
+  local component component_mode current_uid
   [[ "$data_root" == /* && "$data_root" != / ]] && \
     [[ "$tool_dir" == "$data_root/tools/uv" ]] && \
     [[ "$bin_dir" == "$data_root/tools/bin" ]] || return 1
@@ -2217,7 +2218,14 @@ private_tool_layout_is_owned() {
   bin_physical="$(cd -P -- "$bin_dir" && pwd)" || return 1
   [[ "$tools_physical" == "$data_physical/tools" ]] && \
     [[ "$tool_physical" == "$data_physical/tools/uv" ]] && \
-    [[ "$bin_physical" == "$data_physical/tools/bin" ]]
+    [[ "$bin_physical" == "$data_physical/tools/bin" ]] || return 1
+  current_uid="$(id -u)"
+  for component in \
+      "$data_root" "$data_root/tools" "$tool_dir" "$bin_dir"; do
+    [[ "$(path_uid "$component")" == "$current_uid" ]] || return 1
+    component_mode="$(path_mode "$component")" || return 1
+    (( (8#$component_mode & 0022) == 0 )) || return 1
+  done
 }
 
 sha256_text() {

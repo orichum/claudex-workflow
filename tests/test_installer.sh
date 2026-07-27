@@ -228,6 +228,18 @@ IFS=$'\t' read -r identity_version identity_artifact < <(
 [[ "$identity_version" == 3.6.0 ]]
 [[ "$identity_artifact" =~ ^[a-f0-9]{64}$ ]]
 [[ ! -e "$identity_python_marker" ]]
+for writable_identity_parent in \
+    "$identity_data/tools" "$identity_tools"; do
+  chmod 0770 "$writable_identity_parent"
+  if private_uv_tool_identity \
+      "$identity_data" mempalace mempalace \
+      mempalace mempalace-mcp >/dev/null 2>&1; then
+    printf 'writable private tool ancestor was accepted: %s\n' \
+      "$writable_identity_parent" >&2
+    exit 1
+  fi
+  chmod 0700 "$writable_identity_parent"
+done
 chmod 0770 "$identity_env/lib/python3.14/site-packages"
 if private_uv_tool_identity \
     "$identity_data" mempalace mempalace \
