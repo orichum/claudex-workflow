@@ -298,7 +298,7 @@ for required_contract in \
     'workflow_dispatch:' \
     'permissions:' \
     'contents: read' \
-    'runs-on: ubuntu-24.04' \
+    'runs-on: blacksmith-4vcpu-ubuntu-2404' \
     'timeout-minutes: 30' \
     'uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0' \
     'sudo apt-get install --yes ripgrep' \
@@ -365,7 +365,7 @@ for required_contract in \
     'workflow_dispatch:' \
     'permissions:' \
     'contents: read' \
-    'runs-on: macos-15' \
+    'runs-on: blacksmith-6vcpu-macos-15' \
     'GH_TOKEN: ${{ github.token }}' \
     'test "$(uname -m)" = arm64' \
     'brew install ripgrep' \
