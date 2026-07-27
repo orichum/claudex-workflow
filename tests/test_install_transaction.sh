@@ -18,10 +18,15 @@ routing_decision_end = source.index(
     "\nfi\n\nmempalace_recorded_version", routing_decision_start
 )
 routing_decision = source[routing_decision_start:routing_decision_end]
-if "claudex_proxy_listener_owned" in routing_decision:
+early_runtime_samples = (
+    "cliproxy_listener_owned",
+    "cliproxy_ready_before",
+    "claudex_proxy_listener_owned",
+)
+if any(sample in routing_decision for sample in early_runtime_samples):
     raise SystemExit(
-        "routing status still treats an early route-proxy readiness sample "
-        "as a completed repair"
+        "routing status still treats an early runtime sample as a completed "
+        "repair"
     )
 route_action_start = source.index("claudex_proxy_action=pending-provider-login")
 route_action_end = source.index(
@@ -35,6 +40,19 @@ if (
 ):
     raise SystemExit(
         "routing status does not report an actual route-proxy reconciliation"
+    )
+cliproxy_action_start = source.index("cliproxy_action=reused")
+cliproxy_action_end = source.index(
+    "\nprint_component_status_table", cliproxy_action_start
+)
+cliproxy_action = source[cliproxy_action_start:cliproxy_action_end]
+if (
+    '[[ "$routing_action" == reused ]]' not in cliproxy_action
+    or '[[ "$cliproxy_action" == reconciled ]]' not in cliproxy_action
+    or "routing_action=repaired" not in cliproxy_action
+):
+    raise SystemExit(
+        "routing status does not report an actual CLIProxyAPI reconciliation"
     )
 
 start = source.index('elif [[ -n "$prior_model_generation" ]]')
