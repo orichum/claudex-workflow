@@ -118,21 +118,6 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("inspect and monitor LeanCTX", help_text)
         self.assertIn("inspect and clean sessions", help_text)
 
-    def test_nested_help_explains_common_workflows(self) -> None:
-        for command, expected in (
-            ("context", "add and populate a project context"),
-            ("provider", "configure and register an account"),
-            ("stack", "create or edit a stack interactively"),
-        ):
-            stdout = io.StringIO()
-            with (
-                contextlib.redirect_stdout(stdout),
-                self.assertRaises(SystemExit) as raised,
-            ):
-                orichum_cli.build_parser().parse_args([command, "--help"])
-
-            self.assertEqual(raised.exception.code, 0)
-            self.assertIn(expected, stdout.getvalue())
 
     def test_context_models_provider_and_plugin_read_only_commands(self) -> None:
         status, stdout, stderr = self.run_cli("context", "list")
@@ -863,27 +848,6 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("disabled", stderr)
         self.assertFalse((config_home / "accounts.json").exists())
 
-    def test_context_mutations_delegate_without_loading_control_plane(self) -> None:
-        cases = (
-            ("context", "add", "/tmp/project"),
-            ("context", "populate", "/tmp/project"),
-            ("context", "remove", "/tmp/project"),
-        )
-        with mock.patch.object(orichum_cli, "_run_external", return_value=0) as run:
-            for arguments in cases:
-                with self.subTest(arguments=arguments):
-                    status, stdout, stderr = self.run_cli(*arguments)
-                    self.assertEqual(status, 0)
-                    self.assertEqual(stdout, "")
-                    self.assertEqual(stderr, "")
-            self.assertEqual(
-                run.call_args_list,
-                [
-                    mock.call("orichum-context", ["add", "/tmp/project"]),
-                    mock.call("orichum-context", ["populate", "/tmp/project"]),
-                    mock.call("orichum-context", ["remove", "/tmp/project"]),
-                ],
-            )
 
     def test_paths_and_context_delegation_do_not_require_valid_config(self) -> None:
         self.environment["ORICHUM_CONFIG_HOME"] = str(
@@ -1016,10 +980,6 @@ class OrichumCliTests(unittest.TestCase):
                         "modelStack": None,
                         "accountPools": ["xebia", "shared"],
                         "githubAccount": "athevar-xebia",
-                        "memoryWing": "xebia",
-                        "memoryAvailable": True,
-                        "memoryFailureCode": None,
-                        "palacePathReal": "/Users/example/.mempalace/xebia",
                     },
                 }
             ),
@@ -1096,13 +1056,8 @@ class OrichumCliTests(unittest.TestCase):
                 "mcp__leanctx__ctx_graph",
                 "mcp__leanctx__ctx_impact",
                 "mcp__leanctx__ctx_callgraph",
-                "mcp__mempalace__mempalace_diary_read",
-                "mcp__mempalace__mempalace_follow_tunnels",
-                "mcp__mempalace__mempalace_list_drawers",
-                "mcp__mempalace__mempalace_list_hallways",
-                "mcp__mempalace__mempalace_list_rooms",
-                "mcp__mempalace__mempalace_list_tunnels",
-                "mcp__mempalace__mempalace_search",
+                "mcp__leanctx__ctx_knowledge",
+                "mcp__leanctx__ctx_overview",
             )),
         )
         self.assertNotIn(
@@ -1113,21 +1068,16 @@ class OrichumCliTests(unittest.TestCase):
             "mcp__leanctx__ctx_shell",
             command[allowed_index + 1].split(","),
         )
-        self.assertNotIn(
-            "mcp__mempalace__mempalace_status",
-            command[allowed_index + 1].split(","),
-        )
-        self.assertNotIn(
-            "mcp__mempalace__mempalace_get_taxonomy",
-            command[allowed_index + 1].split(","),
-        )
         policy_index = command.index("--append-system-prompt-file")
         launch_policy = Path(command[policy_index + 1])
         self.assertEqual(launch_policy, run_dir / "launch-policy.md")
         binding_prompt = launch_policy.read_text(encoding="utf-8")
         self.assertIn('MCP_DOCKER profile: "xebia"', binding_prompt)
         self.assertIn('GitHub account: "athevar-xebia"', binding_prompt)
-        self.assertIn('Mempalace wing: "xebia"', binding_prompt)
+        self.assertIn(
+            "LeanCTX project memory follows the verified project root",
+            binding_prompt,
+        )
         self.assertIn(
             "already bound to this physical session", binding_prompt
         )
@@ -1314,6 +1264,52 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("yes", current_row)
         self.assertIn("—", older_row)
 
+    def test_leanctx_list_hides_unattached_history_unless_requested(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        attached = LeanctxRun(
+            "run.attached",
+            self.root / "data" / "state" / "sessions" / "run.attached",
+            project,
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+        historical = LeanctxRun(
+            "run.historical",
+            self.root / "data" / "state" / "sessions" / "run.historical",
+            project,
+            "2026-07-26T10:00:00Z",
+            False,
+            attached=False,
+        )
+        with (
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "discover_runs",
+                return_value=(attached, historical),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "resolve_control_plane_context",
+                return_value={
+                    "route": {"contextRootReal": str(project)}
+                },
+            ),
+        ):
+            status, stdout, stderr = self.run_cli("leanctx", "list")
+            all_status, all_stdout, all_stderr = self.run_cli(
+                "leanctx", "list", "--all"
+            )
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("run.attached", stdout)
+        self.assertNotIn("run.historical", stdout)
+        self.assertIn("Use --all to include 1 historical run.", stdout)
+        self.assertEqual((all_status, all_stderr), (0, ""))
+        self.assertIn("run.historical", all_stdout)
+
     def test_leanctx_stats_rejects_newest_unattached_run(self) -> None:
         project = self.root / "project"
         project.mkdir()
@@ -1395,10 +1391,34 @@ class OrichumCliTests(unittest.TestCase):
 
         self.assertEqual((status, stderr), (0, ""))
         self.assertIn("run.current", stdout)
+        self.assertIn("SOURCE", stdout)
+        self.assertIn("RETURNED", stdout)
+        self.assertIn("REDUCTION", stdout)
         self.assertIn("14,261", stdout)
         self.assertIn("12,671", stdout)
         self.assertIn("88.9%", stdout)
         read.assert_called_once_with(binary, selected)
+
+    def test_leanctx_stats_does_not_invent_reduction_without_source_tokens(
+        self,
+    ) -> None:
+        run = LeanctxRun(
+            "run.current",
+            self.root / "run.current",
+            self.root / "project",
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+
+        rendered = orichum_cli._leanctx_stats(
+            run,
+            LeanctxStats(2, 0, 0, 0, 0.0),
+        )
+
+        row = next(
+            line for line in rendered.splitlines() if "run.current" in line
+        )
+        self.assertEqual(row.split("|")[-2].strip(), "—")
 
     def test_leanctx_dashboard_propagates_selected_options_and_status(
         self,

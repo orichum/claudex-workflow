@@ -141,6 +141,49 @@ class InstallControlPlaneTests(unittest.TestCase):
         self._rollback(journal)
         self.assertEqual(installed_policy.read_bytes(), stale)
 
+    def test_activation_normalizes_and_rollback_restores_projects(self) -> None:
+        projects_path = self.installed / "projects.json"
+        project_root = self.root / "project"
+        project_root.mkdir()
+        original = {
+            "schemaVersion": 1,
+            "contexts": [
+                {
+                    "root": str(project_root),
+                    "dockerProfile": None,
+                    "modelStack": None,
+                    "accountPools": ["shared"],
+                    "githubAccount": None,
+                    "memoryPalace": "/private/old",
+                    "memoryWing": "old",
+                }
+            ],
+        }
+        projects_path.write_text(json.dumps(original), encoding="utf-8")
+        projects_path.chmod(0o600)
+        shutil.rmtree(self.candidate)
+        stage(self.repository, self.installed, self.candidate)
+
+        journal = self.root / "projects-journal"
+        self._activate(journal)
+        activated = json.loads(projects_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            activated["contexts"][0],
+            {
+                "root": str(project_root),
+                "dockerProfile": None,
+                "modelStack": None,
+                "accountPools": ["shared"],
+                "githubAccount": None,
+            },
+        )
+
+        self._rollback(journal)
+        self.assertEqual(
+            json.loads(projects_path.read_text(encoding="utf-8")),
+            original,
+        )
+
     def test_rollback_accepts_previous_schema_two_journal(self) -> None:
         journal = self.root / "legacy-schema-two-journal"
         self._activate(journal)

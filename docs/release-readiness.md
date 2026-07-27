@@ -30,22 +30,29 @@ independent licenses retained by integrated upstream tools.
 | Capability | Evidence | Result |
 |---|---|---|
 | Install and upgrade | Ran `./install.sh` against the existing managed installation; services were reused and the automatic doctor completed | Pass |
-| Runtime health | Private Python 3.14.x, CLIProxyAPI, route proxy, Claudex, Claude Code, LeanCTX, and Mempalace passed local component readiness checks | Pass |
+| Runtime health | Private Python 3.14.x, CLIProxyAPI, route proxy, Claudex, Claude Code, and LeanCTX passed local component readiness checks | Pass |
 | OpenAI controller | GPT 5.6 Sol completed new and resumed logical sessions through Orichum | Pass |
 | Anthropic agents | Sonnet 5 critic and Opus 4.8 architect completed bounded delegated work | Pass |
 | Antigravity transport | Claude Opus 4.6 Thinking and Gemini 3 Flash returned live acceptance markers through the named Antigravity route | Pass |
 | Sessions | New, resume, same-family fork, parent linkage, immutable route display, and concurrent physical state were exercised | Pass |
 | Subagents | Explorer, verifier, critic, architect, and implementation-worker roles completed bounded tasks | Pass |
-| Project routing | Xebia and Complion resolved different Docker profiles, GitHub identities, account pools, palaces, and wings | Pass |
+| Project routing | Xebia and Complion resolved different Docker profiles, GitHub identities, and account pools | Pass |
 | GitHub identity | Isolated `GH_CONFIG_DIR` instances resolved `athevar-xebia` and `arvind9981` without changing the user's active account | Pass |
 | MCP_DOCKER | Both `xebia` and `realtime` profiles completed MCP initialize and tools/list handshakes | Pass |
-| LeanCTX | Exact nine-tool jailed MCP exposed only the bounded surface, then built a temporary graph, resolved a symbol, and ran impact analysis | Pass |
-| Mempalace | Population, store verification, immutable context binding, wing injection, and a live wing-scoped read succeeded | Pass |
+| LeanCTX | Exact eleven-tool jailed MCP exposed only the bounded source, graph, overview, and knowledge surface | Pass |
+| LeanCTX specialists | Explorer, verifier, critic, architect, and implementation worker each completed a live bounded read through the shared session MCP | Pass |
+| LeanCTX memory route | The controller dynamically loaded deferred overview and knowledge tools, completed task orientation, and performed read-only project recall | Pass |
 | Status line | Displayed Orichum, project, stack, active GPT account, route state, context, and quota values | Pass |
 | Service lifecycle | Shared resident services remained healthy; no per-session Claudex translators remained after sessions exited | Pass |
 
 The live provider tests were bounded and did not write to external Jira,
 Atlassian, GitHub, or other project services.
+
+The post-migration LeanCTX acceptance on 2026-07-28 measured 94.0% reduction
+for a bounded explorer read and 99.1% across the remaining specialist roles.
+The controller also completed one overview and one read-only knowledge call;
+those tools do not emit source-compression counters. These are LeanCTX
+tool-payload measurements, not whole-session provider-token savings.
 
 ## Deterministic and isolated acceptance
 

@@ -16,11 +16,22 @@ Route tools directly without calling another model to choose:
   edits and creates.
 - Use native Edit or Write only when LeanCTX is unavailable or the file is
   binary or unsupported.
-- Use native Bash for Git, package, service, deployment, and other state
-  changes; `ctx_shell` remains observational.
+- Use `ctx_shell` for observational commands whose output may be noisy: Git
+  status/diff/log/show, tests, linters, builds, Terraform plans, and
+  Docker/Kubernetes inspection.
+- Use `ctx_shell(raw=true)` when exact diagnostic output is required.
+- Use native Bash for commands that change state: Git commit/push/branch
+  operations, package installation or upgrades, service lifecycle, deploy or
+  infrastructure apply, authentication, and interactive or streaming
+  commands.
+- Do not run the same command through both shell paths unless compressed
+  output is insufficient; then make one bounded raw follow-up.
 - Use LeanCTX for repository relationships, call graphs, and impact analysis.
-- Recall concise project decisions from Mempalace only when durable history
-  matters.
+- For meaningful project work, call `ctx_overview` once with the active task;
+  skip it for trivial questions and repeated turns in the same task.
+- Use `ctx_knowledge` to recall prior decisions and conventions. Remember only
+  durable, confirmed decisions or outcomes—not raw source, logs, or routine
+  recaps.
 - Load MCP_DOCKER only for a matching project profile and relevant live-service
   work.
 

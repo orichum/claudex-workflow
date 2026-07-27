@@ -26,6 +26,7 @@ from .session_config import (
 
 _RUN_ID = re.compile(r"^run\.[A-Za-z0-9_-]+$")
 _MAX_MANIFEST_BYTES = 64 * 1024
+_MAX_EVENTS_BYTES = 64 * 1024 * 1024
 
 
 class LeanctxMonitorError(RuntimeError):
@@ -103,19 +104,100 @@ def _manifest_digests(document: dict[str, object]) -> tuple[str, str]:
     return context, effective
 
 
-def _activity_exists(directory: Path) -> bool:
+def _event_payload(directory: Path) -> bytes:
     path = directory / "events.jsonl"
     try:
         observed = os.lstat(path)
     except FileNotFoundError:
-        return False
+        return b""
+    except OSError as error:
+        raise LeanctxMonitorError(
+            "LeanCTX statistics are unavailable; run 'orichum doctor'"
+        ) from error
     if (
         stat.S_ISLNK(observed.st_mode)
         or not stat.S_ISREG(observed.st_mode)
         or observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) & 0o022
+        or observed.st_size > _MAX_EVENTS_BYTES
     ):
-        raise LeanctxMonitorError("LeanCTX activity file is unsafe")
-    return observed.st_size > 0
+        raise LeanctxMonitorError(
+            "LeanCTX statistics are invalid; run 'orichum doctor'"
+        )
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            current = os.fstat(descriptor)
+            if (
+                (current.st_dev, current.st_ino)
+                != (observed.st_dev, observed.st_ino)
+                or current.st_size != observed.st_size
+            ):
+                raise LeanctxMonitorError(
+                    "LeanCTX statistics changed while reading"
+                )
+            chunks = []
+            remaining = current.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    raise LeanctxMonitorError(
+                        "LeanCTX statistics changed while reading"
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise LeanctxMonitorError(
+            "LeanCTX statistics are unavailable; run 'orichum doctor'"
+        ) from error
+
+
+def _event_counters(payload: bytes) -> tuple[int, int, int]:
+    commands = 0
+    input_tokens = 0
+    saved = 0
+    try:
+        for raw_line in payload.splitlines():
+            if not raw_line.strip():
+                continue
+            document = json.loads(raw_line)
+            kind = document.get("kind") if isinstance(document, dict) else None
+            if not isinstance(kind, dict) or kind.get("type") != "ToolCall":
+                continue
+            original = kind.get("tokens_original")
+            reduced = kind.get("tokens_saved")
+            if (
+                type(original) is not int
+                or type(reduced) is not int
+                or original < 0
+                or reduced < 0
+                or reduced > original
+            ):
+                raise ValueError("invalid token counters")
+            commands += 1
+            input_tokens += original
+            saved += reduced
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+    ) as error:
+        raise LeanctxMonitorError(
+            "LeanCTX statistics are invalid; run 'orichum doctor'"
+        ) from error
+    return commands, input_tokens, saved
+
+
+def _activity_exists(directory: Path) -> bool:
+    commands, _, _ = _event_counters(_event_payload(directory))
+    return commands > 0
 
 
 def _verified_run(
@@ -173,7 +255,7 @@ def _verified_run(
     except FileNotFoundError:
         return unattached
     try:
-        os.lstat(run_dir / "leanctx" / "config.toml")
+        os.lstat(run_dir / "leanctx" / "config" / "config.toml")
     except FileNotFoundError:
         return unattached
     try:
@@ -189,7 +271,7 @@ def _verified_run(
         run_dir=binding.run_dir,
         project_root=project_root.resolve(strict=False),
         created_at=created_at,
-        has_activity=_activity_exists(leanctx),
+        has_activity=_activity_exists(leanctx / "state"),
         created_at_ns=manifest_stat.st_mtime_ns,
     )
 
@@ -292,21 +374,18 @@ def leanctx_environment(
     """Build the fixed LeanCTX store environment for one run."""
     environment = dict(os.environ if base is None else base)
     directory = run.run_dir / "leanctx"
+    data_home = run.run_dir.parents[2] / "leanctx"
     environment.update(
         {
-            "LEAN_CTX_CACHE_DIR": str(directory),
-            "LEAN_CTX_CONFIG_DIR": str(config_dir or directory),
-            "LEAN_CTX_DATA_DIR": str(directory),
+            "LEAN_CTX_CACHE_DIR": str(directory / "cache"),
+            "LEAN_CTX_CONFIG_DIR": str(config_dir or directory / "config"),
+            "LEAN_CTX_DATA_DIR": str(data_home / "lean-ctx"),
             "LEAN_CTX_PROJECT_ROOT": str(run.project_root),
-            "LEAN_CTX_STATE_DIR": str(directory),
+            "LEAN_CTX_STATE_DIR": str(directory / "state"),
+            "XDG_DATA_HOME": str(data_home),
         }
     )
     return environment
-
-
-def _native_failure(stderr: str) -> str:
-    detail = stderr.strip()[:1000]
-    return detail or "LeanCTX command failed"
 
 
 def read_stats(
@@ -314,44 +393,12 @@ def read_stats(
     run: LeanctxRun,
     base: Mapping[str, str] | None = None,
 ) -> LeanctxStats:
-    """Read and validate LeanCTX's machine-readable statistics."""
-    try:
-        completed = subprocess.run(
-            [str(binary), "stats", "json"],
-            env=leanctx_environment(run, base),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError as error:
-        raise LeanctxMonitorError(
-            "managed LeanCTX is unavailable; run 'orichum doctor'"
-        ) from error
-    if completed.returncode != 0:
-        raise LeanctxMonitorError(_native_failure(completed.stderr))
-    try:
-        document = json.loads(completed.stdout)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise LeanctxMonitorError(
-            "LeanCTX statistics are invalid; run 'orichum doctor'"
-        ) from error
-    fields = (
-        document.get("total_commands"),
-        document.get("total_input_tokens"),
-        document.get("total_output_tokens"),
-    ) if isinstance(document, dict) else ()
-    if (
-        len(fields) != 3
-        or any(
-            type(value) is not int or value < 0
-            for value in fields
-        )
-    ):
-        raise LeanctxMonitorError(
-            "LeanCTX statistics are invalid; run 'orichum doctor'"
-        )
-    commands, input_tokens, output_tokens = fields
-    saved = max(input_tokens - output_tokens, 0)
+    """Read token reduction from one physical run's verified event stream."""
+    del binary, base
+    commands, input_tokens, saved = _event_counters(
+        _event_payload(run.run_dir / "leanctx" / "state")
+    )
+    output_tokens = input_tokens - saved
     percent = saved / input_tokens * 100.0 if input_tokens else 0.0
     return LeanctxStats(
         total_commands=commands,
@@ -427,7 +474,7 @@ def run_watch(binary: Path, run: LeanctxRun) -> int:
 
 
 def _dashboard_config(run: LeanctxRun) -> bytes:
-    path = run.run_dir / "leanctx" / "config.toml"
+    path = run.run_dir / "leanctx" / "config" / "config.toml"
     try:
         observed = os.lstat(path)
         if (

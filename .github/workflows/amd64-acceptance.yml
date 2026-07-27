@@ -225,8 +225,7 @@ jobs:
             readlink "$ORICHUM_DATA_HOME/bin/orichum-python"
           )"
           for component in \
-              Python CLIProxyAPI Claudex LeanCTX \
-              Mempalace; do
+              Python CLIProxyAPI Claudex LeanCTX; do
             grep -Eq \
               "^${component}[[:space:]]+reused[[:space:]]*$" \
               "$RUNNER_TEMP/orichum-fast.log"
@@ -254,8 +253,7 @@ jobs:
             "$RUNNER_TEMP/orichum-fast.log"
           ./install.sh --upgrade | tee "$RUNNER_TEMP/orichum-upgrade.log"
           for component in \
-              Python CLIProxyAPI Claudex LeanCTX \
-              Mempalace Routing; do
+              Python CLIProxyAPI Claudex LeanCTX Routing; do
             grep -Eq \
               "^${component}[[:space:]]+upgraded[[:space:]]*$" \
               "$RUNNER_TEMP/orichum-upgrade.log"

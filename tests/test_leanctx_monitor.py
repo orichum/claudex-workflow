@@ -68,10 +68,6 @@ class LeanctxMonitorTests(unittest.TestCase):
                 "contextRootReal": str(context_root),
                 "dockerProfile": None,
                 "modelStack": None,
-                "memoryWing": project.name,
-                "memoryAvailable": False,
-                "memoryFailureCode": "not-configured",
-                "palacePathReal": None,
             },
         }
         return create_resolved_session(
@@ -102,6 +98,46 @@ class LeanctxMonitorTests(unittest.TestCase):
         self.assertEqual([run.run_id for run in runs], [session.run_id])
         self.assertEqual(runs[0].project_root, self.xebia)
 
+    def test_activity_requires_a_tool_call_not_mcp_registration(self) -> None:
+        session = self.create_run(self.xebia)
+        events = session.run_dir / "leanctx" / "state" / "events.jsonl"
+        events.write_text(
+            json.dumps(
+                {
+                    "kind": {
+                        "type": "AgentAction",
+                        "action": "register",
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        events.chmod(0o600)
+
+        self.assertFalse(
+            discover_runs(REPOSITORY_ROOT, self.data_root)[0].has_activity
+        )
+
+        with events.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "kind": {
+                            "type": "ToolCall",
+                            "tool": "ctx_knowledge",
+                            "tokens_original": 0,
+                            "tokens_saved": 0,
+                        }
+                    }
+                )
+                + "\n"
+            )
+
+        self.assertTrue(
+            discover_runs(REPOSITORY_ROOT, self.data_root)[0].has_activity
+        )
+
     def test_completed_run_without_leanctx_is_reported_as_unattached(
         self,
     ) -> None:
@@ -130,7 +166,7 @@ class LeanctxMonitorTests(unittest.TestCase):
         self,
     ) -> None:
         session = self.create_run(self.xebia)
-        (session.run_dir / "leanctx" / "config.toml").unlink()
+        (session.run_dir / "leanctx" / "config" / "config.toml").unlink()
 
         runs = discover_runs(REPOSITORY_ROOT, self.data_root)
 
@@ -139,7 +175,7 @@ class LeanctxMonitorTests(unittest.TestCase):
 
     def test_tampered_leanctx_config_is_unattached(self) -> None:
         session = self.create_run(self.xebia)
-        config = session.run_dir / "leanctx" / "config.toml"
+        config = session.run_dir / "leanctx" / "config" / "config.toml"
         config.write_text("tools_enabled = []\n", encoding="utf-8")
         config.chmod(0o600)
 
@@ -336,7 +372,7 @@ class LeanctxMonitorTests(unittest.TestCase):
 
     def test_historical_leanctx_contract_is_listed_as_unattached(self) -> None:
         session = self.create_run(self.xebia)
-        config = session.run_dir / "leanctx" / "config.toml"
+        config = session.run_dir / "leanctx" / "config" / "config.toml"
         config.write_text(
             'tools_enabled = ["ctx_read"]\n',
             encoding="utf-8",
@@ -368,97 +404,128 @@ class LeanctxMonitorTests(unittest.TestCase):
         environment = leanctx_environment(run, {"PATH": "/bin"})
 
         self.assertEqual(environment["PATH"], "/bin")
-        for name in (
-            "LEAN_CTX_CACHE_DIR",
-            "LEAN_CTX_CONFIG_DIR",
-            "LEAN_CTX_DATA_DIR",
-            "LEAN_CTX_STATE_DIR",
-        ):
-            self.assertEqual(
-                environment[name],
-                str(session.run_dir / "leanctx"),
-            )
+        directory = session.run_dir / "leanctx"
+        self.assertEqual(
+            environment["LEAN_CTX_CACHE_DIR"],
+            str(directory / "cache"),
+        )
+        self.assertEqual(
+            environment["LEAN_CTX_CONFIG_DIR"],
+            str(directory / "config"),
+        )
+        self.assertEqual(
+            environment["LEAN_CTX_STATE_DIR"],
+            str(directory / "state"),
+        )
+        self.assertEqual(
+            environment["LEAN_CTX_DATA_DIR"],
+            str(self.data_root / "leanctx" / "lean-ctx"),
+        )
+        self.assertEqual(
+            environment["XDG_DATA_HOME"],
+            str(self.data_root / "leanctx"),
+        )
         self.assertEqual(
             environment["LEAN_CTX_PROJECT_ROOT"],
             str(self.xebia),
         )
 
-    def test_read_stats_uses_native_json_and_computes_exact_savings(self) -> None:
+    def test_read_stats_uses_selected_run_events_only(self) -> None:
         session = self.create_run(self.xebia)
         run = self.descriptor(session, self.xebia)
-        completed = SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "total_commands": 4,
-                    "total_input_tokens": 14261,
-                    "total_output_tokens": 1590,
-                }
-            ),
-            stderr="",
+        events = session.run_dir / "leanctx" / "state" / "events.jsonl"
+        events.write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in (
+                    {
+                        "kind": {
+                            "type": "AgentAction",
+                            "action": "register",
+                        }
+                    },
+                    {
+                        "kind": {
+                            "type": "ToolCall",
+                            "tool": "ctx_read",
+                            "tokens_original": 14261,
+                            "tokens_saved": 12671,
+                        }
+                    },
+                    {
+                        "kind": {
+                            "type": "ToolCall",
+                            "tool": "ctx_knowledge",
+                            "tokens_original": 0,
+                            "tokens_saved": 0,
+                        }
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
         )
+        events.chmod(0o600)
         with mock.patch.object(
             leanctx_monitor.subprocess,
             "run",
-            return_value=completed,
         ) as invoked:
             stats = read_stats(self.binary, run, {"PATH": "/bin"})
 
-        self.assertEqual(
-            invoked.call_args.args[0],
-            [str(self.binary), "stats", "json"],
-        )
-        self.assertEqual(stats.total_commands, 4)
+        invoked.assert_not_called()
+        self.assertEqual(stats.total_commands, 2)
+        self.assertEqual(stats.input_tokens, 14261)
+        self.assertEqual(stats.output_tokens, 1590)
         self.assertEqual(stats.saved_tokens, 12671)
         self.assertAlmostEqual(stats.savings_percent, 88.85, places=2)
 
-    def test_read_stats_rejects_invalid_native_values(self) -> None:
+    def test_read_stats_rejects_invalid_event_values(self) -> None:
         session = self.create_run(self.xebia)
         run = self.descriptor(session, self.xebia)
-        completed = SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(
+        events = session.run_dir / "leanctx" / "state" / "events.jsonl"
+        events.write_text(
+            json.dumps(
                 {
-                    "total_commands": True,
-                    "total_input_tokens": 10,
-                    "total_output_tokens": 2,
+                    "kind": {
+                        "type": "ToolCall",
+                        "tool": "ctx_read",
+                        "tokens_original": True,
+                        "tokens_saved": 2,
+                    }
                 }
-            ),
-            stderr="",
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        with (
-            mock.patch.object(
-                leanctx_monitor.subprocess,
-                "run",
-                return_value=completed,
-            ),
-            self.assertRaisesRegex(
-                LeanctxMonitorError,
-                "statistics are invalid",
-            ),
+        events.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            LeanctxMonitorError,
+            "statistics are invalid",
         ):
             read_stats(self.binary, run)
 
-    def test_read_stats_preserves_bounded_native_failure(self) -> None:
+    def test_read_stats_rejects_symlinked_event_stream(self) -> None:
         session = self.create_run(self.xebia)
         run = self.descriptor(session, self.xebia)
-        completed = SimpleNamespace(
-            returncode=7,
-            stdout="",
-            stderr="native failure\n",
-        )
-        with (
-            mock.patch.object(
-                leanctx_monitor.subprocess,
-                "run",
-                return_value=completed,
-            ),
-            self.assertRaisesRegex(
-                LeanctxMonitorError,
-                "native failure",
-            ),
+        outside = self.root / "events.jsonl"
+        outside.write_text("", encoding="utf-8")
+        events = session.run_dir / "leanctx" / "state" / "events.jsonl"
+        events.symlink_to(outside)
+
+        with self.assertRaisesRegex(
+            LeanctxMonitorError,
+            "statistics are invalid",
         ):
             read_stats(self.binary, run)
+
+    def test_read_stats_returns_zero_before_first_tool_call(self) -> None:
+        session = self.create_run(self.xebia)
+        run = self.descriptor(session, self.xebia)
+
+        stats = read_stats(self.binary, run)
+
+        self.assertEqual(stats, leanctx_monitor.LeanctxStats(0, 0, 0, 0, 0.0))
 
     def test_managed_binary_uses_only_the_orichum_data_directory(self) -> None:
         self.assertEqual(
@@ -514,7 +581,9 @@ class LeanctxMonitorTests(unittest.TestCase):
     def test_dashboard_is_local_authenticated_and_config_isolated(self) -> None:
         session = self.create_run(self.xebia)
         run = self.descriptor(session, self.xebia)
-        source_config = session.run_dir / "leanctx" / "config.toml"
+        source_config = (
+            session.run_dir / "leanctx" / "config" / "config.toml"
+        )
         original = source_config.read_bytes()
         captured: dict[str, object] = {}
 

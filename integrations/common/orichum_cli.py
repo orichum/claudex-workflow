@@ -74,15 +74,6 @@ from .stack_bindings import (
     stack_binding_transaction,
 )
 
-MEMPALACE_AUTO_APPROVED_TOOLS = (
-    "mempalace_diary_read",
-    "mempalace_follow_tunnels",
-    "mempalace_list_drawers",
-    "mempalace_list_hallways",
-    "mempalace_list_rooms",
-    "mempalace_list_tunnels",
-    "mempalace_search",
-)
 from .stack_definition import normalize_model_stacks
 from .stack_catalog import (
     CatalogError,
@@ -223,8 +214,6 @@ def _context_list(config: ResolvedConfig) -> str:
             context.get("githubAccount") or "—",
             context["modelStack"] or "default",
             ", ".join(context["accountPools"]),
-            context["memoryPalace"],
-            context["memoryWing"],
         )
         for context in contexts
     ]
@@ -235,8 +224,6 @@ def _context_list(config: ResolvedConfig) -> str:
             "GITHUB",
             "MODEL STACK",
             "ACCOUNT POOLS",
-            "PALACE",
-            "WING",
         ),
         rows,
     )
@@ -501,19 +488,23 @@ def _leanctx_stats(
     run: leanctx_monitor.LeanctxRun,
     stats: leanctx_monitor.LeanctxStats,
 ) -> str:
-    savings = Decimal(str(stats.savings_percent)).quantize(
-        Decimal("0.1"),
-        rounding=ROUND_HALF_UP,
-    )
+    if stats.input_tokens:
+        savings = Decimal(str(stats.savings_percent)).quantize(
+            Decimal("0.1"),
+            rounding=ROUND_HALF_UP,
+        )
+        reduction = f"{savings}%"
+    else:
+        reduction = "—"
     return _render_table(
         (
             "RUN",
             "PROJECT",
             "COMMANDS",
-            "INPUT",
-            "OUTPUT",
+            "SOURCE",
+            "RETURNED",
             "SAVED",
-            "SAVINGS",
+            "REDUCTION",
         ),
         (
             (
@@ -523,7 +514,7 @@ def _leanctx_stats(
                 f"{stats.input_tokens:,}",
                 f"{stats.output_tokens:,}",
                 f"{stats.saved_tokens:,}",
-                f"{savings}%",
+                reduction,
             ),
         ),
     )
@@ -1812,7 +1803,6 @@ def _materialize_launch_policy(
     project_root = route.get("contextRootReal")
     docker_profile = route.get("dockerProfile")
     github_account = route.get("githubAccount")
-    memory_wing = route.get("memoryWing")
     if (
         not isinstance(project_root, str)
         or not project_root
@@ -1824,8 +1814,6 @@ def _materialize_launch_policy(
             github_account is not None
             and (not isinstance(github_account, str) or not github_account)
         )
-        or not isinstance(memory_wing, str)
-        or not memory_wing
     ):
         raise CliError("session project binding is invalid")
 
@@ -1838,7 +1826,7 @@ def _materialize_launch_policy(
         f"- Project context root: {json.dumps(project_root)}\n"
         f"- MCP_DOCKER profile: {shown(docker_profile)}\n"
         f"- GitHub account: {shown(github_account)}\n"
-        f"- Mempalace wing: {json.dumps(memory_wing)}\n\n"
+        "- LeanCTX project memory follows the verified project root.\n\n"
         "When an MCP_DOCKER profile is shown, the `docker` MCP gateway is "
         "already bound to this physical session with that profile. Never "
         "activate, switch, create, update, or remove Docker MCP profiles. "
@@ -2051,13 +2039,8 @@ def _launch_session(
         "--strict-mcp-config",
         "--allowedTools",
         ",".join(
-            (
-                *(f"mcp__leanctx__{tool}" for tool in LEANCTX_AUTO_APPROVED_TOOLS),
-                *(
-                    f"mcp__mempalace__{tool}"
-                    for tool in MEMPALACE_AUTO_APPROVED_TOOLS
-                ),
-            )
+            f"mcp__leanctx__{tool}"
+            for tool in LEANCTX_AUTO_APPROVED_TOOLS
         ),
         "--effort",
         runtime["effort"],
@@ -2123,8 +2106,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate every configured context",
     )
     for name, help_text in (
-        ("add", "add and populate a project context"),
-        ("populate", "refresh project memory explicitly"),
+        ("add", "add a project context"),
         ("remove", "remove a context mapping"),
         ("update", "change a context mapping"),
     ):
@@ -2404,10 +2386,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if parsed.leanctx_command == "list":
                 project_root = _leanctx_project_root(config, Path.cwd())
                 selected_run_id = None
+                attached_runs = tuple(run for run in runs if run.attached)
                 if project_root is not None:
                     try:
                         selected_run_id = leanctx_monitor.select_run(
-                            runs,
+                            attached_runs,
                             project_root,
                             None,
                             current_run_id=os.environ.get(
@@ -2416,13 +2399,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ).run_id
                     except leanctx_monitor.LeanctxMonitorError:
                         pass
-                shown = runs if parsed.show_all else runs[: parsed.limit]
+                shown = (
+                    runs
+                    if parsed.show_all
+                    else attached_runs[: parsed.limit]
+                )
                 print(_leanctx_list(shown, selected_run_id), end="")
-                if not parsed.show_all and len(runs) > len(shown):
-                    print(
-                        f"Showing newest {len(shown)} of {len(runs)} runs. "
-                        "Use --all to show every run."
-                    )
+                if not parsed.show_all:
+                    messages = []
+                    if len(attached_runs) > len(shown):
+                        messages.append(
+                            f"Showing newest {len(shown)} of "
+                            f"{len(attached_runs)} attached runs."
+                        )
+                    historical = len(runs) - len(attached_runs)
+                    if historical:
+                        suffix = "" if historical == 1 else "s"
+                        messages.append(
+                            f"Use --all to include {historical} "
+                            f"historical run{suffix}."
+                        )
+                    if messages:
+                        print(" ".join(messages))
                 return 0
             project_root = (
                 None

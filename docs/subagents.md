@@ -19,6 +19,22 @@ workflow scripts. A `PreToolUse` hook rejects undeclared agent types and
 arbitrary workflow bodies or names. This prevents a model from bypassing the
 declared roles while keeping specialist reasoning and tool access intact.
 
+Every specialist reuses the session's project-jailed LeanCTX MCP:
+
+- explorers, verifiers, critics, and architects receive only bounded read,
+  search, tree, expansion, graph, impact, and callgraph tools;
+- the implementation worker also receives anchored patching, `ctx_shell` for
+  noisy observation, native edits, and native `Bash` for mutations or
+  interactive/streaming processes;
+- project overview and durable knowledge remain controller-owned, avoiding
+  repeated orientation calls and concurrent memory writes;
+- raw native read/search tools are not exposed to specialists, so repository
+  context does not silently bypass compression.
+
+Session materialization and resume verify this tool contract together with each
+role's frozen model. A modified or outdated agent definition is rejected before
+the session continues.
+
 Runtime limits live in `runtime.json`:
 
 ```json

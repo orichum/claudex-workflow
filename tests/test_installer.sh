@@ -88,12 +88,12 @@ INSTALL_MODE=upgrade
 INSTALL_MODE=fast
 component_table="$(
   print_component_status_table \
-    reused repaired upgraded reused repaired reused repaired
+    reused repaired upgraded reused repaired repaired
 )"
 rg -Fq 'CLIProxyAPI           repaired' <<<"$component_table"
 rg -Fq 'Controller plugin     repaired' <<<"$component_table"
 if print_component_status_table \
-    invalid reused reused reused reused reused reused >/dev/null; then
+    invalid reused reused reused reused reused >/dev/null; then
   printf 'invalid component status was accepted\n' >&2
   exit 1
 fi
@@ -315,77 +315,6 @@ if managed_executable_is_safe "$managed_bin/tool-link"; then
   exit 1
 fi
 
-identity_data="$fixture/private-tool-identity"
-identity_tools="$identity_data/tools/uv"
-identity_bin="$identity_data/tools/bin"
-identity_env="$identity_tools/mempalace"
-identity_metadata="$identity_env/lib/python3.14/site-packages/mempalace-3.6.0.dist-info/METADATA"
-identity_python_marker="$fixture/private-tool-python-executed"
-install -d -m 0700 \
-  "$identity_env/bin" "$(dirname "$identity_metadata")" "$identity_bin"
-cat >"$identity_env/bin/python" <<EOF
-#!/usr/bin/env bash
-touch "$identity_python_marker"
-printf "3.6.0\\n"
-EOF
-printf '%s\n' \
-  'Metadata-Version: 2.4' \
-  'Name: mempalace' \
-  'Version: 3.6.0' >"$identity_metadata"
-printf '#!/usr/bin/env bash\nexit 0\n' \
-  >"$identity_env/bin/mempalace"
-printf '#!/usr/bin/env bash\nexit 0\n' \
-  >"$identity_env/bin/mempalace-mcp"
-chmod 0755 "$identity_env/bin/"*
-ln -s "$identity_env/bin/mempalace" "$identity_bin/mempalace"
-ln -s "$identity_env/bin/mempalace-mcp" "$identity_bin/mempalace-mcp"
-IFS=$'\t' read -r identity_version identity_artifact < <(
-  private_uv_tool_identity \
-    "$identity_data" mempalace mempalace \
-    mempalace mempalace-mcp
-)
-[[ "$identity_version" == 3.6.0 ]]
-[[ "$identity_artifact" =~ ^[a-f0-9]{64}$ ]]
-[[ ! -e "$identity_python_marker" ]]
-for writable_identity_parent in \
-    "$identity_data/tools" "$identity_tools"; do
-  chmod 0770 "$writable_identity_parent"
-  if private_uv_tool_identity \
-      "$identity_data" mempalace mempalace \
-      mempalace mempalace-mcp >/dev/null 2>&1; then
-    printf 'writable private tool ancestor was accepted: %s\n' \
-      "$writable_identity_parent" >&2
-    exit 1
-  fi
-  chmod 0700 "$writable_identity_parent"
-done
-chmod 0770 "$identity_env/lib/python3.14/site-packages"
-if private_uv_tool_identity \
-    "$identity_data" mempalace mempalace \
-    mempalace mempalace-mcp >/dev/null 2>&1; then
-  printf 'writable private tool metadata path was accepted\n' >&2
-  exit 1
-fi
-chmod 0700 "$identity_env/lib/python3.14/site-packages"
-printf '# changed\n' >>"$identity_env/bin/mempalace-mcp"
-IFS=$'\t' read -r changed_identity_version changed_identity_artifact < <(
-  private_uv_tool_identity \
-    "$identity_data" mempalace mempalace \
-    mempalace mempalace-mcp
-)
-[[ "$changed_identity_version" == 3.6.0 ]]
-[[ "$changed_identity_artifact" != "$identity_artifact" ]]
-external_identity_tool="$fixture/external-identity-tool"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$external_identity_tool"
-chmod 0755 "$external_identity_tool"
-ln -sfn "$external_identity_tool" "$identity_bin/mempalace-mcp"
-if private_uv_tool_identity \
-    "$identity_data" mempalace mempalace \
-    mempalace mempalace-mcp >/dev/null 2>&1; then
-  printf 'private tool entrypoint escape was accepted\n' >&2
-  exit 1
-fi
-
 plugin_fixture="$fixture/plugin-fingerprint"
 install -d -m 0700 \
   "$plugin_fixture/controller/plugin/hooks" "$plugin_fixture/config"
@@ -410,6 +339,22 @@ if controller_plugin_fingerprint \
   exit 1
 fi
 
+rg -Fq \
+  'Use `ctx_shell` for observational commands whose output may be noisy' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'Use `ctx_shell(raw=true)` when exact diagnostic output is required' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'Do not run the same command through both shell paths' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'Git commit/push/branch' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'status/diff/log' \
+  "$ROOT/controller/plugin/agents/implementation-worker.md"
+
 leanctx_probe="$fixture/lean-ctx"
 cat >"$leanctx_probe" <<'PY'
 #!/usr/bin/env python3
@@ -427,7 +372,17 @@ if any(os.environ.get(key) != value for key, value in required.items()):
     raise SystemExit(3)
 root = Path(os.environ["LEAN_CTX_PROJECT_ROOT"])
 data = Path(os.environ["LEAN_CTX_DATA_DIR"])
-if not root.is_dir() or not (data / "config.toml").is_file():
+config = Path(os.environ["LEAN_CTX_CONFIG_DIR"])
+state = Path(os.environ["LEAN_CTX_STATE_DIR"])
+cache = Path(os.environ["LEAN_CTX_CACHE_DIR"])
+xdg = Path(os.environ["XDG_DATA_HOME"])
+if (
+    not root.is_dir()
+    or not (config / "config.toml").is_file()
+    or not state.is_dir()
+    or not cache.is_dir()
+    or data != xdg / "lean-ctx"
+):
     raise SystemExit(4)
 tools = [
     "ctx_read",
@@ -437,6 +392,8 @@ tools = [
     "ctx_graph",
     "ctx_impact",
     "ctx_callgraph",
+    "ctx_knowledge",
+    "ctx_overview",
     "ctx_patch",
     "ctx_shell",
 ]
@@ -466,12 +423,18 @@ for line in sys.stdin:
         params = request.get("params", {})
         name = params.get("name")
         arguments = params.get("arguments", {})
+        call_log = os.environ.get("FAKE_LEANCTX_CALL_LOG")
+        if call_log:
+            with Path(call_log).open("a", encoding="utf-8") as stream:
+                stream.write(f"{name}\n")
         if name == "ctx_graph" and arguments.get("action") == "build":
             text = "Project Graph: 1 files"
         elif name == "ctx_graph" and arguments.get("action") == "symbol":
             text = "probe.py::orichum_probe_target"
         elif name == "ctx_impact":
             text = "No files depend on probe.py. [ctx_impact: 8 tok]"
+        elif name == "ctx_shell":
+            text = "orichum-shell-ready"
         else:
             text = f"{name} completed"
         result = {
@@ -488,8 +451,9 @@ for line in sys.stdin:
     )
 PY
 chmod 0755 "$leanctx_probe"
-probe_leanctx_capabilities \
+FAKE_LEANCTX_CALL_LOG="$fixture/leanctx-calls" probe_leanctx_capabilities \
   "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture"
+rg -Fxq 'ctx_shell' "$fixture/leanctx-calls"
 if FAKE_LEANCTX_EXTRA=ctx_call probe_leanctx_capabilities \
     "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
     >"$fixture/leanctx-extra.stdout" 2>"$fixture/leanctx-extra.stderr"; then
@@ -1072,7 +1036,6 @@ set +e
   ORICHUM_PYTHON="$python_bin/python3.14"
   config_transaction_active=true
   python_transaction_active=false
-  private_tools_transaction_active=false
   cliproxy_transaction_active=false
   endpoint_transaction_active=false
   claudex_proxy_transaction_active=false
@@ -1362,25 +1325,6 @@ fourth_runtime_digest="$(
   printf 'status-line changes do not change runtime identity\n' >&2
   exit 1
 }
-
-rg -Fq 'export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"' \
-  "$ROOT/install.sh"
-
-python3 - "$ROOT/install.sh" <<'PY'
-import re
-from pathlib import Path
-import sys
-
-source = Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(
-    r'integrations/common/mcp_probe\.py"(?P<arguments>.*?)'
-    r'-- "\$mempalace_mcp"',
-    source,
-    flags=re.DOTALL,
-)
-if match is None or "--timeout 30" not in match.group("arguments"):
-    raise SystemExit("Mempalace MCP probe lacks its cold-start timeout")
-PY
 
 ports_root="$fixture/ports"
 write_service_ports "$ports_root" 18317 13456 13457

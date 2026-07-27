@@ -332,7 +332,7 @@ orichum_uninstall() {
     "  Removed launcher: $launcher" \
     "  Preserved data:   $data_root" \
     "  Preserved config: $config_root" \
-    '  Accounts, sessions, project context, and Mempalace palaces were preserved.' \
+    '  Accounts, sessions, project context, and LeanCTX data were preserved.' \
     '  Standalone third-party installations were not changed.' \
     "  Reinstall with: $workflow_root/install.sh"
 }

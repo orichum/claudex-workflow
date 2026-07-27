@@ -354,8 +354,6 @@ def _validate_projects(
             "dockerProfile",
             "modelStack",
             "accountPools",
-            "memoryPalace",
-            "memoryWing",
         }
         if not isinstance(raw_context, dict) or set(raw_context) not in (
             base_keys,

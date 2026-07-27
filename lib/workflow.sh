@@ -72,7 +72,7 @@ install_state_component_field() {
 }
 
 print_component_status_table() {
-  (($# == 7)) || return 2
+  (($# == 6)) || return 2
   local value
   for value in "$@"; do
     case "$value" in
@@ -87,9 +87,8 @@ print_component_status_table() {
     CLIProxyAPI "$2" \
     Claudex "$3" \
     LeanCTX "$4" \
-    Mempalace "$5" \
-    Routing "$6" \
-    'Controller plugin' "$7"
+    Routing "$5" \
+    'Controller plugin' "$6"
 }
 
 linux_environment_kind() {
@@ -747,19 +746,18 @@ print_install_summary() {
   local user_bin_dir="$3"
   local claudex_binary="$4"
   local cliproxy_binary="$5"
-  local mempalace_binary="$6"
-  local cliproxy_service_file="$7"
-  local cliproxy_port="$8"
-  local cliproxy_action="$9"
-  local claudex_proxy_service_file="${10}"
-  local claudex_proxy_port="${11}"
-  local route_proxy_port="${12}"
-  local claudex_proxy_action="${13}"
-  local python_entrypoint="${14}"
-  local python_version="${15}"
-  local python_realpath="${16}"
-  local python_action="${17}"
-  local leanctx_binary="${18}"
+  local cliproxy_service_file="$6"
+  local cliproxy_port="$7"
+  local cliproxy_action="$8"
+  local claudex_proxy_service_file="$9"
+  local claudex_proxy_port="${10}"
+  local route_proxy_port="${11}"
+  local claudex_proxy_action="${12}"
+  local python_entrypoint="${13}"
+  local python_version="${14}"
+  local python_realpath="${15}"
+  local python_action="${16}"
+  local leanctx_binary="${17}"
 
   printf '%s\n' \
     '' \
@@ -770,7 +768,6 @@ print_install_summary() {
     "  Claudex runtime:   $claudex_binary" \
     "  CLIProxyAPI:       $cliproxy_binary" \
     "  LeanCTX:           $leanctx_binary" \
-    "  MemPalace MCP:     $mempalace_binary" \
     '' \
     'Python runtime' \
     '  Python request: 3.14.x' \
@@ -1703,222 +1700,12 @@ run_rollback_if_active() {
   "$rollback_handler"
 }
 
-preflight_private_tool_layout() {
-  local data_root="$1"
-  local component
-  local current_uid
-  [[ "$data_root" == /* && "$data_root" != / ]] || return 1
-  current_uid="$(id -u)"
-  for component in \
-      "$data_root" "$data_root/tools" \
-      "$data_root/tools/bin" "$data_root/tools/uv"; do
-    if [[ -e "$component" || -L "$component" ]]; then
-      [[ -d "$component" && ! -L "$component" ]] && \
-        [[ "$(path_uid "$component")" == "$current_uid" ]] || {
-          workflow_die "private tools root is unsafe"
-          return 1
-        }
-    fi
-  done
-}
-
-private_tool_layout_is_owned() {
-  local data_root="$1"
-  local tool_dir="$2"
-  local bin_dir="$3"
-  local data_physical tools_physical tool_physical bin_physical
-  local component component_mode current_uid
-  [[ "$data_root" == /* && "$data_root" != / ]] && \
-    [[ "$tool_dir" == "$data_root/tools/uv" ]] && \
-    [[ "$bin_dir" == "$data_root/tools/bin" ]] || return 1
-  [[ -d "$data_root" && ! -L "$data_root" ]] && \
-    [[ -d "$data_root/tools" && ! -L "$data_root/tools" ]] && \
-    [[ -d "$tool_dir" && ! -L "$tool_dir" ]] && \
-    [[ -d "$bin_dir" && ! -L "$bin_dir" ]] || return 1
-  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
-  tools_physical="$(
-    cd -P -- "$data_root/tools" && pwd
-  )" || return 1
-  tool_physical="$(cd -P -- "$tool_dir" && pwd)" || return 1
-  bin_physical="$(cd -P -- "$bin_dir" && pwd)" || return 1
-  [[ "$tools_physical" == "$data_physical/tools" ]] && \
-    [[ "$tool_physical" == "$data_physical/tools/uv" ]] && \
-    [[ "$bin_physical" == "$data_physical/tools/bin" ]] || return 1
-  current_uid="$(id -u)"
-  for component in \
-      "$data_root" "$data_root/tools" "$tool_dir" "$bin_dir"; do
-    [[ "$(path_uid "$component")" == "$current_uid" ]] || return 1
-    component_mode="$(path_mode "$component")" || return 1
-    (( (8#$component_mode & 0022) == 0 )) || return 1
-  done
-}
-
 sha256_text() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 | awk '{print $1}'
   else
     sha256sum | awk '{print $1}'
   fi
-}
-
-private_uv_tool_identity() {
-  local data_root="$1"
-  local environment="$2"
-  local distribution="$3"
-  shift 3
-  local tool_dir="$data_root/tools/uv"
-  local bin_dir="$data_root/tools/bin"
-  local environment_dir="$tool_dir/$environment"
-  local environment_bin="$environment_dir/bin"
-  local entrypoint link_path target_path target_mode version payload=
-  local current_uid
-  private_tool_layout_is_owned \
-    "$data_root" "$tool_dir" "$bin_dir" || return 1
-  current_uid="$(id -u)"
-  [[ "$environment" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && \
-     "$distribution" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
-  [[ -d "$environment_dir" && ! -L "$environment_dir" && \
-     -d "$environment_bin" && ! -L "$environment_bin" && \
-     "$(path_uid "$environment_dir")" == "$current_uid" && \
-     "$(path_uid "$environment_bin")" == "$current_uid" ]] || return 1
-  target_mode="$(path_mode "$environment_dir")" || return 1
-  (( (8#$target_mode & 0022) == 0 )) || return 1
-  target_mode="$(path_mode "$environment_bin")" || return 1
-  (( (8#$target_mode & 0022) == 0 )) || return 1
-  version="$(
-    workflow_python -I -B - "$environment_dir" "$distribution" <<'PY'
-import os
-from pathlib import Path
-import re
-import stat
-import sys
-
-root = Path(sys.argv[1]).absolute()
-distribution = sys.argv[2]
-expected = re.sub(r"[-_.]+", "-", distribution).lower()
-uid = os.getuid()
-
-
-def safe_directory(path: Path) -> None:
-    observed = os.lstat(path)
-    if (
-        stat.S_ISLNK(observed.st_mode)
-        or not stat.S_ISDIR(observed.st_mode)
-        or observed.st_uid != uid
-        or stat.S_IMODE(observed.st_mode) & 0o022
-    ):
-        raise SystemExit(1)
-
-
-safe_directory(root)
-if root.resolve(strict=True) != root:
-    raise SystemExit(1)
-library = root / "lib"
-safe_directory(library)
-matches: list[str] = []
-for metadata in library.glob(
-    "python*/site-packages/*.dist-info/METADATA"
-):
-    metadata_identity = re.sub(
-        r"[-_.]+", "-", metadata.parent.name
-    ).lower()
-    if not metadata_identity.startswith(expected + "-"):
-        continue
-    relative = metadata.relative_to(root)
-    current = root
-    for part in relative.parts[:-1]:
-        current /= part
-        safe_directory(current)
-    observed = os.lstat(metadata)
-    if (
-        stat.S_ISLNK(observed.st_mode)
-        or not stat.S_ISREG(observed.st_mode)
-        or observed.st_uid != uid
-        or stat.S_IMODE(observed.st_mode) & 0o022
-        or observed.st_size > 64 * 1024
-        or metadata.resolve(strict=True) != metadata
-    ):
-        raise SystemExit(1)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(metadata, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_uid != uid
-            or (opened.st_dev, opened.st_ino)
-            != (observed.st_dev, observed.st_ino)
-        ):
-            raise SystemExit(1)
-        chunks: list[bytes] = []
-        size = 0
-        while True:
-            chunk = os.read(
-                descriptor, min(65536, 64 * 1024 + 1 - size)
-            )
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-            if size > 64 * 1024:
-                raise SystemExit(1)
-        payload = b"".join(chunks)
-        after = os.fstat(descriptor)
-        if (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_uid,
-            after.st_size,
-            after.st_mtime_ns,
-        ) != (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_mode,
-            opened.st_uid,
-            opened.st_size,
-            opened.st_mtime_ns,
-        ):
-            raise SystemExit(1)
-    finally:
-        os.close(descriptor)
-    name = version = None
-    for line in payload.decode("utf-8", "strict").splitlines():
-        if not line:
-            break
-        if line.startswith("Name: ") and name is None:
-            name = line[6:]
-        elif line.startswith("Version: ") and version is None:
-            version = line[9:]
-    if name is not None and (
-        re.sub(r"[-_.]+", "-", name).lower() == expected
-    ):
-        if version is None:
-            raise SystemExit(1)
-        matches.append(version)
-if len(matches) != 1:
-    raise SystemExit(1)
-print(matches[0])
-PY
-  )" || return 1
-  [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || return 1
-  (($# > 0)) || return 1
-  for entrypoint in "$@"; do
-    [[ "$entrypoint" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
-    link_path="$bin_dir/$entrypoint"
-    [[ -L "$link_path" && "$(path_uid "$link_path")" == "$current_uid" ]] || \
-      return 1
-    target_path="$(workflow_physical_path "$link_path")" || return 1
-    [[ "$target_path" == "$environment_bin/$entrypoint" && \
-       -f "$target_path" && ! -L "$target_path" && \
-       -x "$target_path" && \
-       "$(path_uid "$target_path")" == "$current_uid" ]] || return 1
-    target_mode="$(path_mode "$target_path")" || return 1
-    (( (8#$target_mode & 0022) == 0 )) || return 1
-    payload+="$entrypoint:$(sha256_file "$target_path")"$'\n'
-  done
-  printf '%s\t%s\n' "$version" "$(printf '%s' "$payload" | sha256_text)"
 }
 
 controller_plugin_fingerprint() {
@@ -2217,98 +2004,6 @@ os.chmod(descriptor, 0o600)
 print(value)
 PY
 }
-
-snapshot_private_tree() {
-  local source_path="$1"
-  local snapshot_dir="$2"
-  local snapshot_name="$3"
-  rm -rf -- "$snapshot_dir/$snapshot_name.data"
-  rm -f -- \
-    "$snapshot_dir/$snapshot_name.present" \
-    "$snapshot_dir/$snapshot_name.absent"
-  if [[ -e "$source_path" || -L "$source_path" ]]; then
-    cp -pPR "$source_path" "$snapshot_dir/$snapshot_name.data"
-    : >"$snapshot_dir/$snapshot_name.present"
-  else
-    : >"$snapshot_dir/$snapshot_name.absent"
-  fi
-}
-
-restore_private_tree() {
-  local destination="$1"
-  local snapshot_dir="$2"
-  local snapshot_name="$3"
-  rm -rf -- "$destination"
-  if [[ -f "$snapshot_dir/$snapshot_name.present" ]]; then
-    cp -pPR "$snapshot_dir/$snapshot_name.data" "$destination"
-  elif [[ ! -f "$snapshot_dir/$snapshot_name.absent" ]]; then
-    workflow_die "missing private tool snapshot state for $destination"
-    return 1
-  fi
-}
-
-private_tree_matches_snapshot() {
-  local destination="$1"
-  local snapshot_dir="$2"
-  local snapshot_name="$3"
-  if [[ -f "$snapshot_dir/$snapshot_name.present" ]]; then
-    [[ -e "$destination" || -L "$destination" ]] && \
-      [[ "$(path_mode "$snapshot_dir/$snapshot_name.data")" == \
-         "$(path_mode "$destination")" ]] && \
-      diff -qr -- "$snapshot_dir/$snapshot_name.data" "$destination" \
-        >/dev/null
-  elif [[ -f "$snapshot_dir/$snapshot_name.absent" ]]; then
-    [[ ! -e "$destination" && ! -L "$destination" ]]
-  else
-    workflow_die "missing private tool snapshot state for $destination"
-  fi
-}
-
-snapshot_private_tool_state() {
-  local data_root="$1"
-  local tool_dir="$2"
-  local bin_dir="$3"
-  local snapshot_dir="$4"
-  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
-    workflow_die "refusing unsafe private tool snapshot layout"
-    return 1
-  }
-  [[ "$snapshot_dir" == /* && "$snapshot_dir" != / ]] || {
-    workflow_die "refusing unsafe private tool snapshot directory"
-    return 1
-  }
-  install -d -m 0700 "$snapshot_dir"
-  snapshot_private_tree "$tool_dir/mempalace" \
-    "$snapshot_dir" mempalace-environment
-  snapshot_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
-}
-
-restore_private_tool_state() {
-  local data_root="$1"
-  local tool_dir="$2"
-  local bin_dir="$3"
-  local snapshot_dir="$4"
-  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
-    workflow_die "refusing unsafe private tool restore layout"
-    return 1
-  }
-  restore_private_tree "$tool_dir/mempalace" \
-    "$snapshot_dir" mempalace-environment
-  restore_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
-}
-
-private_tool_state_matches() {
-  local data_root="$1"
-  local tool_dir="$2"
-  local bin_dir="$3"
-  local snapshot_dir="$4"
-  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || return 1
-  private_tree_matches_snapshot "$tool_dir/mempalace" \
-    "$snapshot_dir" mempalace-environment &&
-    private_tree_matches_snapshot "$bin_dir" \
-      "$snapshot_dir" private-tool-bin
-}
-
 
 snapshot_path() {
   local source_path="$1"
@@ -3197,7 +2892,7 @@ probe_leanctx_capabilities() {
   local python_runtime="$2"
   local workflow_root="$3"
   local temporary_parent="$4"
-  local probe_root project_root data_dir
+  local probe_root project_root config_dir state_dir cache_dir shared_dir
   [[ "$leanctx_binary" == /* && -x "$leanctx_binary" ]] || {
     workflow_die "LeanCTX capability probe requires an executable binary"
     return 1
@@ -3214,10 +2909,15 @@ probe_leanctx_capabilities() {
     return 1
   chmod 0700 "$probe_root"
   project_root="$probe_root/project"
-  data_dir="$probe_root/data"
-  install -d -m 0700 "$project_root" "$data_dir"
+  config_dir="$probe_root/config"
+  state_dir="$probe_root/state"
+  cache_dir="$probe_root/cache"
+  shared_dir="$probe_root/shared"
+  install -d -m 0700 \
+    "$project_root" "$config_dir" "$state_dir" "$cache_dir" \
+    "$shared_dir" "$shared_dir/lean-ctx"
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-    "$workflow_root" "$data_dir/config.toml" "$project_root/probe.py" <<'PY'
+    "$workflow_root" "$config_dir/config.toml" "$project_root/probe.py" <<'PY'
 import os
 from pathlib import Path
 import sys
@@ -3271,6 +2971,8 @@ PY
     --exact-tool ctx_graph \
     --exact-tool ctx_impact \
     --exact-tool ctx_callgraph \
+    --exact-tool ctx_knowledge \
+    --exact-tool ctx_overview \
     --exact-tool ctx_patch \
     --exact-tool ctx_shell \
     --probe-call \
@@ -3279,18 +2981,25 @@ PY
       '{"name":"ctx_graph","arguments":{"action":"symbol","path":"probe.py::orichum_probe_target"},"contains":"probe.py::orichum_probe_target"}' \
     --probe-call \
       '{"name":"ctx_impact","arguments":{"action":"analyze","path":"probe.py"},"contains":"[ctx_impact:"}' \
+    --probe-call \
+      '{"name":"ctx_overview","arguments":{"path":".","task":"Verify Orichum readiness"}}' \
+    --probe-call \
+      '{"name":"ctx_knowledge","arguments":{"action":"recall","category":"project","limit":1,"mode":"semantic","query":"orichum readiness"}}' \
+    --probe-call \
+      '{"name":"ctx_shell","arguments":{"command":"printf orichum-shell-ready","raw":true},"contains":"orichum-shell-ready"}' \
     -- env \
     LEAN_CTX_ALLOW_REROOT=false \
     LEAN_CTX_AUTONOMY=false \
     LEAN_CTX_BYPASS_HINTS=off \
-    LEAN_CTX_CACHE_DIR="$data_dir" \
-    LEAN_CTX_CONFIG_DIR="$data_dir" \
-    LEAN_CTX_DATA_DIR="$data_dir" \
+    LEAN_CTX_CACHE_DIR="$cache_dir" \
+    LEAN_CTX_CONFIG_DIR="$config_dir" \
+    LEAN_CTX_DATA_DIR="$shared_dir/lean-ctx" \
     LEAN_CTX_FULL_TOOLS=0 \
     LEAN_CTX_HEADLESS=1 \
     LEAN_CTX_MINIMAL=1 \
     LEAN_CTX_PROJECT_ROOT="$project_root" \
-    LEAN_CTX_STATE_DIR="$data_dir" \
+    LEAN_CTX_STATE_DIR="$state_dir" \
+    XDG_DATA_HOME="$shared_dir" \
     "$leanctx_binary"
 }
 

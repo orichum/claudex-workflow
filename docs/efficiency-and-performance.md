@@ -7,11 +7,13 @@ estimates.
 ## Source-context savings
 
 Token counts use the `o200k_base` tokenizer for a consistent comparison. The
-same source bytes were measured before and after LeanCTX processing.
+same source bytes were measured before and after LeanCTX processing. These are
+dated fixture snapshots from commit
+`71ea58280b94788d201c9f362b8582755ff19835`; current files may have changed.
 
 ### Large Orichum module
 
-Fixture: `integrations/common/orichum_cli.py`, 2,010 lines.
+Fixture: `integrations/common/orichum_cli.py`, 2,007 lines at that commit.
 
 | Read mode | Tokens | Reduction from raw |
 |---|---:|---:|
@@ -22,7 +24,8 @@ Fixture: `integrations/common/orichum_cli.py`, 2,010 lines.
 
 ### Small module
 
-Fixture: 106 lines, 3,375 bytes.
+Fixture: `integrations/common/route_status.py`, 106 lines and 3,375 bytes at
+that commit.
 
 | Read mode | Tokens | Reduction from raw |
 |---|---:|---:|
@@ -39,17 +42,26 @@ patch.
 
 ## Tool-schema efficiency
 
-Orichum keeps native `Bash` and its nine LeanCTX tools resident in eligible
-model requests:
+Orichum keeps native `Bash` and nine task-execution LeanCTX tools resident in
+eligible controller requests:
 
 - native `Bash`;
 - LeanCTX read, search, tree, expansion, graph, impact, callgraph, patch, and
   shell tools.
 
-Other native and project-specific tools are marked for deferred loading, and
-Claude receives the tool-search primitive. Mempalace and MCP_DOCKER schemas are
-loaded only when needed. Keeping the small LeanCTX surface resident makes code
-routing deterministic while avoiding a second graph-tool choice.
+Both shell tools are intentional, but they do different jobs. `ctx_shell`
+compresses potentially noisy inspection output such as diffs, tests, builds,
+plans, and container or cluster diagnostics. Native `Bash` is the explicit
+lane for commits and pushes, package or service changes, deployments,
+authentication, and interactive or streaming processes. The controller policy
+prevents speculative tool selection and duplicate execution.
+
+Overview and knowledge remain available but are deferred until the controller
+needs task orientation or durable history. Other native and project-specific
+tools are also marked for deferred loading, and Claude receives the tool-search
+primitive. MCP_DOCKER schemas are loaded only when needed. Keeping the small
+execution surface resident makes code routing deterministic without paying for
+memory schemas on every turn.
 
 This request transform is enabled only for model protocols that Orichum has
 verified with Claude Code's tool-search contract. Unknown Kimi, Gemini, or
@@ -57,10 +69,16 @@ future model routes are passed through unchanged instead of receiving
 Anthropic-specific request fields that could break inference. Provider support
 does not by itself imply tool-deferral protocol support.
 
-The exact LeanCTX MCP is intentionally limited to nine tools. Seven read-only
-context and code-intelligence tools are preapproved; patch and shell keep
-normal approval. The universal gateway, session memory, composition, autonomy,
-daemon, and provider paths remain disabled.
+The exact LeanCTX MCP is intentionally limited to eleven tools. Nine context,
+code-intelligence, and knowledge tools are preapproved; patch and shell keep
+normal approval. The universal gateway, agent coordination, composition,
+autonomy, daemon, and provider paths remain disabled.
+
+Specialists reuse the session's LeanCTX MCP. Read-only specialists receive only
+the seven repository-context tools. The implementation worker also receives
+anchored patching, observational shell, and its native write tools. Overview
+and durable knowledge stay controller-owned so parallel agents do not repeat
+the same orientation or mutate shared memory.
 
 ## Prompt-cache evidence
 
@@ -82,6 +100,25 @@ provider cache continuity—not a claim of a universal 96.7% saving.
 
 These are single bounded samples on one network and account state. They show
 relative workflow behavior, not guaranteed provider latency or price.
+The specialist samples predate specialist LeanCTX enforcement and remain useful
+as a baseline, not as the optimized target.
+
+### Post-migration specialist and memory acceptance
+
+The 2026-07-28 live acceptance exercised the enforced specialist tool contract
+and the controller-owned overview and knowledge route:
+
+| Flow | Source | Returned | Reduction |
+|---|---:|---:|---:|
+| Repository explorer bounded read | 2,699 | 161 | 94.0% |
+| Verifier, critic, architect, and implementation worker | 10,796 | 100 | 99.1% |
+| Controller overview plus read-only knowledge recall | — | — | Not emitted |
+
+These values come from `orichum leanctx stats`. They measure only LeanCTX tool
+payloads and should not be interpreted as whole-session billing savings.
+Overview and knowledge completed successfully but currently emit zero source
+and reduction counters, so Orichum reports them as commands without inventing a
+savings percentage.
 
 ## Local resource use
 
@@ -93,8 +130,8 @@ At idle after all sessions exited:
 | Orichum route proxy | 0.0% | 23,968 KiB |
 | Total shared resident footprint | 0.0% | 92,112 KiB (about 90 MiB) |
 
-No per-session Claudex translator, LeanCTX, or Mempalace MCP
-process remained after the corresponding session ended. One-shot live session
+No per-session Claudex translator or LeanCTX MCP process remained after the
+corresponding session ended. One-shot live session
 process trees peaked at roughly 355–380 MiB RSS in the sampled runs.
 
 The final in-place install/upgrade took 65.03 seconds on an Apple Silicon
@@ -108,9 +145,9 @@ The efficient daily-driver path is:
 2. use LeanCTX map/signature/search for understanding;
 3. use anchored reads only for edits;
 4. use LeanCTX graph tools for relationships and impact;
-5. query Mempalace only for durable history;
+5. use LeanCTX overview and knowledge for bounded durable context;
 6. delegate only when independent specialist work justifies its latency and
    token cost.
 
 This preserves the strong controller and full worker output while avoiding
-always-on memory, graph, proxy, and optimizer duplication.
+duplicate memory, graph, proxy, and optimizer layers.

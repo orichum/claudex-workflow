@@ -56,16 +56,17 @@ Set the expected identity with `orichum context update ROOT
 ## Missing MCP
 
 MCPs are intentionally conditional. Check that the project context has the
-required Docker profile or palace and that `orichum doctor` finds the MCP
-binaries.
+required Docker profile and that `orichum doctor` finds the managed LeanCTX
+binary.
 
 LeanCTX is included for every configured project, including a multi-repository
-parent such as `~/xebia`. Run `orichum leanctx list` and check the `ATTACHED`
-column. If the newest run says `no`, rerun `./install.sh` and start a new
-physical session; existing session MCP files are immutable. `orichum doctor`
-also verifies that the product-managed controller policy is current and that
-LeanCTX advertises exactly Orichum's nine allowed tools. Orichum does not depend
-on a global LeanCTX setup or shell hook.
+parent such as `~/xebia`. Run `orichum leanctx list`; the default view contains
+only attached runs. Use `orichum leanctx list --all` to inspect incompatible
+historical runs. If a required session says `ATTACHED no`, rerun `./install.sh`
+and start a new physical session; existing session MCP files are immutable.
+`orichum doctor` also verifies that the product-managed controller policy is
+current and that LeanCTX advertises exactly Orichum's eleven allowed tools.
+Orichum does not depend on a global LeanCTX setup or shell hook.
 
 ## LeanCTX has no activity or graph results
 
@@ -77,22 +78,28 @@ orichum leanctx stats
 orichum doctor
 ```
 
-If `ATTACHED` is `no`, reinstall and start a new physical session; existing
-session MCP files are immutable. If the run is attached but has no events, the
-model has not called a LeanCTX tool. Graph and impact indexes are built lazily,
-so an unused session correctly reports zero activity.
+If `--all` shows `ATTACHED no`, reinstall and start a new physical session;
+existing session MCP files are immutable. If the run is attached but has no
+events, the model has not called a LeanCTX tool. Graph and impact indexes are
+built lazily, so an unused session correctly reports zero activity.
 
 If a graph or impact call fails, verify that Orichum was launched from the
 intended repository or configured parent. Start a new session from the narrower
 repository root when a multi-repository parent produces too much scope.
 
-## Population appears slow
+## Prior project knowledge is missing
 
-Population prints a stage, repository number, operation, and elapsed time.
-Large first-time Mempalace mining can take several minutes. Cancel with Ctrl-C
-if necessary; the project mapping is committed only after successful
-population. Re-run the same explicit command to continue from current memory
-state.
+Confirm that the current run is attached and that Orichum was launched from
+the intended repository:
+
+```bash
+orichum leanctx list
+orichum doctor
+```
+
+LeanCTX scopes knowledge by project identity. Repositories with the same Git
+remote share durable knowledge even when cloned elsewhere. Unrelated
+repositories and configured parent directories remain separate.
 
 ## Installer port conflict
 

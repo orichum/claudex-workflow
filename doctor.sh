@@ -94,14 +94,6 @@ else
   fail 'Claude Code is not on PATH'
 fi
 
-for tool in mempalace-mcp; do
-  if command -v "$tool" >/dev/null 2>&1; then
-    ok "$tool is available ($(command -v "$tool"))"
-  else
-    fail "$tool is not on PATH"
-  fi
-done
-
 if [[ -f "$config_root/accounts.json" && \
       ! -L "$config_root/accounts.json" ]] && \
    [[ "$(path_mode "$config_root/accounts.json")" == 600 ]]; then
@@ -155,11 +147,10 @@ else
   fail 'CLIProxyAPI management key is missing or unsafe'
 fi
 
-if [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/check-local-services.sh" ]] && \
-   [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/route-mempalace-input.py" ]]; then
-  ok 'service-health and Mempalace hooks are executable'
+if [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/check-local-services.sh" ]]; then
+  ok 'service-health hook is executable'
 else
-  fail 'service-health or Mempalace hooks are unavailable'
+  fail 'service-health hook is unavailable'
 fi
 
 if (( failures > 0 )); then

@@ -35,7 +35,6 @@ class OrichumConfigTests(unittest.TestCase):
         self.config = self.root / "config"
         self.config.mkdir()
         (self.root / "xebia").mkdir()
-        (self.root / "palace").mkdir()
         self.paths = default_config_paths(self.config)
         self.documents = self.valid_documents()
         self.write_documents()
@@ -87,8 +86,6 @@ class OrichumConfigTests(unittest.TestCase):
                         "dockerProfile": "xebia",
                         "modelStack": None,
                         "accountPools": ["work", "shared"],
-                        "memoryPalace": str(self.root / "palace"),
-                        "memoryWing": "xebia",
                     }
                 ],
             },

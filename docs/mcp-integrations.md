@@ -5,9 +5,8 @@ Only services relevant to the resolved project are included.
 
 | MCP | Loaded when | Purpose |
 |---|---|---|
-| LeanCTX | Managed binary and project root are valid | Live reads, search, tree, graph, impact, callgraph, patches, and observational shell output |
+| LeanCTX | Managed binary and project root are valid | Compact source context, graphs, task overview, durable knowledge, patches, and observational shell output |
 | MCP_DOCKER | Project context declares a Docker profile | Project-specific Jira and other live-service tools |
-| Mempalace | Project palace passes ownership checks | Durable project recall and bounded memory writes |
 
 ## MCP_DOCKER profiles
 
@@ -23,27 +22,25 @@ Repositories below that parent inherit the same profile. A context without
 
 Profile tools may include create, update, comment, delete, and transition
 operations. Claude Code approval and the live service's authorization still
-apply. Orichum does not activate or switch the user's global Docker MCP profile;
-the selected profile is passed directly to that session's gateway command.
+apply. Orichum does not activate or switch the user's global Docker MCP
+profile; it passes the selected profile directly to that session's gateway.
 
-## Isolation
+## Isolation and approvals
 
 - The MCP file belongs to one verified physical session.
-- LeanCTX is jailed to the resolved root and stores all state in
-  `run_dir/leanctx`.
-- Mempalace calls are bound to the verified project wing.
+- LeanCTX is jailed to the resolved root.
+- LeanCTX project data is shared for cross-session graph and knowledge recall;
+  configuration, events, state, and cache are session-private.
 - Docker profile and GitHub identity are frozen into the session policy.
-- Concurrent sessions may use different profiles, accounts, repositories, and
-  LeanCTX indexes without changing global state.
+- Concurrent sessions may use different profiles, accounts, and repositories
+  without changing global state.
 
-LeanCTX advertises exactly nine tools. Its read, search, tree, expansion,
-graph, impact, and callgraph tools are preapproved. `ctx_patch` and `ctx_shell`
-retain normal approval because they edit text or execute commands. The
-universal `ctx_call` gateway and LeanCTX autonomy, daemon, proxy, memory,
-provider, and global-hook features are disabled.
+LeanCTX advertises exactly eleven tools. Read, search, tree, expansion, graph,
+impact, callgraph, knowledge, and overview are preapproved. `ctx_patch` and
+`ctx_shell` retain normal approval because they edit text or execute commands.
+The universal `ctx_call` gateway and LeanCTX autonomy, daemon, proxy, provider,
+and global-hook features remain disabled.
 
-Mempalace read tools are preapproved after the wing-binding hook validates
-them. Mempalace writes and MCP_DOCKER operations retain normal approval.
-
-This avoids cross-project profile, memory, and code-context leakage while
-keeping one deterministic live-code surface.
+MCP_DOCKER operations retain normal approval. This keeps one deterministic
+code-and-memory surface while preventing cross-project external-service
+leakage.

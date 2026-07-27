@@ -964,8 +964,6 @@ class StackWizardTests(unittest.TestCase):
                     "dockerProfile": None,
                     "modelStack": None,
                     "accountPools": ["shared"],
-                    "memoryPalace": "/work/memory",
-                    "memoryWing": "project",
                 }
             ],
         }
@@ -1393,8 +1391,6 @@ class StackWizardTests(unittest.TestCase):
                         "dockerProfile": None,
                         "modelStack": "heavy",
                         "accountPools": ["shared"],
-                        "memoryPalace": "/work/memory",
-                        "memoryWing": "project",
                     }
                 ],
             }

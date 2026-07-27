@@ -294,37 +294,6 @@ class OrichumSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(LogicalSessionError, "unexpected entry"):
             list_logical_sessions(self.state)
 
-    def test_control_plane_context_preserves_account_pools(self) -> None:
-        home = Path(self.temporary.name).resolve() / "home"
-        project = home / "work" / "repo"
-        palace = home / ".mempalace" / "work"
-        project.mkdir(parents=True)
-        palace.mkdir(parents=True, mode=0o700)
-        palace.chmod(0o700)
-        document = {
-            "schemaVersion": 1,
-            "contexts": [
-                {
-                    "root": "~/work",
-                    "dockerProfile": "work",
-                    "modelStack": None,
-                    "accountPools": ["work", "shared"],
-                    "memoryPalace": "~/.mempalace/work",
-                    "memoryWing": "work",
-                }
-            ],
-        }
-
-        resolved = resolve_control_plane_context(
-            document, project, home=home
-        )
-
-        self.assertEqual(
-            resolved["route"]["accountPools"], ["work", "shared"]
-        )
-        self.assertEqual(
-            resolved["route"]["contextRootReal"], str(home / "work")
-        )
 
     def test_control_plane_context_rejects_unsafe_and_canonical_alias_roots(
         self,
@@ -335,21 +304,19 @@ class OrichumSessionTests(unittest.TestCase):
         alias = home / "alias"
         alias.symlink_to(project, target_is_directory=True)
 
-        def context(root: str, wing: str) -> dict[str, object]:
+        def context(root: str) -> dict[str, object]:
             return {
                 "root": root,
                 "dockerProfile": None,
                 "modelStack": None,
                 "accountPools": ["shared"],
-                "memoryPalace": f"~/.mempalace/{wing}",
-                "memoryWing": wing,
             }
 
         with self.assertRaisesRegex(ContextError, "unsafe"):
             resolve_control_plane_context(
                 {
                     "schemaVersion": 1,
-                    "contexts": [context("~", "home")],
+                    "contexts": [context("~")],
                 },
                 home,
                 home=home,
@@ -359,8 +326,8 @@ class OrichumSessionTests(unittest.TestCase):
                 {
                     "schemaVersion": 1,
                     "contexts": [
-                        context("~/work", "work"),
-                        context("~/alias", "alias"),
+                        context("~/work"),
+                        context("~/alias"),
                     ],
                 },
                 project,

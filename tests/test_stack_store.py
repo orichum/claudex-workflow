@@ -59,8 +59,6 @@ class StackStoreTests(unittest.TestCase):
                     "dockerProfile": None,
                     "modelStack": None,
                     "accountPools": ["shared"],
-                    "memoryPalace": str(self.root / "palace"),
-                    "memoryWing": "project",
                 }
             ],
         }

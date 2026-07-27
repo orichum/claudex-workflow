@@ -71,7 +71,6 @@ observed_cwd="$(
 install -d \
   "$fixture/post-install-system-bin" \
   "$fixture/post-install-user-bin" \
-  "$fixture/post-install-data/tools/bin" \
   "$fixture/post-install-data/bin" \
   "$fixture/post-install-data/python/cpython-3.14.6/bin"
 printf '%s\n' \
@@ -80,25 +79,18 @@ printf '%s\n' \
   "  printf 'CPython\\t3.14.6\\n'" \
   '  exit 0' \
   'fi' \
-  'command -v mempalace-mcp' \
+  'exit 0' \
   >"$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14"
 chmod 0755 "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14"
 ln -s "$fixture/post-install-data/python/cpython-3.14.6/bin/python3.14" \
   "$fixture/post-install-data/bin/orichum-python"
-for private_tool in mempalace-mcp; do
-  printf '#!/usr/bin/env bash\nexit 0\n' \
-    >"$fixture/post-install-data/tools/bin/$private_tool"
-  chmod 0755 "$fixture/post-install-data/tools/bin/$private_tool"
-done
 ln -s "$ROOT/bin/orichum" "$fixture/post-install-user-bin/orichum"
 post_install_tools="$(
   ORICHUM_DATA_HOME="$fixture/post-install-data" \
   PATH="$fixture/post-install-user-bin:$fixture/post-install-system-bin:/usr/bin:/bin" \
     "$fixture/post-install-user-bin/orichum" config
 )"
-[[ "$post_install_tools" == "$(
-  printf '%s\n' "$fixture/post-install-data/tools/bin/mempalace-mcp"
-)" ]]
+[[ -z "$post_install_tools" ]]
 
 forwarded="$(
   cd "$caller_dir"

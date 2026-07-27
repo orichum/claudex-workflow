@@ -511,10 +511,62 @@ def _candidate_payload(
         return (repository_root / "config" / name).read_bytes()
     installed = installed_root / name
     if _lexists(installed):
-        return _private_bytes(installed, name, MAX_CONFIG_BYTES)
+        payload = _private_bytes(installed, name, MAX_CONFIG_BYTES)
+        if name == "projects.json":
+            return _normalize_projects_payload(payload)
+        return payload
     if name == "accounts.json":
         return b'{"schemaVersion":2,"accounts":[]}\n'
     return (repository_root / "config" / name).read_bytes()
+
+
+def _normalize_projects_payload(payload: bytes) -> bytes:
+    """Keep portable routing fields while dropping retired integrations."""
+    try:
+        document = json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+        raise InstallControlPlaneError(
+            "installed projects.json is invalid"
+        ) from error
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "contexts"}
+        or document.get("schemaVersion") != 1
+        or not isinstance(document.get("contexts"), list)
+    ):
+        raise InstallControlPlaneError(
+            "installed projects.json is invalid"
+        )
+    required = (
+        "root",
+        "dockerProfile",
+        "modelStack",
+        "accountPools",
+    )
+    current = {*required, "githubAccount"}
+    retired = {"memoryPalace", "memoryWing"}
+    normalized = []
+    for context in document["contexts"]:
+        if (
+            not isinstance(context, dict)
+            or any(name not in context for name in required)
+            or not set(context).issubset(current | retired)
+        ):
+            raise InstallControlPlaneError(
+                "installed projects.json is invalid"
+            )
+        item = {name: context[name] for name in required}
+        if "githubAccount" in context:
+            item["githubAccount"] = context["githubAccount"]
+        normalized.append(item)
+    return (
+        json.dumps(
+            {"schemaVersion": 1, "contexts": normalized},
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode()
 
 
 def _digest(payload: bytes) -> str:
@@ -603,6 +655,8 @@ def _load_manifest(journal_fd: int) -> dict[str, object]:
         )
     has_prior_policy = "priorPolicyPresent" in manifest
     has_policy_digest = "activatedPolicyDigest" in manifest
+    has_prior_projects = "priorProjectsPresent" in manifest
+    has_projects_digest = "activatedProjectsDigest" in manifest
     policy_fields_valid = (
         not has_prior_policy
         and not has_policy_digest
@@ -612,6 +666,15 @@ def _load_manifest(journal_fd: int) -> dict[str, object]:
         and isinstance(manifest.get("priorPolicyPresent"), bool)
         and isinstance(manifest.get("activatedPolicyDigest"), str)
     )
+    projects_fields_valid = (
+        not has_prior_projects
+        and not has_projects_digest
+    ) or (
+        has_prior_projects
+        and has_projects_digest
+        and isinstance(manifest.get("priorProjectsPresent"), bool)
+        and isinstance(manifest.get("activatedProjectsDigest"), str)
+    )
     if (
         manifest.get("schemaVersion") != 2
         or manifest.get("phase")
@@ -619,6 +682,7 @@ def _load_manifest(journal_fd: int) -> dict[str, object]:
         or not isinstance(manifest.get("priorModelPresent"), bool)
         or not isinstance(manifest.get("priorBindingPresent"), bool)
         or not policy_fields_valid
+        or not projects_fields_valid
         or not isinstance(manifest.get("installedRoot"), str)
         or not isinstance(manifest.get("bootstrapDigests"), dict)
         or not isinstance(manifest.get("activationStates"), list)
@@ -779,10 +843,20 @@ def _activate_bound(
         candidate_policy = (
             candidate_root / "controller-policy.md"
         ).read_bytes()
+        projects_path = installed_root / "projects.json"
+        prior_projects = _snapshot(
+            projects_path,
+            journal.journal_fd,
+            "installed-projects",
+            MAX_CONFIG_BYTES,
+        )
+        candidate_projects = (
+            candidate_root / "projects.json"
+        ).read_bytes()
         bootstrap_payloads = {
             name: (candidate_root / name).read_bytes()
             for name in _BOOTSTRAP_FILES
-            if name != "controller-policy.md"
+            if name not in {"controller-policy.md", "projects.json"}
             and not _lexists(installed_root / name)
         }
         initial_model = (
@@ -810,6 +884,8 @@ def _activate_bound(
             "priorBindingPresent": prior_binding is not None,
             "priorPolicyPresent": prior_policy is not None,
             "activatedPolicyDigest": _digest(candidate_policy),
+            "priorProjectsPresent": prior_projects is not None,
+            "activatedProjectsDigest": _digest(candidate_projects),
             "priorState": prior_state,
             "bootstrapDigests": {
                 name: _digest(payload)
@@ -834,6 +910,12 @@ def _activate_bound(
             exclusive=False,
         )
         _activation_checkpoint("controller-policy-installed")
+        _atomic_private(
+            projects_path,
+            candidate_projects,
+            exclusive=False,
+        )
+        _activation_checkpoint("projects-installed")
         if initial_model is not None:
             _atomic_private(
                 model_path,
@@ -938,6 +1020,17 @@ def _rollback_bound(
             if policy_managed and manifest["priorPolicyPresent"]
             else None
         )
+        projects_managed = "priorProjectsPresent" in manifest
+        original_projects = (
+            _private_bytes_at(
+                journal.journal_fd,
+                "installed-projects.data",
+                "installed projects snapshot",
+                MAX_CONFIG_BYTES,
+            )
+            if projects_managed and manifest["priorProjectsPresent"]
+            else None
+        )
         prior_state = manifest.get("priorState")
         if not isinstance(prior_state, dict):
             raise InstallControlPlaneError(
@@ -997,6 +1090,31 @@ def _rollback_bound(
                     )
             elif current_policy_digest != prior_policy_digest:
                 conflicts.append("controller-policy.md")
+
+        if projects_managed:
+            projects_path = installed_root / "projects.json"
+            current_projects_digest = _optional_digest(
+                projects_path,
+                "projects.json",
+                MAX_CONFIG_BYTES,
+            )
+            prior_projects_digest = (
+                None
+                if original_projects is None
+                else _digest(original_projects)
+            )
+            if current_projects_digest == manifest["activatedProjectsDigest"]:
+                if original_projects is None:
+                    projects_path.unlink()
+                    _fsync_directory(installed_root)
+                else:
+                    _atomic_private(
+                        projects_path,
+                        original_projects,
+                        exclusive=False,
+                    )
+            elif current_projects_digest != prior_projects_digest:
+                conflicts.append("projects.json")
 
         bootstrap_digests = manifest["bootstrapDigests"]
         if not isinstance(bootstrap_digests, dict):
