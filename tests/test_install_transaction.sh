@@ -733,6 +733,18 @@ committed_routing_fingerprint = source.index(
     "committed routing input fingerprint failed",
     activate_config,
 )
+pending_route_service = source.index(
+    'committed_route_service_file="$claudex_proxy_desired_service_file"',
+    activate_config,
+)
+if not (
+    activate_config
+    < pending_route_service
+    < committed_routing_fingerprint
+):
+    raise SystemExit(
+        "provider-free install does not fingerprint its staged route service"
+    )
 publish_install_state = source.index(
     'write "$install_state_path" "$install_state_platform"',
     doctor,

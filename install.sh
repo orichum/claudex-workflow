@@ -2250,6 +2250,10 @@ verify_committed_control_plane \
   workflow_die "committed Orichum control plane is invalid"
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
   "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
+committed_route_service_file="$claudex_proxy_service_file"
+if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
+  committed_route_service_file="$claudex_proxy_desired_service_file"
+fi
 routing_input_sha="$(
   verified_routing_input_fingerprint \
     "$routing_input_descriptor" \
@@ -2272,7 +2276,7 @@ routing_input_sha="$(
     "$WORKFLOW_ROOT/config/controller-policy.md" \
     "$WORKFLOW_DATA_ROOT/claude-config/settings.json" \
     "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
-    "$service_file" "$claudex_proxy_service_file"
+    "$service_file" "$committed_route_service_file"
 )" || workflow_die "committed routing input fingerprint failed"
 if [[ "$controller_plugin_decision" != reused ]]; then
   ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
