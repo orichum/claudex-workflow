@@ -725,6 +725,30 @@ if stage_github_binary \
 fi
 rg -Fq 'recorded GitHub release identity did not match' \
   "$fixture/mismatch.stderr"
+
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    '{
+      tag_name: "v1.2.3",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$recorded_binary" "$fixture/checksum-stage" \
+    false 1.2.3 github:example/tool@v1.2.3 \
+    >"$fixture/checksum.stdout" 2>"$fixture/checksum.stderr"; then
+  printf 'wrong recorded GitHub checksum was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'checksum mismatch for tool-1.2.3.tar.gz' \
+  "$fixture/checksum.stderr"
+[[ ! -e "$fixture/checksum-stage/tool" ]]
 unset -f fetch_github_release_tag curl
 
 printf '6.8.0-generic\n' >"$fixture/linux-osrelease"
