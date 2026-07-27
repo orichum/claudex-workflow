@@ -55,8 +55,8 @@ The parent remains resumable. The child does not receive hidden provider state
 or the full parent transcript.
 
 Concurrent sessions use separate physical run directories, MCP files, plugin
-copies, and Claudex translation ports. The three upstream resident services are
-shared.
+copies, and Claudex translation ports. CLIProxyAPI and the Orichum route proxy
+are shared, while each physical session owns its Claudex translator.
 
 ## Clean old physical runs
 

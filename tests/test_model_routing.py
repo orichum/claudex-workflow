@@ -60,9 +60,22 @@ class ModelRoutingTests(unittest.TestCase):
         (self.source_plugin / "agents").mkdir(parents=True)
         (self.source_plugin / "workflows").mkdir()
         for role in ROLES:
+            tools = (
+                "mcp__leanctx__ctx_read, mcp__leanctx__ctx_search, "
+                "mcp__leanctx__ctx_tree, mcp__leanctx__ctx_expand, "
+                "mcp__leanctx__ctx_graph, mcp__leanctx__ctx_impact, "
+                "mcp__leanctx__ctx_callgraph"
+            )
+            if role == "implementation-worker":
+                tools += (
+                    ", mcp__leanctx__ctx_patch, "
+                    "mcp__leanctx__ctx_shell, Edit, Write, Bash"
+                )
             (self.source_plugin / "agents" / f"{role}.md").write_text(
                 "---\n"
                 f"name: {role}\n"
+                "mcpServers: [leanctx]\n"
+                f"tools: {tools}\n"
                 "model: inherit\n"
                 "---\n"
                 f"{role} instructions\n",
@@ -318,6 +331,9 @@ class ModelRoutingTests(unittest.TestCase):
         )
         for role in ROLES:
             text = (plugin / "agents" / f"{role}.md").read_text()
+            self.assertIn("mcpServers: [leanctx]", text)
+            self.assertIn("mcp__leanctx__ctx_read", text)
+            self.assertNotIn("tools: Read", text)
             self.assertEqual(
                 [
                     line
@@ -360,6 +376,53 @@ class ModelRoutingTests(unittest.TestCase):
                 self.source_plugin, self.run_dir / "plugin", self.effective
             )
         self.assertFalse((self.run_dir / "plugin").exists())
+
+    def test_materialized_plugin_rejects_agent_without_leanctx_contract(
+        self,
+    ) -> None:
+        role = ROLES[0]
+        agent = self.source_plugin / "agents" / f"{role}.md"
+        text = agent.read_text(encoding="utf-8")
+        agent.write_text(
+            text.replace(
+                "tools: mcp__leanctx__ctx_read, "
+                "mcp__leanctx__ctx_search, "
+                "mcp__leanctx__ctx_tree, "
+                "mcp__leanctx__ctx_expand, "
+                "mcp__leanctx__ctx_graph, "
+                "mcp__leanctx__ctx_impact, "
+                "mcp__leanctx__ctx_callgraph",
+                "tools: Read, Glob, Grep",
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RoutingError, "LeanCTX tool contract"):
+            materialize_runtime_plugin(
+                self.source_plugin, self.run_dir / "plugin", self.effective
+            )
+
+        self.assertFalse((self.run_dir / "plugin").exists())
+
+    def test_materialized_plugin_rejects_duplicate_sensitive_frontmatter(
+        self,
+    ) -> None:
+        role = ROLES[0]
+        agent = self.source_plugin / "agents" / f"{role}.md"
+        text = agent.read_text(encoding="utf-8")
+        agent.write_text(
+            text.replace(
+                f"name: {role}\n",
+                f"name: {role}\ntools: Read, Glob, Grep\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RoutingError, "LeanCTX tool contract"):
+            materialize_runtime_plugin(
+                self.source_plugin, self.run_dir / "plugin", self.effective
+            )
 
     def test_materialized_plugin_rejects_existing_destination(self) -> None:
         (self.run_dir / "plugin").mkdir()

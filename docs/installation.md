@@ -31,7 +31,7 @@ The first run performs the complete installation. It:
 
 1. validates the focused configuration and controller plugin;
 2. installs the newest available CPython 3.14 patch privately;
-3. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, and Mempalace;
+3. installs or upgrades CLIProxyAPI, Claudex, and LeanCTX;
 4. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
 5. installs or reconciles the shared loopback services;
 6. preserves valid configuration and authentication;
@@ -137,7 +137,7 @@ This stops and removes only verified Orichum-owned services, removes the
 - provider credentials and named accounts;
 - model and project configuration;
 - Claude and Orichum session state;
-- Mempalace palaces.
+- LeanCTX project knowledge and graphs.
 
 That preserved state is reused if you run `./install.sh` again.
 
@@ -147,10 +147,10 @@ To also permanently delete Orichum's data and configuration roots:
 ./install.sh --uninstall --purge
 ```
 
-Purge removes saved Orichum credentials, sessions, and project configuration.
-It does not delete the repository checkout or external Mempalace palaces.
+Purge removes saved Orichum credentials, sessions, project configuration, and
+Orichum-managed LeanCTX data. It does not delete the repository checkout.
 
 Neither mode uninstalls standalone Claude Code, CLIProxyAPI, Claudex, LeanCTX,
-Mempalace, or uv installations. If a service definition or launcher with an
+or uv installations. If a service definition or launcher with an
 Orichum name is not verifiably owned by this setup, uninstall stops before
 changing anything.

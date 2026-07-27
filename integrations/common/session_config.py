@@ -26,6 +26,7 @@ from integrations.common.model_routing import (
     load_routing_view,
     materialize_runtime_plugin,
     resolve_effective,
+    validate_agent_contract,
     validate_model_id,
     validate_stack_name,
 )
@@ -238,19 +239,6 @@ def _session_mcp_payload(
                 "args": ["mcp", "gateway", "run", "--profile", profile],
             }
 
-        mempalace = shutil.which("mempalace-mcp")
-        palace = route.get("palacePathReal")
-        if (
-            mempalace
-            and route.get("memoryAvailable") is True
-            and isinstance(palace, str)
-            and palace
-        ):
-            servers["mempalace"] = {
-                "command": mempalace,
-                "args": ["--palace", palace],
-            }
-
     if run_dir is not None and data_root is not None:
         binary = _leanctx_binary(data_root)
         project_root = _leanctx_project_root(context)
@@ -259,6 +247,7 @@ def _session_mcp_payload(
                 binary,
                 project_root,
                 run_dir / "leanctx",
+                data_root / "leanctx",
             )
 
     return {"mcpServers": servers}
@@ -382,8 +371,27 @@ def _materialize_leanctx(
         private=True,
         create=True,
     )
+    for name in ("config", "state", "cache"):
+        require_owned_component(
+            directory,
+            name,
+            private=True,
+            create=True,
+        )
+    shared = require_owned_component(
+        data_root,
+        "leanctx",
+        private=True,
+        create=True,
+    )
+    require_owned_component(
+        shared,
+        "lean-ctx",
+        private=True,
+        create=True,
+    )
     atomic_private_bytes(
-        directory / "config.toml",
+        directory / "config" / "config.toml",
         leanctx_config_bytes(),
         0o600,
     )
@@ -397,7 +405,29 @@ def verify_leanctx_attachment(run_dir: Path) -> Path:
             run_dir / "leanctx",
             expected_mode=0o700,
         )
-        observed = _read_owned_file(directory, "config.toml", 0o600)
+        config = require_private_direct_child(
+            directory,
+            directory / "config",
+            expected_mode=0o700,
+        )
+        for name in ("state", "cache"):
+            require_private_direct_child(
+                directory,
+                directory / name,
+                expected_mode=0o700,
+            )
+        data_root = run_dir.parents[2]
+        shared = require_owned_component(
+            data_root,
+            "leanctx",
+            private=True,
+        )
+        require_owned_component(
+            shared,
+            "lean-ctx",
+            private=True,
+        )
+        observed = _read_owned_file(config, "config.toml", 0o600)
     except SessionError as error:
         raise SessionError(
             "LeanCTX configuration is unavailable or unsafe"
@@ -1084,16 +1114,14 @@ def _verify_runtime_plugin(
             raise SessionError(
                 f"runtime agent {role} is not valid UTF-8"
             ) from error
-        lines = text.splitlines()
-        models = [line for line in lines if line.startswith("model: ")]
-        if (
-            not lines
-            or lines[0].strip() != "---"
-            or models != [f"model: {effective.agents[role]}"]
-        ):
-            raise SessionError(
-                f"runtime agent {role} does not match effective models"
+        try:
+            validate_agent_contract(
+                text, role, effective.agents[role]
             )
+        except RoutingError as error:
+            raise SessionError(
+                str(error)
+            ) from error
     return plugin_dir
 
 

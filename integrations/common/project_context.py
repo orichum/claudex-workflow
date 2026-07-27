@@ -14,11 +14,6 @@ import tempfile
 from pathlib import Path
 from typing import Collection, Optional
 
-from .context_population import (
-    PopulationError,
-    populate_context,
-    render_population_result,
-)
 from .github_identity import GithubIdentityError, validate_github_account
 from .model_routing import (
     RoutingError,
@@ -31,9 +26,7 @@ class ContextError(RuntimeError):
     pass
 
 
-_CONTEXT_REQUIRED_KEYS = {
-    "root", "dockerProfile", "memoryPalace", "memoryWing"
-}
+_CONTEXT_REQUIRED_KEYS = {"root", "dockerProfile"}
 _CONTEXT_OPTIONAL_KEYS = {
     "modelStack",
     "accountPools",
@@ -101,34 +94,6 @@ def _git_root(launch_real: Path) -> Optional[str]:
         return None
     root = Path(completed.stdout.strip()).resolve(strict=True)
     return str(root) if _contains(root, launch_real) else None
-
-
-def _validate_palace_candidate(
-    configured: Path,
-) -> tuple[Optional[Path], Optional[str]]:
-    if not configured.is_absolute():
-        raise ContextError("configured palace must expand to an absolute path")
-    cursor = Path(configured.anchor)
-    for component in configured.parts[1:]:
-        cursor /= component
-        if cursor.is_symlink():
-            return None, "palace_symlink"
-    try:
-        real = configured.resolve(strict=True)
-        palace_stat = real.stat()
-    except FileNotFoundError:
-        return None, "palace_missing"
-    except PermissionError:
-        return None, "palace_inaccessible"
-    except OSError:
-        return None, "palace_inaccessible"
-    if not real.is_dir() or not stat.S_ISDIR(palace_stat.st_mode):
-        return None, "palace_not_directory"
-    if palace_stat.st_uid != os.getuid():
-        return None, "palace_owner"
-    if stat.S_IMODE(palace_stat.st_mode) & 0o077:
-        return None, "palace_permissions"
-    return real, None
 
 
 def _require_exact_keys(value: object, expected: set[str], label: str) -> dict:
@@ -213,12 +178,9 @@ def validate_config_document(
         raise ContextError("contexts must be a list")
 
     lexical_roots = []
-    lexical_palaces = set()
-    memory_wings = set()
     for index, raw_context in enumerate(raw_contexts):
         context = _context_object(raw_context, f"context {index}")
         root = _structural_path(context["root"], home, "root")
-        palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
         _require_optional_non_blank(context["dockerProfile"], "dockerProfile")
         _model_stack(context.get("modelStack"), stacks)
         try:
@@ -243,17 +205,10 @@ def validate_config_document(
                 raise ContextError("accountPools names an unknown pool")
         elif pools is not None:
             raise ContextError("accountPools requires schemaVersion")
-        memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
         if any(_contains(existing_root, root) or _contains(root, existing_root)
                for existing_root in lexical_roots):
             raise ContextError("configured roots must not overlap")
-        if palace in lexical_palaces:
-            raise ContextError("configured palaces must be lexically unique")
-        if memory_wing in memory_wings:
-            raise ContextError("memoryWing values must be unique")
         lexical_roots.append(root)
-        lexical_palaces.add(palace)
-        memory_wings.add(memory_wing)
 
 
 def validate_config_structure(
@@ -270,12 +225,8 @@ def validate_config_structure(
     validate_config_document(raw, home)
     for context in raw["contexts"]:
         root = _structural_path(context["root"], home, "root")
-        palace = _structural_path(context["memoryPalace"], home, "memoryPalace")
         _structural_existing_ancestor_path(
             root, home, "root", reject_symlinks=False
-        )
-        _structural_existing_ancestor_path(
-            palace, home, "memoryPalace", reject_symlinks=True
         )
 
 
@@ -293,8 +244,6 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
 
     contexts = []
     canonical_roots = set()
-    canonical_palaces = set()
-    memory_wings = set()
     for index, raw_context in enumerate(raw_contexts):
         context = _context_object(raw_context, f"context {index}")
         root_path = _expand(context["root"], home)
@@ -309,37 +258,19 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
         if root_real == Path(root_real.anchor) or root_real == home.resolve(strict=False):
             raise ContextError("configured root is unsafe")
 
-        palace_path = _expand(context["memoryPalace"], home)
-        if not palace_path.is_absolute():
-            raise ContextError("configured palace must expand to an absolute path")
-        try:
-            palace_real = palace_path.resolve(strict=True)
-        except (OSError, RuntimeError):
-            palace_real = None
-
         docker_profile = _require_optional_non_blank(
             context["dockerProfile"], "dockerProfile"
         )
         model_stack = _model_stack(context.get("modelStack"))
-        memory_wing = _require_non_blank(context["memoryWing"], "memoryWing")
         if any(_contains(existing_root, root_real) or _contains(root_real, existing_root)
                for existing_root in canonical_roots):
             raise ContextError("configured roots must not overlap")
-        if palace_real is not None and palace_real in canonical_palaces:
-            raise ContextError("configured palaces must be canonically unique")
-        if memory_wing in memory_wings:
-            raise ContextError("memoryWing values must be unique")
         canonical_roots.add(root_real)
-        if palace_real is not None:
-            canonical_palaces.add(palace_real)
-        memory_wings.add(memory_wing)
         contexts.append(
             {
                 "root": root_real,
                 "dockerProfile": docker_profile,
                 "modelStack": model_stack,
-                "memoryPalace": palace_path,
-                "memoryWing": memory_wing,
             }
         )
 
@@ -362,18 +293,11 @@ def resolve_context(config: dict, launch_dir: Path) -> dict:
     route = None
     if matches:
         selected = matches[0]
-        palace_real, failure_code = _validate_palace_candidate(
-            selected["memoryPalace"]
-        )
         route = {
-            "id": selected["memoryWing"],
+            "id": selected["root"].name,
             "contextRootReal": str(selected["root"]),
             "dockerProfile": selected["dockerProfile"],
             "modelStack": selected["modelStack"],
-            "memoryWing": selected["memoryWing"],
-            "memoryAvailable": failure_code is None,
-            "memoryFailureCode": failure_code,
-            "palacePathReal": str(palace_real) if palace_real is not None else None,
         }
 
     return {
@@ -412,8 +336,6 @@ def resolve_control_plane_context(
             "dockerProfile",
             "modelStack",
             "accountPools",
-            "memoryPalace",
-            "memoryWing",
         }
         if set(context) not in (expected, expected | {"githubAccount"}):
             raise ContextError(f"project context {index} has invalid fields")
@@ -440,7 +362,6 @@ def resolve_control_plane_context(
         ):
             raise ContextError("configured roots must not overlap")
         canonical_roots.add(root)
-        palace = _expand(context["memoryPalace"], home)
         normalized.append(
             {
                 "root": root,
@@ -450,10 +371,6 @@ def resolve_control_plane_context(
                 "modelStack": _model_stack(context["modelStack"]),
                 "githubAccount": validate_github_account(
                     context.get("githubAccount")
-                ),
-                "memoryPalace": palace,
-                "memoryWing": _require_non_blank(
-                    context["memoryWing"], "memoryWing"
                 ),
             }
         )
@@ -953,33 +870,6 @@ def _context_root(value: str, home: Path, *, must_exist: bool) -> Path:
     return resolved
 
 
-def _context_palace(value: str, home: Path) -> Path:
-    palace = _structural_path(value, home, "memoryPalace")
-    if palace == Path(palace.anchor) or palace == home:
-        raise ContextError("memoryPalace is unsafe")
-    return palace
-
-
-def _ensure_new_palace(palace: Path) -> None:
-    if palace.exists():
-        return
-    palace.mkdir(parents=True, mode=0o700)
-    os.chmod(palace, 0o700)
-
-
-def _prepare_palace(palace: Path) -> None:
-    _structural_existing_ancestor_path(
-        palace, Path.home(), "memoryPalace", reject_symlinks=True
-    )
-    try:
-        _ensure_new_palace(palace)
-    except OSError as error:
-        raise ContextError("memoryPalace could not be created") from error
-    _, failure_code = _validate_palace_candidate(palace)
-    if failure_code is not None:
-        raise ContextError("memoryPalace is unsafe")
-
-
 def _validate_context_candidate(
     document: dict,
     home: Path,
@@ -988,17 +878,12 @@ def _validate_context_candidate(
 ) -> None:
     validate_config_document(document, home, stacks, account_pools)
     canonical_roots = []
-    canonical_palaces = set()
     for context in document["contexts"]:
         root = _context_root(context["root"], home, must_exist=True)
-        palace = _context_palace(context["memoryPalace"], home).resolve(strict=False)
         if any(_contains(existing_root, root) or _contains(root, existing_root)
                for existing_root in canonical_roots):
             raise ContextError("configured roots must not overlap")
-        if palace in canonical_palaces:
-            raise ContextError("configured palaces must be canonically unique")
         canonical_roots.append(root)
-        canonical_palaces.add(palace)
 
 
 def _find_context_index(contexts: list[dict], root: Path, home: Path) -> int:
@@ -1029,16 +914,12 @@ def _build_add_candidate(
     parsed: argparse.Namespace,
     home: Path,
     account_pools: Optional[set[str]] = None,
-) -> tuple[dict, dict, Path, Path]:
+) -> tuple[dict, dict]:
     root = _context_root(parsed.root, home, must_exist=True)
-    palace_value = parsed.palace or f"~/.mempalace/palaces/{root.name}"
-    palace = _context_palace(palace_value, home)
     context = {
         "root": str(root),
         "dockerProfile": parsed.docker,
         "modelStack": parsed.model_stack,
-        "memoryPalace": palace_value if parsed.palace is None else str(palace),
-        "memoryWing": parsed.wing or root.name,
     }
     if "schemaVersion" in document:
         context["githubAccount"] = validate_github_account(
@@ -1055,7 +936,7 @@ def _build_add_candidate(
         **({"schemaVersion": 1} if "schemaVersion" in document else {}),
         "contexts": [*document["contexts"], context],
     }
-    return candidate, context, root, palace
+    return candidate, context
 
 
 def _render_context_table(contexts: list[dict], default_stack: str) -> str:
@@ -1064,8 +945,6 @@ def _render_context_table(contexts: list[dict], default_stack: str) -> str:
         ("MODEL STACK", "modelStack"),
         ("MCP_DOCKER PROFILE", "dockerProfile"),
         ("GITHUB ACCOUNT", "githubAccount"),
-        ("MEMPALACE PATH", "memoryPalace"),
-        ("MEMPALACE WING", "memoryWing"),
     )
 
     def render_value(context: dict, key: str) -> str:
@@ -1096,12 +975,6 @@ def _render_context_table(contexts: list[dict], default_stack: str) -> str:
     header = tuple(label for label, _ in columns)
     return "\n".join((border, render_row(header), border,
                       *(render_row(row) for row in rows), border)) + "\n"
-
-
-def _print_population_progress(message: str) -> None:
-    print(message, flush=True)
-
-
 def _load_context_routing(path: Path) -> dict[str, object]:
     return load_routing_view(path)
 
@@ -1136,18 +1009,12 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     add = commands.add_parser("add")
     add.add_argument("root")
     add.add_argument("--docker")
-    add.add_argument("--palace")
-    add.add_argument("--wing")
     add.add_argument("--model-stack")
     add.add_argument("--pool", action="append")
     add.add_argument("--github-account")
-    populate = commands.add_parser("populate")
-    populate.add_argument("root")
     update = commands.add_parser("update")
     update.add_argument("root")
     update.add_argument("--docker")
-    update.add_argument("--palace")
-    update.add_argument("--wing")
     update.add_argument("--model-stack")
     update.add_argument("--pool", action="append")
     update.add_argument("--no-docker", action="store_true")
@@ -1183,73 +1050,13 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     parsed.providers_config
                 )
                 document = _read_context_document(parsed.config, home)
-                candidate, context, root, palace = _build_add_candidate(
+                candidate, _ = _build_add_candidate(
                     document, parsed, home, account_pools
                 )
                 _validate_context_candidate(
                     candidate, home, routing_stacks, account_pools
                 )
-
-            _prepare_palace(palace)
-            result = populate_context(
-                root,
-                palace,
-                context["memoryWing"],
-                progress=_print_population_progress,
-            )
-
-            with _context_lock(parsed.config):
-                routing = _load_context_routing(parsed.routing_config)
-                routing_stacks = routing["stacks"]
-                account_pools = _load_account_pool_names(
-                    parsed.providers_config
-                )
-                current = _read_context_document(parsed.config, home)
-                final_candidate = {
-                    **(
-                        {"schemaVersion": 1}
-                        if "schemaVersion" in current
-                        else {}
-                    ),
-                    "contexts": [*current["contexts"], context]
-                }
-                _validate_context_candidate(
-                    final_candidate, home, routing_stacks, account_pools
-                )
-                _write_context_document(parsed.config, final_candidate)
-
-            print(render_population_result(result), end="")
-            return 0
-
-        if parsed.command == "populate":
-            with _context_lock(parsed.config):
-                routing = _load_context_routing(parsed.routing_config)
-                routing_stacks = routing["stacks"]
-                account_pools = _load_account_pool_names(
-                    parsed.providers_config
-                )
-                document = _read_context_document(
-                    parsed.config, home, routing_stacks
-                    , account_pools
-                )
-                root = _context_root(parsed.root, home, must_exist=True)
-                index = _find_canonical_context_index(
-                    document["contexts"], root, home
-                )
-                context = dict(document["contexts"][index])
-                configured_root = _context_root(
-                    context["root"], home, must_exist=True
-                )
-
-            palace = _context_palace(context["memoryPalace"], home)
-            _prepare_palace(palace)
-            result = populate_context(
-                configured_root,
-                palace,
-                context["memoryWing"],
-                progress=_print_population_progress,
-            )
-            print(render_population_result(result), end="")
+                _write_context_document(parsed.config, candidate)
             return 0
 
         lock = _context_lock(parsed.config)
@@ -1294,8 +1101,6 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                         value is None
                         for value in (
                             parsed.docker,
-                            parsed.palace,
-                            parsed.wing,
                             parsed.model_stack,
                             parsed.pool,
                             parsed.github_account,
@@ -1311,13 +1116,6 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                     replacement["dockerProfile"] = parsed.docker
                 elif parsed.no_docker:
                     replacement["dockerProfile"] = None
-                if parsed.palace is not None:
-                    palace = _context_palace(parsed.palace, home)
-                    replacement["memoryPalace"] = str(palace)
-                else:
-                    palace = None
-                if parsed.wing is not None:
-                    replacement["memoryWing"] = parsed.wing
                 if parsed.model_stack is not None:
                     replacement["modelStack"] = parsed.model_stack
                 elif parsed.inherit_model_stack:
@@ -1348,8 +1146,6 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                 _validate_context_candidate(
                     candidate, home, routing_stacks, account_pools
                 )
-                if palace is not None:
-                    _prepare_palace(palace)
                 _write_context_document(parsed.config, candidate)
                 return 0
 
@@ -1376,10 +1172,8 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
             )
             _write_context_document(parsed.config, candidate)
             return 0
-    except (ContextError, PopulationError, RoutingError) as error:
+    except (ContextError, RoutingError):
         print("ERROR: project context operation rejected", file=sys.stderr)
-        if isinstance(error, PopulationError):
-            print(str(error), file=sys.stderr)
         return 1
 
 

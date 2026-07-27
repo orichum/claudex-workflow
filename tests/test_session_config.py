@@ -41,20 +41,14 @@ class SessionConfigTests(unittest.TestCase):
         self.xebia = self.home / "xebia"
         self.complion = self.home / "complion"
         self.launch_dir = self.xebia / "project"
-        self.palace = self.home / ".mempalace" / "palaces" / "xebia"
-        self.complion_palace = self.home / ".mempalace" / "palaces" / "complion"
         for directory in (
             self.runtime,
             self.launch_dir,
             self.complion,
-            self.palace,
-            self.complion_palace,
         ):
             directory.mkdir(parents=True, exist_ok=True)
-        self.palace.chmod(0o700)
         self.tools = {
             "docker": "/opt/tools/docker",
-            "mempalace-mcp": "/opt/tools/mempalace-mcp",
         }
         which = mock.patch(
             "integrations.common.session_config.shutil.which",
@@ -98,9 +92,9 @@ class SessionConfigTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.write_catalog(self.first_catalog)
-        self.write_config(self.palace)
+        self.write_config()
 
-    def write_config(self, palace: Path) -> None:
+    def write_config(self) -> None:
         self.config_path.write_text(
             json.dumps(
                 {
@@ -109,15 +103,11 @@ class SessionConfigTests(unittest.TestCase):
                             "root": str(self.xebia),
                             "dockerProfile": "xebia",
                             "modelStack": None,
-                            "memoryPalace": str(palace),
-                            "memoryWing": "xebia",
                         },
                         {
                             "root": str(self.complion),
                             "dockerProfile": "realtime",
                             "modelStack": None,
-                            "memoryPalace": str(self.complion_palace),
-                            "memoryWing": "complion",
                         },
                     ],
                 }
@@ -264,53 +254,6 @@ class SessionConfigTests(unittest.TestCase):
         self.assertEqual(resolved, child)
         self.assertEqual(stat.S_IMODE(child.stat().st_mode), 0o700)
 
-    def test_create_session_writes_private_project_mcp_state(self) -> None:
-        session = self.create()
-
-        self.assertEqual(stat.S_IMODE(session.run_dir.stat().st_mode), 0o700)
-        completion = session.run_dir / ".complete"
-        self.assertTrue(completion.is_file())
-        self.assertFalse(completion.is_symlink())
-        self.assertEqual(stat.S_IMODE(completion.stat().st_mode), 0o600)
-        self.assertEqual(
-            stat.S_IMODE(session.context_file.stat().st_mode), 0o600
-        )
-        self.assertEqual(stat.S_IMODE(session.mcp_file.stat().st_mode), 0o600)
-        self.assertEqual(
-            stat.S_IMODE(session.effective_models_file.stat().st_mode), 0o600
-        )
-        self.assertEqual(stat.S_IMODE(session.plugin_dir.stat().st_mode), 0o700)
-        self.assertEqual(
-            json.loads(session.mcp_file.read_text()),
-            {
-                "mcpServers": {
-                    "docker": {
-                        "command": "/opt/tools/docker",
-                        "args": ["mcp", "gateway", "run", "--profile", "xebia"],
-                    },
-                    "mempalace": {
-                        "command": "/opt/tools/mempalace-mcp",
-                        "args": ["--palace", str(self.palace)],
-                    },
-                }
-            },
-        )
-        self.assertTrue(session.run_id.startswith("run."))
-        context = json.loads(session.context_file.read_text())
-        self.assertEqual(context["route"]["id"], "xebia")
-        self.assertEqual(context["route"]["dockerProfile"], "xebia")
-        self.assertEqual(session.context_sha256, sha256_file(session.context_file))
-        self.assertEqual(
-            session.context_sha256,
-            hashlib.sha256(session.context_file.read_bytes()).hexdigest(),
-        )
-        verified = verify_session(
-            self.workflow_root,
-            session.run_dir,
-            session.context_sha256,
-            session.effective_models_sha256,
-        )
-        self.assertEqual(verified, session)
 
     def test_create_session_removes_incomplete_run_after_failure(self) -> None:
         real_atomic_json = session_config.atomic_json
@@ -452,6 +395,34 @@ class SessionConfigTests(unittest.TestCase):
                 session.effective_models_sha256,
             )
 
+    def test_session_rejects_runtime_agent_without_leanctx_contract(
+        self,
+    ) -> None:
+        session = self.create()
+        agent = (
+            session.plugin_dir
+            / "agents"
+            / f"{session_config.ROLES[0]}.md"
+        )
+        original = agent.read_text(encoding="utf-8")
+        tools = next(
+            line for line in original.splitlines()
+            if line.startswith("tools: ")
+        )
+        agent.write_text(
+            original.replace(tools, "tools: Read, Glob, Grep"),
+            encoding="utf-8",
+        )
+        agent.chmod(0o600)
+
+        with self.assertRaisesRegex(SessionError, "LeanCTX tool contract"):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
         agent.write_text(original, encoding="utf-8")
         agent.chmod(0o640)
         with self.assertRaises(SessionError):
@@ -536,17 +507,6 @@ class SessionConfigTests(unittest.TestCase):
             0o700,
         )
 
-    def test_context_without_docker_profile_omits_docker_mcp(self) -> None:
-        document = json.loads(self.config_path.read_text(encoding="utf-8"))
-        document["contexts"][0]["dockerProfile"] = None
-        self.config_path.write_text(json.dumps(document), encoding="utf-8")
-
-        session = self.create()
-        context = json.loads(session.context_file.read_text(encoding="utf-8"))
-        servers = json.loads(session.mcp_file.read_text(encoding="utf-8"))["mcpServers"]
-        self.assertIsNone(context["route"]["dockerProfile"])
-        self.assertNotIn("docker", servers)
-        self.assertIn("mempalace", servers)
 
     def test_explicit_private_data_root_keeps_state_outside_checkout(self) -> None:
         data_root = self.fixture / "data-root"
@@ -657,40 +617,6 @@ class SessionConfigTests(unittest.TestCase):
             )
         )
 
-    def test_missing_palace_preserves_route_and_git_resolution(self) -> None:
-        repository = self.launch_dir / "repository"
-        repository.mkdir()
-        self.write_config(self.home / "missing-palace")
-
-        with mock.patch(
-            "integrations.common.project_context._git_root",
-            return_value=str(repository.resolve()),
-        ):
-            session = create_session(
-                self.workflow_root,
-                repository,
-                self.config_path,
-                **self.routing_options(),
-            )
-        context = json.loads(session.context_file.read_text())
-
-        self.assertEqual(context["route"]["dockerProfile"], "xebia")
-        self.assertEqual(context["route"]["memoryWing"], "xebia")
-        self.assertFalse(context["route"]["memoryAvailable"])
-        self.assertEqual(context["route"]["memoryFailureCode"], "palace_missing")
-        self.assertIsNone(context["route"]["palacePathReal"])
-        self.assertEqual(context["repoRootReal"], str(repository.resolve()))
-        self.assertEqual(
-            json.loads(session.mcp_file.read_text()),
-            {
-                "mcpServers": {
-                    "docker": {
-                        "command": "/opt/tools/docker",
-                        "args": ["mcp", "gateway", "run", "--profile", "xebia"],
-                    }
-                }
-            },
-        )
 
     def test_git_session_gets_private_bounded_leanctx_mcp(self) -> None:
         repository = self.init_repository()
@@ -699,7 +625,8 @@ class SessionConfigTests(unittest.TestCase):
         session = self.create()
         servers = json.loads(session.mcp_file.read_text())["mcpServers"]
         leanctx_dir = session.run_dir / "leanctx"
-        config = leanctx_dir / "config.toml"
+        config = leanctx_dir / "config" / "config.toml"
+        shared_data = self.runtime / "leanctx"
 
         self.assertIn("leanctx", servers)
         self.assertEqual(
@@ -711,14 +638,15 @@ class SessionConfigTests(unittest.TestCase):
                     "LEAN_CTX_ALLOW_REROOT": "false",
                     "LEAN_CTX_AUTONOMY": "false",
                     "LEAN_CTX_BYPASS_HINTS": "off",
-                    "LEAN_CTX_CACHE_DIR": str(leanctx_dir),
-                    "LEAN_CTX_CONFIG_DIR": str(leanctx_dir),
-                    "LEAN_CTX_DATA_DIR": str(leanctx_dir),
+                    "LEAN_CTX_CACHE_DIR": str(leanctx_dir / "cache"),
+                    "LEAN_CTX_CONFIG_DIR": str(leanctx_dir / "config"),
+                    "LEAN_CTX_DATA_DIR": str(shared_data / "lean-ctx"),
                     "LEAN_CTX_FULL_TOOLS": "0",
                     "LEAN_CTX_HEADLESS": "1",
                     "LEAN_CTX_MINIMAL": "1",
                     "LEAN_CTX_PROJECT_ROOT": str(repository),
-                    "LEAN_CTX_STATE_DIR": str(leanctx_dir),
+                    "LEAN_CTX_STATE_DIR": str(leanctx_dir / "state"),
+                    "XDG_DATA_HOME": str(shared_data),
                 },
             },
         )
@@ -728,11 +656,11 @@ class SessionConfigTests(unittest.TestCase):
             config.read_text(encoding="utf-8"),
             """compression_level = "lite"
 minimal_overhead = true
-tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand", "ctx_graph", "ctx_impact", "ctx_callgraph", "ctx_patch", "ctx_shell"]
+tools_enabled = ["ctx_read", "ctx_search", "ctx_tree", "ctx_expand", "ctx_graph", "ctx_impact", "ctx_callgraph", "ctx_knowledge", "ctx_overview", "ctx_patch", "ctx_shell"]
 disabled_tools = ["ctx_call", "ctx_compose", "ctx_session", "shell"]
-auto_capture = false
+auto_capture = true
 buddy_enabled = false
-enable_wakeup_ctx = false
+enable_wakeup_ctx = true
 journal_enabled = false
 max_index_threads = 2
 no_degrade = true
@@ -765,12 +693,19 @@ update_check_disabled = true
             servers["leanctx"]["env"]["LEAN_CTX_PROJECT_ROOT"],
             str(self.xebia.resolve(strict=True)),
         )
-        self.assertTrue((session.run_dir / "leanctx" / "config.toml").is_file())
+        self.assertTrue(
+            (
+                session.run_dir
+                / "leanctx"
+                / "config"
+                / "config.toml"
+            ).is_file()
+        )
     def test_leanctx_config_tampering_invalidates_the_session(self) -> None:
         self.init_repository()
         self.install_leanctx()
         session = self.create()
-        config = session.run_dir / "leanctx" / "config.toml"
+        config = session.run_dir / "leanctx" / "config" / "config.toml"
         if not config.is_file():
             self.fail("LeanCTX config was not materialized")
         config.write_text("tools_enabled = []\n", encoding="utf-8")
@@ -786,7 +721,29 @@ update_check_disabled = true
                 session.effective_models_sha256,
             )
 
-    def test_two_sessions_do_not_share_leanctx_state(self) -> None:
+    def test_leanctx_runtime_directory_substitution_invalidates_session(
+        self,
+    ) -> None:
+        self.init_repository()
+        self.install_leanctx()
+        session = self.create()
+        state = session.run_dir / "leanctx" / "state"
+        state.rmdir()
+        outside = self.fixture / "outside-leanctx-state"
+        outside.mkdir(mode=0o700)
+        state.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            SessionError, "LeanCTX configuration is unavailable or unsafe"
+        ):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
+    def test_two_sessions_share_data_but_isolate_runtime(self) -> None:
         self.init_repository()
         self.install_leanctx()
 
@@ -799,30 +756,26 @@ update_check_disabled = true
         first_server = first_servers["leanctx"]
         second_server = second_servers["leanctx"]
 
-        self.assertNotEqual(
+        self.assertEqual(
             first_server["env"]["LEAN_CTX_DATA_DIR"],
             second_server["env"]["LEAN_CTX_DATA_DIR"],
         )
-        self.assertEqual(
-            Path(first_server["env"]["LEAN_CTX_DATA_DIR"]).parent,
-            first.run_dir,
-        )
-        self.assertEqual(
-            Path(second_server["env"]["LEAN_CTX_DATA_DIR"]).parent,
-            second.run_dir,
-        )
+        for name in (
+            "LEAN_CTX_CONFIG_DIR",
+            "LEAN_CTX_STATE_DIR",
+            "LEAN_CTX_CACHE_DIR",
+        ):
+            self.assertNotEqual(
+                first_server["env"][name],
+                second_server["env"][name],
+            )
+            self.assertTrue(
+                Path(first_server["env"][name]).is_relative_to(first.run_dir)
+            )
+            self.assertTrue(
+                Path(second_server["env"][name]).is_relative_to(second.run_dir)
+            )
 
-    def test_unsafe_palace_preserves_mapped_route(self) -> None:
-        self.palace.chmod(0o755)
-        session = self.create()
-        context = json.loads(session.context_file.read_text())
-
-        self.assertEqual(context["route"]["dockerProfile"], "xebia")
-        self.assertFalse(context["route"]["memoryAvailable"])
-        self.assertEqual(
-            context["route"]["memoryFailureCode"], "palace_permissions"
-        )
-        self.assertIsNone(context["route"]["palacePathReal"])
 
     def test_rejects_symlinked_workflow_root(self) -> None:
         link = self.fixture / "workflow-link"
@@ -937,26 +890,6 @@ update_check_disabled = true
             )
         )
 
-    def test_verify_rejects_valid_json_context_rewrite(self) -> None:
-        session = self.create()
-        context = json.loads(session.context_file.read_text())
-        context["route"]["id"] = "complion"
-        context["route"]["dockerProfile"] = "realtime"
-        context["route"]["memoryWing"] = "complion"
-        session.context_file.write_text(
-            json.dumps(context, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        session.context_file.chmod(0o600)
-
-        self.assert_rejected(
-            lambda: verify_session(
-                self.workflow_root,
-                session.run_dir,
-                session.context_sha256,
-                session.effective_models_sha256,
-            )
-        )
 
     def assert_read_swap_rejected(self, file_name: str) -> None:
         session = self.create()

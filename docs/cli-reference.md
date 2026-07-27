@@ -27,9 +27,8 @@ Installer modes are separate from the `orichum` command:
 | `orichum config validate` | Validate focused configuration |
 | `orichum config paths` | Print installed configuration and data paths |
 | `orichum context list` | Show configured parent-directory contexts |
-| `orichum context add ROOT ...` | Populate and add a context |
-| `orichum context update ROOT ...` | Change context routing |
-| `orichum context populate ROOT` | Explicitly refresh durable project memory |
+| `orichum context add ROOT [--docker PROFILE] [--model-stack STACK] [--pool POOL] [--github-account ACCOUNT]` | Add a parent-directory context; repeat `--pool` for ordered pools |
+| `orichum context update ROOT ...` | Replace pools or identities; set or inherit a stack; set or clear Docker/GitHub bindings |
 | `orichum context remove ROOT` | Remove a context mapping |
 | `orichum context validate` | Validate all configured project contexts |
 | `orichum models list` | List declared models |
@@ -44,10 +43,18 @@ Installer modes are separate from the `orichum` command:
 | `orichum provider login TYPE` | Authenticate a provider through CLIProxyAPI |
 | `orichum provider list` | List configured provider adapters and model families |
 | `orichum provider accounts` | List named accounts |
-| `orichum provider account ...` | Add, rename, reprioritize, enable, disable, sync, or remove |
-| `orichum plugin ...` | List, add, sync, update, or remove optional plugins |
-| `orichum leanctx list [--limit N \| --all]` | List recent LeanCTX physical runs and mark the implicitly selected run |
-| `orichum leanctx stats [--run RUN]` | Show an exact savings snapshot |
+| `orichum provider account add NAME PROVIDER CREDENTIAL_FILE POOL [--priority VALUE]` | Register a credential without using the wizard |
+| `orichum provider account rename ACCOUNT NAME` | Change an account's display name |
+| `orichum provider account priority ACCOUNT VALUE` | Set an alias or numeric priority |
+| `orichum provider account enable ACCOUNT` / `orichum provider account disable ACCOUNT` | Change account availability |
+| `orichum provider account remove ACCOUNT` | Remove an account's registry entry |
+| `orichum provider account sync [ACCOUNT]` | Reconcile one or all registered credentials |
+| `orichum plugin list` | List declared optional plugins |
+| `orichum plugin add PLUGIN@MARKETPLACE [--source SOURCE]` | Declare and install a plugin |
+| `orichum plugin sync` / `orichum plugin update` | Reconcile or refresh declared plugins |
+| `orichum plugin remove PLUGIN@MARKETPLACE` | Uninstall and remove a declaration |
+| `orichum leanctx list [--limit N \| --all]` | List attached LeanCTX runs; include incompatible historical runs with `--all` |
+| `orichum leanctx stats [--run RUN]` | Show exact LeanCTX tool-payload reduction |
 | `orichum leanctx watch [--run RUN]` | Open LeanCTX's live terminal monitor |
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
 | `orichum doctor` | Validate local component ownership, configuration, protocols, and service health |
@@ -82,8 +89,13 @@ Inside a live session, monitoring uses that physical run. Otherwise it uses the
 newest physical run for the current project, regardless of whether it has
 recorded activity. `--run RUN` selects an ID explicitly. Implicit selection
 never crosses project boundaries and never substitutes an older active run.
-`list` shows attachment and activity for 20 runs by default; use `--limit N` or
-`--all` to change that bound.
+`list` shows up to 20 attached runs by default. Use `--limit N` to change that
+bound or `--all` to include every attached and historical incompatible run.
+
+`stats` compares source tokens processed by LeanCTX with tokens returned to the
+model for the selected physical run only. It does not report aggregate project
+totals, provider input, prompt-cache usage, reasoning, or model output. A dash
+means the called tools did not emit source-compression counters.
 
 `--port PORT` requests a specific loopback port. When omitted, Orichum selects
 the first available port starting at `3333`. `--open` accepts `browser`,

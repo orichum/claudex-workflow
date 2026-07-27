@@ -15,7 +15,7 @@ import sys
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
 routing_decision_start = source.index("routing_decision=upgraded")
 routing_decision_end = source.index(
-    "\nfi\n\nmempalace_recorded_version", routing_decision_start
+    "\n\npreflight_claudex_proxy()", routing_decision_start
 )
 routing_decision = source[routing_decision_start:routing_decision_end]
 early_runtime_samples = (
@@ -123,131 +123,6 @@ snapshot_path_matches \
   "$install_state_file" "$install_state_snapshot" install-state
 [[ "$(<"$install_state_file")" == '{"prior":true}' ]]
 
-private_data="$fixture/private-data"
-private_tools="$private_data/tools/uv"
-private_bin="$private_data/tools/bin"
-private_snapshot="$fixture/private-snapshot"
-install -d -m 0700 \
-  "$private_tools/mempalace" "$private_bin"
-printf 'mempalace-old\n' >"$private_tools/mempalace/version"
-printf 'mempalace-bin-old\n' >"$private_bin/mempalace-mcp"
-
-snapshot_private_tool_state \
-  "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
-inject_failure_after_tool_upgrade() {
-  printf 'mempalace-new\n' >"$private_tools/mempalace/version"
-  printf 'mempalace-bin-new\n' >"$private_bin/mempalace-mcp"
-  printf 'new-entrypoint\n' >"$private_bin/mempalace-future"
-  return 72
-}
-if inject_failure_after_tool_upgrade; then
-  printf 'tool-upgrade failure injection unexpectedly succeeded\n' >&2
-  exit 1
-fi
-restore_private_tool_state \
-  "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
-private_tool_state_matches \
-  "$private_data" "$private_tools" "$private_bin" "$private_snapshot"
-[[ "$(<"$private_tools/mempalace/version")" == mempalace-old ]]
-[[ "$(<"$private_bin/mempalace-mcp")" == mempalace-bin-old ]]
-[[ ! -e "$private_bin/mempalace-future" ]]
-
-unsafe_preflight_data="$fixture/unsafe-preflight-data"
-unsafe_preflight_external="$fixture/unsafe-preflight-external"
-install -d -m 0700 \
-  "$unsafe_preflight_data" "$unsafe_preflight_external"
-printf 'external-unchanged\n' >"$unsafe_preflight_external/owner-marker"
-ln -s "$unsafe_preflight_external" "$unsafe_preflight_data/tools"
-declare -F preflight_private_tool_layout >/dev/null
-if preflight_private_tool_layout "$unsafe_preflight_data" \
-    2>"$fixture/unsafe-preflight.stderr"; then
-  printf 'symlinked private tools root passed early preflight\n' >&2
-  exit 1
-fi
-rg -Fq 'private tools root is unsafe' "$fixture/unsafe-preflight.stderr"
-[[ "$(<"$unsafe_preflight_external/owner-marker")" == external-unchanged ]]
-[[ ! -e "$unsafe_preflight_external/bin" ]]
-[[ ! -e "$unsafe_preflight_external/uv" ]]
-
-unsafe_snapshot_data="$fixture/unsafe-snapshot-data"
-unsafe_snapshot_external="$fixture/unsafe-snapshot-external"
-unsafe_snapshot_before="$fixture/unsafe-snapshot-before"
-install -d -m 0700 \
-  "$unsafe_snapshot_data" \
-  "$unsafe_snapshot_external/uv/mempalace" \
-  "$unsafe_snapshot_data/tools/bin"
-printf 'external-mempalace\n' \
-  >"$unsafe_snapshot_external/uv/mempalace/version"
-printf 'external-bin\n' >"$unsafe_snapshot_data/tools/bin/mempalace-mcp"
-cp -pPR "$unsafe_snapshot_external/uv" "$unsafe_snapshot_before"
-ln -s "$unsafe_snapshot_external/uv" "$unsafe_snapshot_data/tools/uv"
-set +e
-snapshot_private_tool_state \
-  "$unsafe_snapshot_data" \
-  "$unsafe_snapshot_data/tools/uv" \
-  "$unsafe_snapshot_data/tools/bin" \
-  "$fixture/unsafe-snapshot" \
-  2>"$fixture/unsafe-snapshot.stderr"
-unsafe_snapshot_rc=$?
-set -e
-unsafe_layout_rejected=true
-if [[ "$unsafe_snapshot_rc" -eq 0 ]]; then
-  printf 'symlinked private tool snapshot layout was accepted\n' >&2
-  unsafe_layout_rejected=false
-fi
-rg -Fq 'refusing unsafe private tool snapshot layout' \
-  "$fixture/unsafe-snapshot.stderr"
-if ! diff -qr -- \
-    "$unsafe_snapshot_before" "$unsafe_snapshot_external/uv" \
-    >/dev/null; then
-  printf 'private tool snapshot changed an external target\n' >&2
-  unsafe_layout_rejected=false
-fi
-
-unsafe_restore_data="$fixture/unsafe-restore-data"
-unsafe_restore_tools="$unsafe_restore_data/tools/uv"
-unsafe_restore_bin="$unsafe_restore_data/tools/bin"
-unsafe_restore_snapshot="$fixture/unsafe-restore-snapshot"
-unsafe_restore_external="$fixture/unsafe-restore-external"
-unsafe_restore_before="$fixture/unsafe-restore-before"
-install -d -m 0700 \
-  "$unsafe_restore_tools/mempalace" \
-  "$unsafe_restore_bin"
-printf 'owned-mempalace\n' >"$unsafe_restore_tools/mempalace/version"
-printf 'owned-bin\n' >"$unsafe_restore_bin/mempalace-mcp"
-snapshot_private_tool_state \
-  "$unsafe_restore_data" "$unsafe_restore_tools" "$unsafe_restore_bin" \
-  "$unsafe_restore_snapshot"
-mv "$unsafe_restore_data/tools/uv" "$unsafe_restore_data/tools/uv-owned"
-install -d -m 0700 \
-  "$unsafe_restore_external/uv/mempalace"
-printf 'external-mempalace\n' \
-  >"$unsafe_restore_external/uv/mempalace/version"
-cp -pPR "$unsafe_restore_external/uv" "$unsafe_restore_before"
-ln -s "$unsafe_restore_external/uv" "$unsafe_restore_data/tools/uv"
-set +e
-restore_private_tool_state \
-  "$unsafe_restore_data" \
-  "$unsafe_restore_data/tools/uv" \
-  "$unsafe_restore_data/tools/bin" \
-  "$unsafe_restore_snapshot" \
-  2>"$fixture/unsafe-restore.stderr"
-unsafe_restore_rc=$?
-set -e
-if [[ "$unsafe_restore_rc" -eq 0 ]]; then
-  printf 'symlinked private tool restore layout was accepted\n' >&2
-  unsafe_layout_rejected=false
-fi
-rg -Fq 'refusing unsafe private tool restore layout' \
-  "$fixture/unsafe-restore.stderr"
-if ! diff -qr -- \
-    "$unsafe_restore_before" "$unsafe_restore_external/uv" \
-    >/dev/null; then
-  printf 'private tool restore changed an external target\n' >&2
-  unsafe_layout_rejected=false
-fi
-[[ "$unsafe_layout_rejected" == true ]]
-
 python3 - "$fixture/occupied.port" <<'PY' &
 import socket
 import sys
@@ -295,8 +170,6 @@ fi
 rg -Fq 'snapshot_path "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
 rg -Fq 'orichum_launcher_mutated=true' "$ROOT/install.sh"
 rg -Fq 'restore_snapshot "$USER_BIN_DIR/orichum"' "$ROOT/install.sh"
-rg -Fq 'snapshot_private_tool_state' "$ROOT/install.sh"
-rg -Fq 'restore_private_tool_state' "$ROOT/install.sh"
 rg -Fq 'remove_orichum_python_generation' "$ROOT/install.sh"
 rg -Fq 'from integrations.common.install_control_plane import activate' \
   "$ROOT/install.sh"
@@ -358,7 +231,6 @@ restore_installed_config = rollback.index(
     "rollback_installed_control_plane"
 )
 restore_python = rollback.index("rollback_python_activation")
-restore_private_tools = rollback.index("restore_private_tool_state")
 restore_cliproxy = rollback.index(
     'restore_snapshot "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
 )
@@ -371,25 +243,29 @@ if not (
     stop_route
     < restore_installed_config
     < restore_python
-    < restore_private_tools
     < restore_cliproxy
     < restore_endpoint
     < restore_route
     < restore_install_state
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
+install_state_rollback = rollback[
+    rollback.index('if [[ "${install_state_transaction_active:-false}"'):
+]
+if "prior_install_state_verified" in install_state_rollback:
+    raise SystemExit(
+        "install-state rollback still depends on manifest verification"
+    )
 
 fast_attempt = source.index("if attempt_verified_fast_install")
 source_validation = source.index("source Orichum control plane is invalid")
 first_runtime_snapshot = source.index(
     'snapshot_path "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api"'
 )
-private_tool_snapshot = source.index("snapshot_private_tool_state")
 if not (
     source_validation
     < fast_attempt
     < first_runtime_snapshot
-    < private_tool_snapshot
 ):
     raise SystemExit(
         "verified fast path validation or snapshot ordering is unsafe"
@@ -518,28 +394,22 @@ if not (
         "rollback"
     )
 
-snapshot_private_tools = source.index("snapshot_private_tool_state")
-private_tool_exports = source.index("export UV_TOOL_DIR UV_TOOL_BIN_DIR")
 python_transaction = source.index("python_transaction_active=true")
 provision_python = source.index("install_or_reuse_orichum_python")
 snapshot_install_state = source.index(
-    'snapshot_path "$install_state_path"'
+    'snapshot "$install_state_path" "$snapshot_dir" install-state'
 )
-upgrade_mempalace = source.index("uv tool install --upgrade mempalace")
+read_install_state = source.index(
+    'read "$install_state_path" "$install_state_platform"'
+)
 if not (
     snapshot_install_state
+    < read_install_state
     < python_transaction
     < provision_python
-    < snapshot_private_tools
-    and
-    private_tool_exports
-    < upgrade_mempalace
-    and
-    snapshot_private_tools
-    < upgrade_mempalace
 ):
     raise SystemExit(
-        "private tool snapshot does not protect dependency upgrades"
+        "installer state snapshot does not protect Python provisioning"
     )
 PY
 

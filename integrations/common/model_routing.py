@@ -23,6 +23,23 @@ ROLES: tuple[str, ...] = (
 _STACK_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}$")
 _AGENT_FILES = {role: f"agents/{role}.md" for role in ROLES}
+_AGENT_CONTEXT_TOOLS = (
+    "mcp__leanctx__ctx_read",
+    "mcp__leanctx__ctx_search",
+    "mcp__leanctx__ctx_tree",
+    "mcp__leanctx__ctx_expand",
+    "mcp__leanctx__ctx_graph",
+    "mcp__leanctx__ctx_impact",
+    "mcp__leanctx__ctx_callgraph",
+)
+_IMPLEMENTATION_TOOLS = (
+    *_AGENT_CONTEXT_TOOLS,
+    "mcp__leanctx__ctx_patch",
+    "mcp__leanctx__ctx_shell",
+    "Edit",
+    "Write",
+    "Bash",
+)
 
 
 class RoutingError(RuntimeError):
@@ -500,7 +517,45 @@ def _rewrite_agent_model(text: str, model: str, role: str) -> str:
         raise RoutingError(f"agent {role} has invalid frontmatter")
     newline = "\n" if lines[indexes[0]].endswith("\n") else ""
     lines[indexes[0]] = f"model: {model}{newline}"
-    return "".join(lines)
+    rewritten = "".join(lines)
+    validate_agent_contract(rewritten, role, model)
+    return rewritten
+
+
+def validate_agent_contract(text: str, role: str, model: str) -> None:
+    """Require one deterministic LeanCTX surface for every runtime agent."""
+    if role not in ROLES:
+        raise RoutingError(f"agent role {role!r} is invalid")
+    lines = text.splitlines()
+    try:
+        frontmatter_end = lines.index("---", 1)
+    except ValueError as error:
+        raise RoutingError(f"agent {role} has invalid frontmatter") from error
+    frontmatter = lines[1:frontmatter_end]
+    expected_tools = (
+        _IMPLEMENTATION_TOOLS
+        if role == "implementation-worker"
+        else _AGENT_CONTEXT_TOOLS
+    )
+    expected = {
+        "name": f"name: {role}",
+        "model": f"model: {model}",
+        "mcpServers": "mcpServers: [leanctx]",
+        "tools": "tools: " + ", ".join(expected_tools),
+    }
+    sensitive: dict[str, list[str]] = {name: [] for name in expected}
+    for line in frontmatter:
+        match = re.match(r"^\s*(name|model|mcpServers|tools)\s*:", line)
+        if match is not None:
+            sensitive[match.group(1)].append(line)
+    if (
+        not lines
+        or lines[0] != "---"
+        or any(sensitive[name] != [value] for name, value in expected.items())
+    ):
+        raise RoutingError(
+            f"agent {role} does not match the LeanCTX tool contract"
+        )
 
 
 def _same_object(first: os.stat_result, second: os.stat_result) -> bool:

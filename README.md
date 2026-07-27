@@ -42,19 +42,22 @@ cd orichum
 ./install.sh
 ```
 
-The first install performs the complete setup and health check. Later
-`./install.sh` runs quickly when everything is already verified and healthy.
-Use `./install.sh --upgrade` when you want Orichum to check upstream releases,
-upgrade managed tools, run their complete probes, and finish with the full
-doctor check. See [Installation and upgrades](docs/installation.md) for
-details, locations, port handling, and uninstall options.
+The first install performs the complete setup. When a provider route is
+available, it also finishes with the full health check. Without one, it
+completes in `pending-provider-login` state and prints the next login command.
+Later `./install.sh` runs quickly when everything is already verified and
+healthy. Use `./install.sh --upgrade` when you want Orichum to check upstream
+releases, upgrade managed tools, and run their complete probes; the full doctor
+check follows once a provider route is available. See
+[Installation and upgrades](docs/installation.md) for details, locations, port
+handling, and uninstall options.
 
 Check the installed Orichum release with `orichum --version`. See the
 [Changelog](CHANGELOG.md) for release history and current release-candidate
 limitations.
 
 To remove the Orichum runtime while keeping accounts, sessions, project
-configuration, and Mempalace palaces for a later reinstall:
+configuration, and LeanCTX project knowledge for a later reinstall:
 
 ```bash
 ./install.sh --uninstall
@@ -122,10 +125,9 @@ pool:
 orichum context add ~/projects --pool shared
 ```
 
-This is a one-time foreground setup. Orichum discovers repositories, prepares
-durable Mempalace project memory, and saves the context only after population
-succeeds. Live source and relationship context is built lazily by LeanCTX
-inside each session.
+This saves the directory mapping immediately. LeanCTX builds source,
+relationship, and project-knowledge context only when the session needs it;
+there is no mining or population step.
 
 Docker MCP Toolkit is optional. Add a profile only when the project needs one:
 
@@ -193,12 +195,13 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
   [Model stacks](docs/model-stacks.md).
 - **Resumes and family changes:** resume a frozen session or fork it with a
   bounded handoff onto another stack. See [Sessions](docs/sessions.md).
-- **Memory and code intelligence:** Mempalace recalls durable decisions;
-  LeanCTX reads live source and answers structural or impact questions. See
+- **Memory and code intelligence:** LeanCTX recalls durable decisions, reads
+  live source, and answers structural or impact questions. See
   [Memory and code graph](docs/memory-and-code-graph.md).
 - **Live source context:** LeanCTX gives the controller compact reads, search,
-  trees, lossless expansion, and approved text patches while preserving
-  native-tool fallback. See [LeanCTX](docs/leanctx.md).
+  trees, lossless expansion, and approved text patches. Specialists reuse the
+  same jailed context engine instead of falling back to raw repository reads.
+  See [LeanCTX](docs/leanctx.md).
 - **Plugins:** declare and synchronize optional Claude Code plugins through
   Orichum. See [Plugins](docs/plugins.md).
 - **MCP_DOCKER:** attach a project-specific Docker MCP Toolkit profile for Jira
@@ -214,7 +217,8 @@ flowchart LR
     P["Project directory"] --> O["Orichum"]
     O --> S["Isolated Claude Code session"]
     S --> M["Selected account and model"]
-    O -. "loads only relevant context" .-> T["LeanCTX · Mempalace · MCP_DOCKER"]
+    O --> L["LeanCTX"]
+    O -. "only when the project declares a profile" .-> D["MCP_DOCKER"]
 ```
 
 The directory where you run `orichum` selects the project configuration.
@@ -246,7 +250,7 @@ orichum leanctx stats
 
 The [Troubleshooting guide](docs/troubleshooting.md) covers unavailable routes,
 connection failures, GitHub identity, missing MCPs, LeanCTX activity,
-population delays, and installer port conflicts.
+historical session contracts, and installer port conflicts.
 
 ## Documentation
 
@@ -256,7 +260,7 @@ population delays, and installer port conflicts.
 | [Providers and accounts](docs/providers-and-accounts.md) | Login, credentials, account names, pools, and priorities |
 | [Multi-account routing](docs/multi-account-usage.md) | Multiple accounts from the same or different providers |
 | [Model stacks](docs/model-stacks.md) | Interactive model selection, roles, and provider locks |
-| [Project contexts](docs/project-contexts.md) | Directory mappings, identities, Docker profiles, and population |
+| [Project contexts](docs/project-contexts.md) | Directory mappings, identities, account pools, and Docker profiles |
 | [Sessions](docs/sessions.md) | Start, inspect, resume, fork, and concurrent sessions |
 | [Status line](docs/status-line.md) | Active model, account, failover state, context, and quota metrics |
 | [Routing and failover](docs/routing-and-failover.md) | Route selection, cooldowns, rollover, and handoff boundaries |
@@ -264,7 +268,7 @@ population delays, and installer port conflicts.
 | [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
 | [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
 | [LeanCTX](docs/leanctx.md) | Compact source context, fallbacks, savings statistics, and live monitoring |
-| [Memory and code intelligence](docs/memory-and-code-graph.md) | How LeanCTX live context and Mempalace durable memory work together |
+| [Memory and code intelligence](docs/memory-and-code-graph.md) | How LeanCTX combines live code context with durable project knowledge |
 | [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
 | [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
 | [Troubleshooting](docs/troubleshooting.md) | Symptoms, diagnostics, and recovery |
@@ -287,8 +291,6 @@ population delays, and installer port conflicts.
   provider authentication and model access.
 - [LeanCTX](https://github.com/yvgude/lean-ctx) — provides compact live file,
   tree, search, graph, callgraph, and impact context.
-- [Mempalace](https://github.com/MemPalace/mempalace) — provides durable
-  project memory.
 - [Docker MCP Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
   — provides project-specific external tools through Orichum's `MCP_DOCKER`
   integration.
@@ -306,6 +308,10 @@ content it integrates.
 
 ## References
 
-- [Claude Code LLM gateway configuration](https://docs.anthropic.com/en/docs/claude-code/llm-gateway)
+- [Claude Code LLM gateway configuration](https://code.claude.com/docs/en/llm-gateway)
+- [Claude Code status-line configuration](https://code.claude.com/docs/en/statusline)
+- [LeanCTX documentation](https://leanctx.com/docs/)
+- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+- [Claudex](https://github.com/StringKe/claudex)
 - [Docker MCP Toolkit documentation](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
 - [Orichum architecture](docs/architecture.md)

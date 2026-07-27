@@ -8,13 +8,12 @@ flowchart LR
     C["Focused configuration"] --> O
     O --> S["Private session package"]
     S --> CC["Claude Code"]
-    S --> L["Session-local LeanCTX"]
-    S --> M["Bound Mempalace wing"]
+    S --> L["LeanCTX context and memory"]
     S --> D["Optional MCP_DOCKER profile"]
 ```
 
-Orichum resolves the launch directory, selects the configured stack and
-account, and materializes one private physical session. The session contains
+Orichum resolves the launch directory, selects the configured stack and named
+account, then materializes one private physical session. The session contains
 immutable route state, a strict MCP file, the controller plugin, and a
 project-jailed LeanCTX configuration.
 
@@ -23,39 +22,36 @@ project-jailed LeanCTX configuration.
 ```mermaid
 flowchart LR
     C["Claude Code controller"] --> L["LeanCTX"]
-    L --> R["Live reads, search, tree, graph, impact, callgraph"]
-    C --> M["Mempalace"]
-    M --> H["Durable project history and decisions"]
-    C --> D["MCP_DOCKER"]
+    C --> A["Bounded specialists"]
+    A --> L
+    L --> S["Live read, search, tree, graph, impact, callgraph"]
+    C --> K["LeanCTX overview and durable knowledge"]
+    C --> D["Optional MCP_DOCKER"]
     D --> X["Project-specific live services"]
 ```
 
-LeanCTX owns live code intelligence. Each physical session receives a private
-headless MCP pinned to the active repository, or to the verified configured
-parent when launched above several repositories. Its fixed surface is:
+LeanCTX is the only code-context and durable-memory engine. Source indexes and
+graphs are built lazily. Shared project data survives sessions, while each
+physical session has private configuration, state, event, and cache
+directories. No generated graph is written into a repository and no global
+LeanCTX hook or daemon is installed.
 
-`ctx_read`, `ctx_search`, `ctx_tree`, `ctx_expand`, `ctx_graph`, `ctx_impact`,
-`ctx_callgraph`, `ctx_patch`, and `ctx_shell`.
+Specialists reuse the same session MCP for bounded repository context, while
+the controller alone calls overview and durable knowledge. This keeps worker
+reads compressed without duplicating Orichum's orchestration or allowing
+concurrent memory writes.
 
-The graph and index are built lazily when a tool needs them. There is no
-repository-local generated graph, global hook, shared graph daemon, or startup
-indexing pass. Concurrent sessions keep independent LeanCTX state.
-
-Mempalace remains the durable-memory layer. It is populated explicitly when a
-project context is added or refreshed, and recalled only when prior decisions
-or conventions matter. MCP_DOCKER is attached only when the resolved project
-declares a profile.
+MCP_DOCKER is attached only when the resolved project declares a profile.
 
 ## Launch sequence
 
 1. Resolve the longest matching project context.
-2. Validate configuration and project resources.
+2. Validate configuration and the optional Docker profile/GitHub identity.
 3. Discover live provider/model routes and select eligible accounts.
 4. Freeze the logical session route and integrity digests.
 5. Materialize the controller plugin, strict MCP file, and private LeanCTX
    contract.
-6. Bind the verified project, Docker profile, GitHub account, and Mempalace
-   wing in the controller policy.
+6. Bind the verified project and optional external-tool identities.
 7. Start and health-check the session's Claudex translator.
 8. Launch Claude Code.
 
@@ -76,33 +72,36 @@ flowchart LR
 ```
 
 The route proxy selects the session's frozen primary route or one compatible
-fallback. For verified request protocols, Orichum keeps the nine LeanCTX tools
-resident and defers unrelated optional tool schemas. The model therefore sees
-one deterministic code-context surface instead of choosing between overlapping
-optimizers.
+fallback. On verified request protocols, Orichum keeps the deterministic
+LeanCTX surface resident and defers unrelated optional schemas.
 
 ## Deterministic tool routing
 
 | Need | Tool |
 |---|---|
+| Task orientation and prior project context | `ctx_overview` |
+| Durable decisions, conventions, outcomes, or gotchas | `ctx_knowledge` |
 | Read, search, tree, or exact expansion | LeanCTX |
 | Relationships, symbols, call paths, or change impact | LeanCTX graph tools |
 | Anchored supported text edit | `ctx_patch` |
-| Observational shell output | `ctx_shell` |
-| Git, package, service, deployment, or other state change | Native `Bash` |
+| Noisy observation: Git status/diff/log, tests, builds, plans, or container/cluster inspection | `ctx_shell` |
+| Exact observational follow-up | `ctx_shell(raw=true)` |
+| Commit/push/branch, install, service, deploy/apply, auth, or interactive/streaming command | Native `Bash` |
 | Unsupported or binary file operation | Native file tools |
-| Durable history or prior decisions | Mempalace |
 | Project live services | MCP_DOCKER |
 
-Native tools remain a fallback, not a second optimizer. `ctx_patch` and
-`ctx_shell` retain Claude Code's normal approval behavior.
+The controller does not ask the model to choose between equivalent shell
+paths: `ctx_shell` is the token-saving observation lane and native `Bash` is
+the mutation and process-control lane. It does not replay a command through
+both unless one bounded raw follow-up is needed. `ctx_patch`, `ctx_shell`, and
+external-service mutations retain Claude Code's normal approval behavior.
 
 ## Boundaries
 
 - Network services listen on loopback only.
 - Session files and account registries are private and digest-bound.
-- LeanCTX cache, index, graph, and configuration are private to one physical
-  session.
+- LeanCTX shared data contains repo-aware graph and knowledge state; session
+  configuration, events, and cache remain isolated.
 - The controller is the sole writer; specialist agents follow the configured
   bounded policy.
 - The route proxy performs at most one safe pre-output fallback.

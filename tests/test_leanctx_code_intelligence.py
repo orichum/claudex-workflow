@@ -55,6 +55,8 @@ class LeanctxCodeIntelligenceTests(unittest.TestCase):
                 "ctx_graph",
                 "ctx_impact",
                 "ctx_callgraph",
+                "ctx_knowledge",
+                "ctx_overview",
                 "ctx_patch",
                 "ctx_shell",
             ),
@@ -64,6 +66,8 @@ class LeanctxCodeIntelligenceTests(unittest.TestCase):
             "ctx_graph",
             "ctx_impact",
             "ctx_callgraph",
+            "ctx_knowledge",
+            "ctx_overview",
         ):
             self.assertIn(tool, config)
         self.assertIn('disabled_tools = ["ctx_call"', config)

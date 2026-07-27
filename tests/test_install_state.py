@@ -17,6 +17,7 @@ from integrations.common.install_state import (
     fingerprint_paths,
     load_manifest,
     main,
+    snapshot_unvalidated_state,
     write_manifest,
 )
 
@@ -79,6 +80,62 @@ class InstallStateTests(unittest.TestCase):
 
         self.state.chmod(0o644)
         self.assertIsNone(load_manifest(self.state, "darwin:aarch64"))
+
+    def test_snapshot_preserves_bounded_unvalidated_file(self) -> None:
+        snapshot = self.root / "snapshot"
+        snapshot.mkdir(mode=0o700)
+        self._write_raw("not-json\n", mode=0o640)
+
+        snapshot_unvalidated_state(self.state, snapshot, "install-state")
+
+        data = snapshot / "install-state.data"
+        self.assertEqual(data.read_text(encoding="utf-8"), "not-json\n")
+        self.assertEqual(stat.S_IMODE(data.stat().st_mode), 0o640)
+        self.assertTrue((snapshot / "install-state.present").is_file())
+
+    def test_snapshot_accepts_short_reads(self) -> None:
+        snapshot = self.root / "snapshot"
+        snapshot.mkdir(mode=0o700)
+        self._write_raw("unvalidated-state\n")
+        real_read = install_state.os.read
+
+        with mock.patch.object(
+            install_state.os,
+            "read",
+            side_effect=lambda descriptor, size: real_read(
+                descriptor,
+                min(size, 3),
+            ),
+        ):
+            snapshot_unvalidated_state(
+                self.state,
+                snapshot,
+                "install-state",
+            )
+
+        self.assertEqual(
+            (snapshot / "install-state.data").read_text(encoding="utf-8"),
+            "unvalidated-state\n",
+        )
+
+    def test_snapshot_rejects_unbounded_or_nonregular_state(self) -> None:
+        snapshot = self.root / "snapshot"
+        snapshot.mkdir(mode=0o700)
+        self._write_raw("x" * (install_state.MAX_STATE_BYTES + 1))
+        with self.assertRaisesRegex(InstallStateError, "safely"):
+            snapshot_unvalidated_state(
+                self.state,
+                snapshot,
+                "install-state",
+            )
+        self.state.unlink()
+        self.state.mkdir(mode=0o700)
+        with self.assertRaisesRegex(InstallStateError, "safely"):
+            snapshot_unvalidated_state(
+                self.state,
+                snapshot,
+                "install-state",
+            )
 
     def test_symlink_nonregular_and_foreign_owner_are_unsafe(self) -> None:
         external = self.root / "external.json"

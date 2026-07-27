@@ -205,11 +205,10 @@ config_root="$fixture/config"
 data_root="$fixture/data"
 project_root="$fixture/project"
 nested_project="$project_root/nested/repository"
-palace="$fixture/palace"
 install -d -m 0700 \
   "$config_root" "$data_root" "$data_root/auth" "$data_root/bin" \
   "$data_root/state" \
-  "$nested_project" "$palace"
+  "$nested_project"
 install -m 0755 /usr/bin/true "$data_root/bin/lean-ctx"
 git -C "$project_root" init -q
 for control_file in \
@@ -220,7 +219,7 @@ done
 
 python3 - \
   "$config_root/accounts.json" "$config_root/projects.json" \
-  "$project_root" "$palace" "$data_root/auth" <<'PY'
+  "$project_root" "$data_root/auth" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -229,8 +228,7 @@ import sys
 accounts_path = Path(sys.argv[1])
 projects_path = Path(sys.argv[2])
 project = str(Path(sys.argv[3]).resolve())
-palace = str(Path(sys.argv[4]).resolve())
-auth_dir = Path(sys.argv[5])
+auth_dir = Path(sys.argv[4])
 accounts = []
 for identifier, name, provider, prefix, priority in (
     (
@@ -306,8 +304,6 @@ projects_path.write_text(
                     "dockerProfile": None,
                     "modelStack": None,
                     "accountPools": ["shared"],
-                    "memoryPalace": palace,
-                    "memoryWing": "acceptance",
                 }
             ],
         },

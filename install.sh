@@ -260,9 +260,6 @@ if [[ "$platform" == darwin ]]; then
   done
 fi
 
-preflight_private_tool_layout "$WORKFLOW_DATA_ROOT" || \
-  workflow_die "private Orichum tools root is unsafe"
-
 install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT" "$WORKFLOW_DATA_ROOT/state" "$ORICHUM_CONFIG_ROOT"
 installer_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-install.XXXXXX")"
@@ -275,12 +272,14 @@ prior_install_state="$installer_temp/prior-install-state.json"
 prior_install_state_verified=false
 install_state_read_status=0
 python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
+  snapshot "$install_state_path" "$snapshot_dir" install-state || \
+  workflow_die "existing installer state could not be snapshotted safely"
+python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
   read "$install_state_path" "$install_state_platform" \
   >"$prior_install_state" 2>/dev/null || install_state_read_status=$?
 if [[ "$install_state_read_status" -eq 0 ]]; then
   chmod 0600 "$prior_install_state"
   prior_install_state_verified=true
-  snapshot_path "$install_state_path" "$snapshot_dir" install-state
 else
   rm -f -- "$prior_install_state"
 fi
@@ -338,15 +337,6 @@ controller_plugin_probe_sha="$(
   install_contract_fingerprint \
     bin/orichum-plugin controller/plugin/hooks/hooks.json
 )" || workflow_die "controller plugin probe fingerprint failed"
-mempalace_input_sha="$(
-  printf 'pypi:mempalace\n' | sha256_text
-)"
-mempalace_probe_sha="$(
-  printf '%s\n' \
-    "$(sha256_file "$WORKFLOW_ROOT/integrations/common/mcp_probe.py")" \
-    mempalace_get_taxonomy mempalace_search mempalace_checkpoint | \
-    sha256_text
-)"
 routing_probe_sha="$(
   install_contract_fingerprint \
     discover-models.sh integrations/common/model_routing.py \
@@ -385,20 +375,19 @@ attempt_verified_fast_install() (
      "$controller_plugin_decision" == reused ]] || return 1
   local python_entrypoint python_identity python_version python_runtime
   local python_artifact cliproxy_artifact claudex_artifact leanctx_artifact
-  local mempalace_identity mempalace_version mempalace_artifact
   local cliproxy_service route_service
   local cliproxy_port claudex_port route_port
   local route_runtime routing_input routing_artifact
   local management_key_file management_key
-  local binary_identity_file mempalace_identity_file
-  local binary_identity_pid mempalace_identity_pid
+  local binary_identity_file
+  local binary_identity_pid
   local config_verify_pid runtime_verify_pid verification_ready
 
   cleanup_fast_verifiers() {
     local verifier_pid
     for verifier_pid in \
         "${config_verify_pid:-}" "${runtime_verify_pid:-}" \
-        "${binary_identity_pid:-}" "${mempalace_identity_pid:-}"; do
+        "${binary_identity_pid:-}"; do
       [[ "$verifier_pid" =~ ^[1-9][0-9]*$ ]] || continue
       if kill -0 "$verifier_pid" 2>/dev/null; then
         kill "$verifier_pid" 2>/dev/null || true
@@ -429,11 +418,7 @@ attempt_verified_fast_install() (
   export ORICHUM_PYTHON ORICHUM_PYTHON_VALIDATED
   export ORICHUM_INSTALL_BOOTSTRAP=false
 
-  UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/tools/uv"
-  UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/tools/bin"
-  export UV_TOOL_DIR UV_TOOL_BIN_DIR
   binary_identity_file="$installer_temp/fast-binaries"
-  mempalace_identity_file="$installer_temp/fast-mempalace"
   (
     managed_executable_is_safe \
       "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" &&
@@ -447,23 +432,13 @@ attempt_verified_fast_install() (
       "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/lean-ctx")"
   ) >"$binary_identity_file" &
   binary_identity_pid=$!
-  private_uv_tool_identity \
-      "$WORKFLOW_DATA_ROOT" mempalace mempalace \
-      mempalace mempalace-mcp \
-      >"$mempalace_identity_file" 2>/dev/null &
-  mempalace_identity_pid=$!
   verification_ready=true
   wait "$binary_identity_pid" || verification_ready=false
   binary_identity_pid=
-  wait "$mempalace_identity_pid" || verification_ready=false
-  mempalace_identity_pid=
   [[ "$verification_ready" == true ]] || return 1
   IFS=$'\t' read -r \
     cliproxy_artifact claudex_artifact leanctx_artifact \
     <"$binary_identity_file" || return 1
-  mempalace_identity="$(<"$mempalace_identity_file")"
-  IFS=$'\t' read -r mempalace_version mempalace_artifact \
-    <<<"$mempalace_identity"
 
   if [[ "$platform" == darwin ]]; then
     cliproxy_service="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
@@ -543,10 +518,6 @@ attempt_verified_fast_install() (
     --arg leanctx_artifact "$leanctx_artifact" \
     --arg leanctx_input "$leanctx_input_sha" \
     --arg leanctx_probe "$leanctx_probe_sha" \
-    --arg mempalace_version "$mempalace_version" \
-    --arg mempalace_artifact "$mempalace_artifact" \
-    --arg mempalace_input "$mempalace_input_sha" \
-    --arg mempalace_probe "$mempalace_probe_sha" \
     --arg controller_input "$controller_plugin_input_sha" \
     --arg controller_probe "$controller_plugin_probe_sha" \
     --arg routing_artifact "$routing_artifact" \
@@ -555,7 +526,7 @@ attempt_verified_fast_install() (
       .components as $c |
       ($c | keys) == [
         "claudex", "cliproxy", "controllerPlugin",
-        "leanctx", "mempalace", "python", "routing"
+        "leanctx", "python", "routing"
       ] and
       $c.python == {
         version: $python_version,
@@ -579,13 +550,6 @@ attempt_verified_fast_install() (
       $c.leanctx.artifactSha256 == $leanctx_artifact and
       $c.leanctx.inputSha256 == $leanctx_input and
       $c.leanctx.probeSha256 == $leanctx_probe and
-      $c.mempalace == {
-        version: $mempalace_version,
-        sourceIdentity: ("pypi:mempalace@" + $mempalace_version),
-        artifactSha256: $mempalace_artifact,
-        inputSha256: $mempalace_input,
-        probeSha256: $mempalace_probe
-      } and
       $c.controllerPlugin == {
         version: "1",
         sourceIdentity: "orichum:controller-plugin",
@@ -610,13 +574,12 @@ attempt_verified_fast_install() (
   [[ "$verification_ready" == true ]] || return 1
 
   print_component_status_table \
-    reused reused reused reused reused reused reused
+    reused reused reused reused reused reused
   printf 'Verified Orichum installation is current for %s.\n' "$platform"
   print_install_summary \
     "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$USER_BIN_DIR" \
     "$WORKFLOW_DATA_ROOT/bin/claudex" \
     "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" \
-    "$UV_TOOL_BIN_DIR/mempalace-mcp" \
     "$cliproxy_service" "$cliproxy_port" reused \
     "$route_service" "$claudex_port" "$route_port" reused \
     "$python_entrypoint" "$python_version" "$python_runtime" reused \
@@ -627,15 +590,6 @@ attempt_verified_fast_install() (
 if attempt_verified_fast_install; then
   exit 0
 fi
-
-while IFS= read -r configured_palace; do
-  case "$configured_palace" in
-    "~/"*) resolved_palace="$HOME/${configured_palace#\~/}" ;;
-    /*) resolved_palace="$configured_palace" ;;
-    *) workflow_die "memoryPalace must be absolute or use ~/ syntax" ;;
-  esac
-  install -d -m 0700 "$resolved_palace"
-done < <(jq -er '.contexts[].memoryPalace' "$WORKFLOW_ROOT/config/projects.json")
 
 if [[ "$controller_plugin_decision" != reused ]]; then
   validation_config="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin.XXXXXX")"
@@ -657,8 +611,8 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/state" \
   "$WORKFLOW_DATA_ROOT/state/sessions" \
   "$WORKFLOW_DATA_ROOT/logs" \
-  "$WORKFLOW_DATA_ROOT/tools/bin" \
-  "$WORKFLOW_DATA_ROOT/tools/uv"
+  "$WORKFLOW_DATA_ROOT/leanctx" \
+  "$WORKFLOW_DATA_ROOT/leanctx/lean-ctx"
 chmod 0700 "$WORKFLOW_DATA_ROOT/bin"
 
 python_entrypoint="$(orichum_python_entrypoint "$WORKFLOW_DATA_ROOT")"
@@ -819,15 +773,11 @@ fi
 ln -sfn "$WORKFLOW_ROOT/bin/orichum-route-proxy" \
   "$WORKFLOW_DATA_ROOT/bin/orichum-route-proxy"
 
-UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/tools/uv"
-UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/tools/bin"
-export UV_TOOL_DIR UV_TOOL_BIN_DIR
-
 migrate_legacy_model_config "$WORKFLOW_DATA_ROOT"
 find "$WORKFLOW_DATA_ROOT/auth" -maxdepth 1 -type f -exec chmod 0600 {} \;
 chmod 0755 "$WORKFLOW_ROOT/controller/plugin/scripts/"*.sh
 
-export PATH="$UV_TOOL_BIN_DIR:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 
 cliproxy_recorded_version=
 cliproxy_recorded_source=
@@ -1431,16 +1381,11 @@ snapshot_path "$claudex_proxy_service_file" \
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
 snapshot_path "$USER_BIN_DIR/orichum" \
   "$snapshot_dir" orichum-launcher
-snapshot_private_tool_state \
-  "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
-  "$snapshot_dir/private-tools"
-
 cliproxy_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
 orichum_launcher_mutated=false
-private_tools_transaction_active=false
 leanctx_transaction_active=false
 install_state_transaction_active=false
 if [[ "$leanctx_binary_changed" == true ]]; then
@@ -1538,15 +1483,6 @@ rollback_install_transaction() {
     rollback_python_activation || rollback_ready=false
   fi
 
-  if [[ "${private_tools_transaction_active:-false}" == true ]]; then
-    restore_private_tool_state \
-      "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
-      "$snapshot_dir/private-tools" || rollback_ready=false
-    private_tool_state_matches \
-      "$WORKFLOW_DATA_ROOT" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
-      "$snapshot_dir/private-tools" || rollback_ready=false
-  fi
-
   if [[ "${leanctx_transaction_active:-false}" == true ]]; then
     restore_snapshot "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
       "$snapshot_dir" leanctx-binary || rollback_ready=false
@@ -1619,8 +1555,7 @@ rollback_install_transaction() {
   fi
 
   if [[ "${install_state_transaction_active:-false}" == true ]]; then
-    if [[ "$rollback_ready" == true && \
-          "$prior_install_state_verified" == true ]]; then
+    if [[ "$rollback_ready" == true ]]; then
       restore_snapshot "$install_state_path" \
         "$snapshot_dir" install-state || rollback_ready=false
       snapshot_path_matches "$install_state_path" \
@@ -1716,71 +1651,6 @@ if [[ "$prior_install_state_verified" == true ]]; then
       1 orichum:routing "$routing_current_artifact" \
       "$routing_input_sha" "$routing_probe_sha"
   )"
-fi
-
-mempalace_recorded_version=
-mempalace_recorded_artifact="$empty_artifact_sha"
-mempalace_current_version=
-mempalace_current_artifact="$empty_artifact_sha"
-mempalace_decision=upgraded
-if [[ "$prior_install_state_verified" == true ]]; then
-  mempalace_recorded_version="$(
-    install_state_component_field \
-      "$prior_install_state" mempalace version 2>/dev/null || true
-  )"
-  mempalace_recorded_artifact="$(
-    install_state_component_field \
-      "$prior_install_state" mempalace artifactSha256 2>/dev/null || \
-      printf '%s' "$empty_artifact_sha"
-  )"
-  if mempalace_identity="$(
-      private_uv_tool_identity \
-        "$WORKFLOW_DATA_ROOT" mempalace mempalace \
-        mempalace mempalace-mcp 2>/dev/null
-    )"; then
-    IFS=$'\t' read -r \
-      mempalace_current_version mempalace_current_artifact \
-      <<<"$mempalace_identity"
-  fi
-  mempalace_decision="$(
-    decide_install_component \
-      "$prior_install_state" mempalace \
-      "$mempalace_recorded_version" \
-      "pypi:mempalace@$mempalace_recorded_version" \
-      "$mempalace_current_artifact" \
-      "$mempalace_input_sha" "$mempalace_probe_sha"
-  )"
-fi
-
-if [[ "$mempalace_decision" == upgraded ]]; then
-  private_tools_transaction_active=true
-  uv tool install --upgrade mempalace
-elif [[ "$mempalace_decision" == repaired && \
-        ( "$mempalace_current_version" != "$mempalace_recorded_version" || \
-          "$mempalace_current_artifact" != \
-            "$mempalace_recorded_artifact" ) ]]; then
-  private_tools_transaction_active=true
-  uv tool install --force "mempalace==$mempalace_recorded_version"
-fi
-mempalace_identity="$(
-  private_uv_tool_identity \
-    "$WORKFLOW_DATA_ROOT" mempalace mempalace \
-    mempalace mempalace-mcp
-)" || workflow_die "Mempalace private installation is unsafe"
-IFS=$'\t' read -r mempalace_version mempalace_artifact \
-  <<<"$mempalace_identity"
-mempalace_mcp="$UV_TOOL_BIN_DIR/mempalace-mcp"
-if [[ "$mempalace_decision" != reused ]]; then
-  install -d -m 0700 "$installer_temp/mempalace-probe"
-  if ! PYTHONDONTWRITEBYTECODE=1 "$ORICHUM_PYTHON" -B \
-    "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
-    --timeout 30 \
-    --require-tool mempalace_get_taxonomy \
-    --require-tool mempalace_search \
-    --require-tool mempalace_checkpoint \
-    -- "$mempalace_mcp" --palace "$installer_temp/mempalace-probe"; then
-    workflow_die "Mempalace MCP failed protocol readiness checks"
-  fi
 fi
 
 preflight_claudex_proxy() (
@@ -2192,10 +2062,6 @@ jq -n \
     "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/lean-ctx")" \
   --arg leanctx_input "$leanctx_input_sha" \
   --arg leanctx_probe "$leanctx_probe_sha" \
-  --arg mempalace_version "$mempalace_version" \
-  --arg mempalace_artifact "$mempalace_artifact" \
-  --arg mempalace_input "$mempalace_input_sha" \
-  --arg mempalace_probe "$mempalace_probe_sha" \
   --arg controller_plugin_input "$controller_plugin_input_sha" \
   --arg controller_plugin_probe "$controller_plugin_probe_sha" \
   '$prior[0] + {
@@ -2228,13 +2094,6 @@ jq -n \
       artifactSha256: $leanctx_artifact,
       inputSha256: $leanctx_input,
       probeSha256: $leanctx_probe
-    },
-    mempalace: {
-      version: $mempalace_version,
-      sourceIdentity: ("pypi:mempalace@" + $mempalace_version),
-      artifactSha256: $mempalace_artifact,
-      inputSha256: $mempalace_input,
-      probeSha256: $mempalace_probe
     },
     controllerPlugin: {
       version: "1",
@@ -2283,8 +2142,7 @@ if [[ "$routing_action" == reused ]] && \
 fi
 print_component_status_table \
   "$python_decision" "$cliproxy_decision" "$claudex_decision" \
-  "$leanctx_decision" "$mempalace_decision" \
-  "$routing_action" "$controller_plugin_decision" || \
+  "$leanctx_decision" "$routing_action" "$controller_plugin_decision" || \
   workflow_die "component reconciliation status is invalid"
 printf 'Installed Orichum with Claudex %s, CLIProxyAPI %s, and LeanCTX %s for %s.\n' \
   "$claudex_version" "$cliproxy_version" "$leanctx_version" "$platform"
@@ -2292,7 +2150,7 @@ print_install_summary \
   "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$USER_BIN_DIR" \
   "$WORKFLOW_DATA_ROOT/bin/claudex" \
   "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" \
-  "$mempalace_mcp" "$service_file" \
+  "$service_file" \
   "$CLIPROXY_PORT" "$cliproxy_action" \
   "$claudex_proxy_service_file" "$CLAUDEX_PROXY_PORT" \
   "$ROUTE_PROXY_LISTEN_PORT" \
@@ -2325,7 +2183,6 @@ cliproxy_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=false
-private_tools_transaction_active=false
 leanctx_transaction_active=false
 python_transaction_active=false
 config_transaction_active=false
