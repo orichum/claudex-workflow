@@ -367,6 +367,115 @@ class InstallStateTests(unittest.TestCase):
         digest = stdout.getvalue().strip()
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
+    def test_cli_rejects_oversized_or_nonregular_candidate_boundedly(
+        self,
+    ) -> None:
+        oversized = self.root / "oversized.json"
+        oversized.write_bytes(b"x" * (install_state.MAX_STATE_BYTES + 1))
+        directory = self.root / "candidate-directory"
+        directory.mkdir()
+
+        for candidate in (oversized, directory):
+            with self.subTest(candidate=candidate):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "write",
+                            str(self.state),
+                            "darwin:aarch64",
+                            str(candidate),
+                        ]
+                    )
+                self.assertEqual(status, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue().count("\n"), 1)
+                self.assertLessEqual(len(stderr.getvalue()), 128)
+
+    def test_cli_candidate_read_is_bounded(self) -> None:
+        candidate = self.root / "components.json"
+        candidate.write_text(
+            json.dumps(self.components),
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("unbounded read"),
+        ), redirect_stderr(stderr):
+            status = main(
+                [
+                    "write",
+                    str(self.state),
+                    "darwin:aarch64",
+                    str(candidate),
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_invalid_arguments_do_not_echo_unbounded_input(self) -> None:
+        marker = "private-" + ("x" * 10000)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status = main(["unknown", marker])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertNotIn(marker, stderr.getvalue())
+        self.assertEqual(stderr.getvalue().count("\n"), 1)
+        self.assertLessEqual(len(stderr.getvalue()), 128)
+
+    def test_fingerprint_streams_large_regular_input(self) -> None:
+        source = self.root / "large"
+        source.write_bytes(b"0123456789abcdef" * (1024 * 256))
+        real_read = install_state.os.read
+        real_sha256 = install_state.hashlib.sha256
+        read_sizes: list[int] = []
+        update_sizes: list[int] = []
+
+        def observed_read(descriptor: int, size: int) -> bytes:
+            chunk = real_read(descriptor, size)
+            if chunk:
+                read_sizes.append(len(chunk))
+            return chunk
+
+        class ObservedDigest:
+            def __init__(self) -> None:
+                self._digest = real_sha256()
+
+            def update(self, payload: bytes) -> None:
+                update_sizes.append(len(payload))
+                if len(payload) > 65536:
+                    raise AssertionError("fingerprint buffered whole file")
+                self._digest.update(payload)
+
+            def hexdigest(self) -> str:
+                return self._digest.hexdigest()
+
+        with mock.patch.object(
+            install_state.os,
+            "read",
+            side_effect=observed_read,
+        ), mock.patch.object(
+            install_state.hashlib,
+            "sha256",
+            side_effect=ObservedDigest,
+        ):
+            digest = fingerprint_paths(self.root, [Path("large")])
+
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertGreater(len(read_sizes), 1)
+        self.assertLessEqual(max(read_sizes), 65536)
+        self.assertGreater(len(update_sizes), 1)
+        self.assertLessEqual(max(update_sizes), 65536)
+
 
 if __name__ == "__main__":
     unittest.main()

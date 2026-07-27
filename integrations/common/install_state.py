@@ -336,52 +336,56 @@ def write_manifest(
             pass
 
 
-def _fingerprint_file(
-    root: Path,
-    relative: Path,
-) -> tuple[bytes, int, int, bytes]:
-    candidate = root / relative
+def _read_candidate(path: Path) -> bytes:
+    candidate = Path(path).absolute()
     try:
         observed = os.lstat(candidate)
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
+    except OSError as error:
         raise InstallStateError(
-            f"fingerprint input is unavailable: {relative}"
+            "install state candidate is unavailable"
         ) from error
     if (
-        resolved != candidate
-        or stat.S_ISLNK(observed.st_mode)
+        stat.S_ISLNK(observed.st_mode)
         or not stat.S_ISREG(observed.st_mode)
         or observed.st_uid != os.getuid()
+        or observed.st_size > MAX_STATE_BYTES
     ):
-        raise InstallStateError(
-            f"fingerprint input is unsafe: {relative}"
-        )
+        raise InstallStateError("install state candidate is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(candidate, flags)
     except OSError as error:
         raise InstallStateError(
-            f"fingerprint input could not be opened: {relative}"
+            "install state candidate could not be opened"
         ) from error
     try:
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
             or opened.st_uid != os.getuid()
+            or opened.st_size > MAX_STATE_BYTES
             or (opened.st_dev, opened.st_ino)
             != (observed.st_dev, observed.st_ino)
         ):
             raise InstallStateError(
-                f"fingerprint input changed while opening: {relative}"
+                "install state candidate changed while opening"
             )
         chunks: list[bytes] = []
+        size = 0
         while True:
-            chunk = os.read(descriptor, 65536)
+            chunk = os.read(
+                descriptor,
+                min(65536, MAX_STATE_BYTES + 1 - size),
+            )
             if not chunk:
                 break
             chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_STATE_BYTES:
+                raise InstallStateError(
+                    "install state candidate is too large"
+                )
         after = os.fstat(descriptor)
         if (
             after.st_dev,
@@ -399,14 +403,79 @@ def _fingerprint_file(
             opened.st_mtime_ns,
         ):
             raise InstallStateError(
-                f"fingerprint input changed while reading: {relative}"
+                "install state candidate changed while reading"
             )
-        return (
-            relative.as_posix().encode("utf-8"),
-            stat.S_IMODE(opened.st_mode),
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _fingerprint_file(
+    root: Path,
+    relative: Path,
+    digest,
+) -> None:
+    candidate = root / relative
+    try:
+        observed = os.lstat(candidate)
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise InstallStateError("fingerprint input is unavailable") from error
+    if (
+        resolved != candidate
+        or stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != os.getuid()
+    ):
+        raise InstallStateError("fingerprint input is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as error:
+        raise InstallStateError(
+            "fingerprint input could not be opened"
+        ) from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or (opened.st_dev, opened.st_ino)
+            != (observed.st_dev, observed.st_ino)
+        ):
+            raise InstallStateError(
+                "fingerprint input changed while opening"
+            )
+        name = relative.as_posix().encode("utf-8")
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update(stat.S_IMODE(opened.st_mode).to_bytes(4, "big"))
+        digest.update(opened.st_size.to_bytes(8, "big"))
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_uid,
             opened.st_size,
-            b"".join(chunks),
-        )
+            opened.st_mtime_ns,
+        ):
+            raise InstallStateError(
+                "fingerprint input changed while reading"
+            )
     finally:
         os.close(descriptor)
 
@@ -444,20 +513,21 @@ def fingerprint_paths(
         raise InstallStateError("fingerprint requires at least one path")
     digest = hashlib.sha256()
     for relative in sorted(normalized, key=lambda item: item.as_posix()):
-        name, mode, size, payload = _fingerprint_file(
+        _fingerprint_file(
             physical_root,
             relative,
+            digest,
         )
-        digest.update(len(name).to_bytes(8, "big"))
-        digest.update(name)
-        digest.update(mode.to_bytes(4, "big"))
-        digest.update(size.to_bytes(8, "big"))
-        digest.update(payload)
     return digest.hexdigest()
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise InstallStateError("invalid install-state arguments")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="install_state")
+    parser = _ArgumentParser(prog="install_state")
     commands = parser.add_subparsers(dest="command", required=True)
     read = commands.add_parser("read")
     read.add_argument("path")
@@ -473,8 +543,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = _parser().parse_args(argv)
     try:
+        arguments = _parser().parse_args(argv)
         if arguments.command == "read":
             document = load_manifest(
                 Path(arguments.path),
@@ -485,11 +555,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_canonical_bytes(document).decode("utf-8"))
             return 0
         if arguments.command == "write":
-            candidate = Path(arguments.components_json).read_bytes()
-            if len(candidate) > MAX_STATE_BYTES:
-                raise InstallStateError(
-                    "install state candidate is too large"
-                )
+            candidate = _read_candidate(
+                Path(arguments.components_json)
+            )
             try:
                 components = _load_json(candidate)
             except (
@@ -512,8 +580,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(digest)
         return 0
-    except (InstallStateError, OSError) as error:
+    except InstallStateError as error:
         print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    except OSError:
+        print("ERROR: install state operation failed", file=sys.stderr)
         return 2
 
 
