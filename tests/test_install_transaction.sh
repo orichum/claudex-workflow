@@ -8,6 +8,29 @@ export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-transaction.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 
+python3 - "$ROOT/install.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index('elif [[ -n "$prior_model_generation" ]]')
+end = source.index('routing_action=reused', start)
+fallback = source[start:end]
+required = (
+    '[[ "$cliproxy_binary_changed" == false ]]',
+    '[[ "$cliproxy_config_changed" == unchanged ]]',
+    '[[ "$cliproxy_service_changed" == unchanged ]]',
+    '[[ "$cliproxy_listener_owned" == true ]]',
+    '[[ "$cliproxy_ready_before" == true ]]',
+)
+missing = [condition for condition in required if condition not in fallback]
+if missing:
+    raise SystemExit(
+        "model-discovery fallback lacks CLIProxy invariants: "
+        + ", ".join(missing)
+    )
+PY
+
 snapshot="$fixture/snapshot"
 install -d -m 0700 "$snapshot" "$fixture/bin"
 

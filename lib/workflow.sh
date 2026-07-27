@@ -2242,14 +2242,132 @@ private_uv_tool_identity() {
   private_tool_layout_is_owned \
     "$data_root" "$tool_dir" "$bin_dir" || return 1
   current_uid="$(id -u)"
+  [[ "$environment" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && \
+     "$distribution" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
   [[ -d "$environment_dir" && ! -L "$environment_dir" && \
      -d "$environment_bin" && ! -L "$environment_bin" && \
      "$(path_uid "$environment_dir")" == "$current_uid" && \
      "$(path_uid "$environment_bin")" == "$current_uid" ]] || return 1
+  target_mode="$(path_mode "$environment_dir")" || return 1
+  (( (8#$target_mode & 0022) == 0 )) || return 1
+  target_mode="$(path_mode "$environment_bin")" || return 1
+  (( (8#$target_mode & 0022) == 0 )) || return 1
   version="$(
-    "$environment_bin/python" -I -B -c \
-      'import importlib.metadata,sys; print(importlib.metadata.version(sys.argv[1]))' \
-      "$distribution"
+    workflow_python -I -B - "$environment_dir" "$distribution" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+root = Path(sys.argv[1]).absolute()
+distribution = sys.argv[2]
+expected = re.sub(r"[-_.]+", "-", distribution).lower()
+uid = os.getuid()
+
+
+def safe_directory(path: Path) -> None:
+    observed = os.lstat(path)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise SystemExit(1)
+
+
+safe_directory(root)
+if root.resolve(strict=True) != root:
+    raise SystemExit(1)
+library = root / "lib"
+safe_directory(library)
+matches: list[str] = []
+for metadata in library.glob(
+    "python*/site-packages/*.dist-info/METADATA"
+):
+    metadata_identity = re.sub(
+        r"[-_.]+", "-", metadata.parent.name
+    ).lower()
+    if not metadata_identity.startswith(expected + "-"):
+        continue
+    relative = metadata.relative_to(root)
+    current = root
+    for part in relative.parts[:-1]:
+        current /= part
+        safe_directory(current)
+    observed = os.lstat(metadata)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or not stat.S_ISREG(observed.st_mode)
+        or observed.st_uid != uid
+        or stat.S_IMODE(observed.st_mode) & 0o022
+        or observed.st_size > 64 * 1024
+        or metadata.resolve(strict=True) != metadata
+    ):
+        raise SystemExit(1)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(metadata, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != uid
+            or (opened.st_dev, opened.st_ino)
+            != (observed.st_dev, observed.st_ino)
+        ):
+            raise SystemExit(1)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(
+                descriptor, min(65536, 64 * 1024 + 1 - size)
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > 64 * 1024:
+                raise SystemExit(1)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_uid,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    name = version = None
+    for line in payload.decode("utf-8", "strict").splitlines():
+        if not line:
+            break
+        if line.startswith("Name: ") and name is None:
+            name = line[6:]
+        elif line.startswith("Version: ") and version is None:
+            version = line[9:]
+    if name is not None and (
+        re.sub(r"[-_.]+", "-", name).lower() == expected
+    ):
+        if version is None:
+            raise SystemExit(1)
+        matches.append(version)
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+PY
   )" || return 1
   [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || return 1
   (($# > 0)) || return 1
@@ -2268,6 +2386,77 @@ private_uv_tool_identity() {
     payload+="$entrypoint:$(sha256_file "$target_path")"$'\n'
   done
   printf '%s\t%s\n' "$version" "$(printf '%s' "$payload" | sha256_text)"
+}
+
+controller_plugin_fingerprint() {
+  (($# == 3)) || return 2
+  local module_root="$1"
+  local content_root="$2"
+  local python_runtime="$3"
+  "$python_runtime" -I -B - "$module_root" "$content_root" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+module_root = Path(sys.argv[1]).absolute()
+content_root = Path(sys.argv[2]).absolute()
+sys.path.insert(0, str(module_root))
+from integrations.common.install_state import (  # noqa: E402
+    InstallStateError,
+    fingerprint_paths,
+)
+
+plugin_root = content_root / "controller" / "plugin"
+uid = os.getuid()
+paths: list[Path] = []
+try:
+    for directory, names, files in os.walk(
+        plugin_root, topdown=True, followlinks=False
+    ):
+        current = Path(directory)
+        observed = os.lstat(current)
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != uid
+            or stat.S_IMODE(observed.st_mode) & 0o022
+        ):
+            raise InstallStateError(
+                "controller plugin directory is unsafe"
+            )
+        for name in sorted(names):
+            child = current / name
+            child_state = os.lstat(child)
+            if (
+                stat.S_ISLNK(child_state.st_mode)
+                or not stat.S_ISDIR(child_state.st_mode)
+            ):
+                raise InstallStateError(
+                    "controller plugin entry is unsafe"
+                )
+        names[:] = sorted(
+            name for name in names if name != "__pycache__"
+        )
+        for name in sorted(files):
+            child = current / name
+            child_state = os.lstat(child)
+            if (
+                stat.S_ISLNK(child_state.st_mode)
+                or not stat.S_ISREG(child_state.st_mode)
+            ):
+                raise InstallStateError(
+                    "controller plugin entry is unsafe"
+                )
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            paths.append(child.relative_to(content_root))
+    paths.append(Path("config/plugins.json"))
+    print(fingerprint_paths(content_root, paths))
+except (InstallStateError, OSError, RuntimeError, ValueError) as error:
+    print(f"ERROR: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 }
 
 migrate_legacy_private_tools() (

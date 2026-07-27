@@ -322,17 +322,9 @@ leanctx_probe_sha="$(
     integrations/common/mcp_probe.py
 )" || workflow_die "LeanCTX probe fingerprint failed"
 empty_artifact_sha="$(printf '0%.0s' {1..64})"
-plugin_paths=()
-while IFS= read -r plugin_path; do
-  plugin_paths+=("$plugin_path")
-done < <(
-  git -C "$WORKFLOW_ROOT" ls-files \
-    controller/plugin config/plugins.json | LC_ALL=C sort
-)
-((${#plugin_paths[@]} > 1)) || \
-  workflow_die "controller plugin fingerprint inputs are missing"
 controller_plugin_input_sha="$(
-  install_contract_fingerprint "${plugin_paths[@]}"
+  controller_plugin_fingerprint \
+    "$WORKFLOW_ROOT" "$WORKFLOW_ROOT" python3
 )" || workflow_die "controller plugin input fingerprint failed"
 controller_plugin_probe_sha="$(
   install_contract_fingerprint \
@@ -1857,6 +1849,11 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
       "$WORKFLOW_ROOT" >&2
   elif [[ -n "$prior_model_generation" ]] && \
        [[ "$ports_changed" == false ]] && \
+       [[ "$cliproxy_binary_changed" == false ]] && \
+       [[ "$cliproxy_config_changed" == unchanged ]] && \
+       [[ "$cliproxy_service_changed" == unchanged ]] && \
+       [[ "$cliproxy_listener_owned" == true ]] && \
+       [[ "$cliproxy_ready_before" == true ]] && \
        [[ "$claudex_binary_changed" == false ]] && \
        [[ "$claudex_proxy_service_changed" == unchanged ]] && \
        [[ "$claudex_proxy_listener_owned" == true ]]; then

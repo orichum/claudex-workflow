@@ -200,11 +200,19 @@ identity_data="$fixture/private-tool-identity"
 identity_tools="$identity_data/tools/uv"
 identity_bin="$identity_data/tools/bin"
 identity_env="$identity_tools/mempalace"
-install -d -m 0700 "$identity_env/bin" "$identity_bin"
+identity_metadata="$identity_env/lib/python3.14/site-packages/mempalace-3.6.0.dist-info/METADATA"
+identity_python_marker="$fixture/private-tool-python-executed"
+install -d -m 0700 \
+  "$identity_env/bin" "$(dirname "$identity_metadata")" "$identity_bin"
+cat >"$identity_env/bin/python" <<EOF
+#!/usr/bin/env bash
+touch "$identity_python_marker"
+printf "3.6.0\\n"
+EOF
 printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  '[[ "${!#}" == mempalace ]]' \
-  'printf "3.6.0\n"' >"$identity_env/bin/python"
+  'Metadata-Version: 2.4' \
+  'Name: mempalace' \
+  'Version: 3.6.0' >"$identity_metadata"
 printf '#!/usr/bin/env bash\nexit 0\n' \
   >"$identity_env/bin/mempalace"
 printf '#!/usr/bin/env bash\nexit 0\n' \
@@ -219,6 +227,15 @@ IFS=$'\t' read -r identity_version identity_artifact < <(
 )
 [[ "$identity_version" == 3.6.0 ]]
 [[ "$identity_artifact" =~ ^[a-f0-9]{64}$ ]]
+[[ ! -e "$identity_python_marker" ]]
+chmod 0770 "$identity_env/lib/python3.14/site-packages"
+if private_uv_tool_identity \
+    "$identity_data" mempalace mempalace \
+    mempalace mempalace-mcp >/dev/null 2>&1; then
+  printf 'writable private tool metadata path was accepted\n' >&2
+  exit 1
+fi
+chmod 0700 "$identity_env/lib/python3.14/site-packages"
 printf '# changed\n' >>"$identity_env/bin/mempalace-mcp"
 IFS=$'\t' read -r changed_identity_version changed_identity_artifact < <(
   private_uv_tool_identity \
@@ -235,6 +252,30 @@ if private_uv_tool_identity \
     "$identity_data" mempalace mempalace \
     mempalace mempalace-mcp >/dev/null 2>&1; then
   printf 'private tool entrypoint escape was accepted\n' >&2
+  exit 1
+fi
+
+plugin_fixture="$fixture/plugin-fingerprint"
+install -d -m 0700 \
+  "$plugin_fixture/controller/plugin/hooks" "$plugin_fixture/config"
+printf '{"hooks":{}}\n' \
+  >"$plugin_fixture/controller/plugin/hooks/hooks.json"
+printf '{"plugins":[]}\n' >"$plugin_fixture/config/plugins.json"
+plugin_fingerprint="$(
+  controller_plugin_fingerprint "$ROOT" "$plugin_fixture" python3
+)"
+[[ "$plugin_fingerprint" =~ ^[a-f0-9]{64}$ ]]
+printf 'untracked runtime content\n' \
+  >"$plugin_fixture/controller/plugin/untracked.txt"
+plugin_fingerprint_with_untracked="$(
+  controller_plugin_fingerprint "$ROOT" "$plugin_fixture" python3
+)"
+[[ "$plugin_fingerprint_with_untracked" != "$plugin_fingerprint" ]]
+ln -s hooks/hooks.json \
+  "$plugin_fixture/controller/plugin/unsafe-link"
+if controller_plugin_fingerprint \
+    "$ROOT" "$plugin_fixture" python3 >/dev/null 2>&1; then
+  printf 'symlinked controller plugin content was accepted\n' >&2
   exit 1
 fi
 
