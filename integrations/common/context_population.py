@@ -11,19 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from integrations.common.graph_manager import (
-    GraphManagerError,
-    sync_graphs,
-)
-from integrations.common.graph_hooks import (
-    GraphHookError,
-    graph_hook_status,
-)
-
-
 PRUNED_DIRECTORIES = frozenset({
     ".git", ".hg", ".svn", ".venv", "venv", "node_modules",
-    "graphify-out", "__pycache__", ".mypy_cache", ".pytest_cache",
+    "__pycache__", ".mypy_cache", ".pytest_cache",
 })
 
 
@@ -32,17 +22,9 @@ class PopulationError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class RepositoryResult:
-    repository: Path
-    action: str
-    hook_status: str
-
-
-@dataclass(frozen=True)
 class PopulationResult:
     palace: Path
     wing: str
-    repositories: tuple[RepositoryResult, ...]
 
 
 @dataclass(frozen=True)
@@ -459,41 +441,6 @@ class _MempalaceProgress:
         )
 
 
-def _mempalace_mine_environment() -> dict[str, str]:
-    shim_directory = (
-        Path(__file__).resolve().parent.parent / "mempalace_sitecustomize"
-    )
-    shim = shim_directory / "sitecustomize.py"
-    if not shim.is_file() or shim.is_symlink():
-        raise PopulationError("MemPalace generated-artifact guard is unavailable")
-    environment = os.environ.copy()
-    existing_pythonpath = environment.get("PYTHONPATH")
-    environment["PYTHONPATH"] = (
-        str(shim_directory)
-        if not existing_pythonpath
-        else str(shim_directory) + os.pathsep + existing_pythonpath
-    )
-    environment["CLAUDEX_MEMPALACE_EXCLUDE_GENERATED"] = "1"
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment["PYTHONUNBUFFERED"] = "1"
-    return environment
-
-
-def _graph_data_root() -> Path:
-    raw = os.environ.get("ORICHUM_DATA_HOME")
-    if raw is None:
-        xdg = os.environ.get("XDG_DATA_HOME")
-        raw = (
-            str(Path(xdg) / "orichum")
-            if xdg
-            else str(Path.home() / ".local/share/orichum")
-        )
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        raise PopulationError("ORICHUM_DATA_HOME must be an absolute path")
-    return path.resolve(strict=False)
-
-
 def populate_context(
     root: Path,
     palace: Path,
@@ -521,7 +468,7 @@ def populate_context(
             progress,
             f"[discover] {index}/{len(repositories)} "
             f"{_safe_field(repository.name)} "
-            "— Graphify sync pending",
+            "— repository source",
         )
 
     memory_sources = _mempalace_sources(root, repositories)
@@ -546,7 +493,6 @@ def populate_context(
                 "--mode", "projects", "--wing", wing,
             ],
             label=f"MemPalace mine for {_safe_field(source)}",
-            env=_mempalace_mine_environment(),
             heartbeat=_heartbeat(progress, f"{prefix} mining"),
             line_observer=(
                 _MempalaceProgress(prefix, progress, mine_started)
@@ -566,46 +512,7 @@ def populate_context(
         heartbeat=_heartbeat(progress, "[mempalace] verification"),
     )
     _emit(progress, "[mempalace] store verified")
-    if not repositories:
-        return PopulationResult(Path(palace), wing, ())
-    graphify = _resolve_executable("graphify", "Graphify")
-    try:
-        synchronized = sync_graphs(
-            root,
-            _graph_data_root(),
-            graphify=graphify,
-            progress=(
-                (lambda message: progress(_safe_field(message)))
-                if progress is not None
-                else None
-            ),
-        )
-    except GraphManagerError as error:
-        raise PopulationError(str(error)) from error
-    results = tuple(
-        RepositoryResult(
-            result.repository,
-            result.action.replace("-", " "),
-            (
-                "not applicable"
-                if result.action == "not-applicable"
-                else _reported_hook_status(result.repository)
-            ),
-        )
-        for result in synchronized
-    )
-    return PopulationResult(Path(palace), wing, results)
-
-
-def _reported_hook_status(repository: Path) -> str:
-    try:
-        return (
-            "installed"
-            if graph_hook_status(repository) == "installed"
-            else "not managed"
-        )
-    except GraphHookError:
-        return "not managed"
+    return PopulationResult(Path(palace), wing)
 
 
 def render_population_result(result: PopulationResult) -> str:
@@ -613,32 +520,4 @@ def render_population_result(result: PopulationResult) -> str:
         f"MemPalace: populated wing {_safe_field(result.wing)} in "
         f"{_safe_field(result.palace)}"
     )
-    if not result.repositories:
-        return f"{summary}\n\nGraphify: no applicable Git repositories found."
-
-    headers = ("REPOSITORY", "GRAPHIFY", "GIT HOOK")
-    rows = tuple(
-        (
-            _safe_field(item.repository),
-            _safe_field(item.action),
-            _safe_field(item.hook_status),
-        )
-        for item in result.repositories
-    )
-    widths = tuple(
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
-    )
-
-    def border() -> str:
-        return "+" + "+".join("-" * (width + 2) for width in widths) + "+"
-
-    def row(values: tuple[str, str, str]) -> str:
-        return "| " + " | ".join(
-            value.ljust(width) for value, width in zip(values, widths)
-        ) + " |"
-
-    table = "\n".join(
-        (border(), row(headers), border(), *(row(values) for values in rows), border())
-    )
-    return f"{summary}\n\n{table}"
+    return summary + "\n"

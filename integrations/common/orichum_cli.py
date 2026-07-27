@@ -74,19 +74,6 @@ from .stack_bindings import (
     stack_binding_transaction,
 )
 
-GRAPHIFY_AUTO_APPROVED_TOOLS = (
-    "get_community",
-    "get_neighbors",
-    "get_node",
-    "get_pr_impact",
-    "god_nodes",
-    "graph_stats",
-    "list_prs",
-    "query_graph",
-    "shortest_path",
-    "triage_prs",
-)
-
 MEMPALACE_AUTO_APPROVED_TOOLS = (
     "mempalace_diary_read",
     "mempalace_follow_tunnels",
@@ -107,7 +94,6 @@ from .stack_wizard import run_stack_wizard
 from .session_config import (
     SessionError,
     SessionPaths,
-    bind_session_graph,
     create_resolved_session,
 )
 
@@ -179,7 +165,21 @@ def _paths(environment: Mapping[str, str] | None = None) -> dict[str, Path]:
 
 def _load() -> tuple[dict[str, Path], ResolvedConfig]:
     paths = _paths()
-    return paths, load_control_plane(default_config_paths(paths["config"]))
+    config = load_control_plane(default_config_paths(paths["config"]))
+    try:
+        installed_policy = (
+            paths["config"] / "controller-policy.md"
+        ).read_bytes()
+        declared_policy = (
+            WORKFLOW_ROOT / "config" / "controller-policy.md"
+        ).read_bytes()
+    except OSError as error:
+        raise CliError("controller policy is unavailable") from error
+    if installed_policy != declared_policy:
+        raise CliError(
+            "installed controller policy is stale; rerun install.sh"
+        )
+    return paths, config
 
 
 def _render_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -468,6 +468,9 @@ def _leanctx_project_root(
         config.documents["projects"],
         launch_dir,
     )
+    repository = context.get("repoRootReal")
+    if isinstance(repository, str) and repository:
+        return Path(repository)
     route = context.get("route")
     root = route.get("contextRootReal") if isinstance(route, dict) else None
     return Path(root) if isinstance(root, str) and root else None
@@ -482,13 +485,14 @@ def _leanctx_list(
             run.run_id,
             run.created_at,
             str(run.project_root),
+            "yes" if run.attached else "no",
             "yes" if run.has_activity else "no",
             "yes" if run.run_id == selected_run_id else "—",
         )
         for run in runs
     ]
     return _render_table(
-        ("RUN", "CREATED", "PROJECT", "ACTIVITY", "SELECTED"),
+        ("RUN", "CREATED", "PROJECT", "ATTACHED", "ACTIVITY", "SELECTED"),
         rows,
     )
 
@@ -616,13 +620,20 @@ def _verify_runtime(paths: Mapping[str, Path]) -> None:
             [str(verifier), str(paths["data"])],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
             check=False,
             timeout=30,
         )
     except subprocess.TimeoutExpired as error:
         raise CliError("Orichum runtime health verification timed out") from error
     if completed.returncode != 0:
+        verifier_error = getattr(completed, "stderr", "") or ""
+        if "runtime source differs" in verifier_error:
+            raise CliError(
+                "Orichum runtime source differs from the installed route "
+                "service; run install.sh"
+            )
         try:
             accounts = load_accounts(paths["config"] / "accounts.json")
         except AccountError:
@@ -734,7 +745,6 @@ def _prepare_new_session(
     context = resolve_control_plane_context(
         config.documents["projects"], launch_dir
     )
-    context = bind_session_graph(context, paths["data"])
     route = context.get("route")
     if not isinstance(route, dict):
         raise CliError("launch directory is not mapped to an Orichum project")
@@ -793,7 +803,6 @@ def _prepare_resume(
     context = resolve_control_plane_context(
         config.documents["projects"], launch_dir
     )
-    context = bind_session_graph(context, paths["data"])
     route = context.get("route")
     if (
         not isinstance(route, dict)
@@ -1441,14 +1450,13 @@ def _run_external(
     executable = str(candidate) if candidate.is_file() else shutil.which(name)
     if executable is None:
         raise CliError(f"required command is not installed: {name}")
-    working_directory = Path.cwd() if name == "orichum-graph" else WORKFLOW_ROOT
     child_environment = os.environ.copy()
     if environment is not None:
         child_environment.update(environment)
     completed = subprocess.run(
         [executable, *arguments],
         check=False,
-        cwd=working_directory,
+        cwd=WORKFLOW_ROOT,
         env=child_environment,
     )
     return completed.returncode
@@ -2045,7 +2053,6 @@ def _launch_session(
         ",".join(
             (
                 *(f"mcp__leanctx__{tool}" for tool in LEANCTX_AUTO_APPROVED_TOOLS),
-                *(f"mcp__graphify__{tool}" for tool in GRAPHIFY_AUTO_APPROVED_TOOLS),
                 *(
                     f"mcp__mempalace__{tool}"
                     for tool in MEMPALACE_AUTO_APPROVED_TOOLS
@@ -2117,7 +2124,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for name, help_text in (
         ("add", "add and populate a project context"),
-        ("populate", "refresh memory and graphs explicitly"),
+        ("populate", "refresh project memory explicitly"),
         ("remove", "remove a context mapping"),
         ("update", "change a context mapping"),
     ):
@@ -2234,11 +2241,6 @@ def build_parser() -> argparse.ArgumentParser:
         command = plugin_action.add_parser(name, help=help_text)
         command.add_argument("arguments", nargs=argparse.REMAINDER)
 
-    graph = commands.add_parser(
-        "graph",
-        help="manage repository-aware Graphify data",
-    )
-    graph.add_argument("arguments", nargs=argparse.REMAINDER)
     leanctx = commands.add_parser(
         "leanctx",
         help="inspect and monitor LeanCTX",
@@ -2358,8 +2360,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise CliError("run Orichum through the installed launcher")
         if parsed.command == "doctor":
             return _run_external("orichum-doctor", [])
-        if parsed.command == "graph":
-            return _run_external("orichum-graph", list(parsed.arguments))
         if parsed.command == "config" and parsed.config_command == "paths":
             paths = _paths()
             print(
@@ -2435,6 +2435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parsed.run,
                 current_run_id=os.environ.get("CLAUDEX_RUN_ID"),
             )
+            leanctx_monitor.require_attached(selected)
             binary = leanctx_monitor.managed_binary(paths["data"])
             if parsed.leanctx_command == "stats":
                 stats = leanctx_monitor.read_stats(binary, selected)

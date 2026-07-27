@@ -94,24 +94,13 @@ else
   fail 'Claude Code is not on PATH'
 fi
 
-for tool in mempalace-mcp graphify graphify-mcp; do
+for tool in mempalace-mcp; do
   if command -v "$tool" >/dev/null 2>&1; then
     ok "$tool is available ($(command -v "$tool"))"
   else
     fail "$tool is not on PATH"
   fi
 done
-
-data_root_physical="$(cd -P -- "$data_root" 2>/dev/null && pwd || true)"
-graph_root="${data_root_physical:+$data_root_physical/graphs}"
-if [[ -n "$graph_root" && -d "$graph_root" && ! -L "$graph_root" ]] && \
-   [[ "$(path_uid "$graph_root")" == "$(id -u)" ]] && \
-   [[ "$(path_mode "$graph_root")" == 700 ]] && \
-   [[ "$(cd -P -- "$graph_root" && pwd)" == "$graph_root" ]]; then
-  ok 'central Graphify storage is private'
-else
-  fail 'central Graphify storage is missing or unsafe'
-fi
 
 if [[ -f "$config_root/accounts.json" && \
       ! -L "$config_root/accounts.json" ]] && \
@@ -166,48 +155,11 @@ else
   fail 'CLIProxyAPI management key is missing or unsafe'
 fi
 
-graph_contract_available=false
-if [[ -n "$python_identity" ]] && \
-   [[ -f "$WORKFLOW_ROOT/integrations/common/graph_manager.py" && \
-      ! -L "$WORKFLOW_ROOT/integrations/common/graph_manager.py" ]] && \
-   [[ -f "$WORKFLOW_ROOT/integrations/common/graph_hooks.py" && \
-      ! -L "$WORKFLOW_ROOT/integrations/common/graph_hooks.py" ]] && \
-   [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/check-local-services.sh" ]] && \
-   [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/route-mempalace-input.py" ]] && \
-   PYTHONDONTWRITEBYTECODE=1 "$orichum_python" -I -B - \
-     "$WORKFLOW_ROOT" >/dev/null 2>&1 <<'PY'
-import sys
-
-sys.path.insert(0, sys.argv[1])
-from integrations.common.graph_hooks import (
-    graph_hook_status,
-    install_graph_hooks,
-    remove_upstream_graphify_hooks,
-)
-from integrations.common.graph_manager import graph_main, sync_graph
-
-for interface in (
-    graph_hook_status,
-    install_graph_hooks,
-    remove_upstream_graphify_hooks,
-    graph_main,
-    sync_graph,
-):
-    if not callable(interface):
-        raise SystemExit(1)
-PY
-then
-  ok 'repository graph manager and hook contract are available'
-  graph_contract_available=true
+if [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/check-local-services.sh" ]] && \
+   [[ -x "$WORKFLOW_ROOT/controller/plugin/scripts/route-mempalace-input.py" ]]; then
+  ok 'service-health and Mempalace hooks are executable'
 else
-  fail 'repository graph manager or integration hook contract is unavailable'
-fi
-
-if [[ "$graph_contract_available" == true ]]; then
-  if ! graphify_doctor_diagnostics \
-      "$data_root" "$config_root" "$WORKFLOW_ROOT" "$orichum_python"; then
-    printf 'NOTICE repository graph diagnostics were unavailable\n'
-  fi
+  fail 'service-health or Mempalace hooks are unavailable'
 fi
 
 if (( failures > 0 )); then
@@ -215,4 +167,7 @@ if (( failures > 0 )); then
     "$failures"
   exit 1
 fi
-printf '\nOrichum is ready.\n'
+printf '%s\n' \
+  '' \
+  'Orichum local components are ready.' \
+  'Doctor does not launch a model session, contact a provider, or index your project.'

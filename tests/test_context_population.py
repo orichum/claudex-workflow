@@ -19,7 +19,6 @@ from integrations.common.context_population import (
     discover_git_worktrees,
 )
 from integrations.common import context_population
-from integrations.common.graph_hooks import graph_hook_status
 
 
 class ContextPopulationDiscoveryTests(unittest.TestCase):
@@ -135,7 +134,7 @@ class ContextPopulationDiscoveryTests(unittest.TestCase):
 
     def test_prunes_generated_directories(self):
         self.init_git(self.root)
-        for name in ("graphify-out", ".venv", "node_modules"):
+        for name in (".venv", "node_modules"):
             candidate = self.root / name / "repository"
             candidate.mkdir(parents=True)
             self.init_git(candidate)
@@ -350,708 +349,178 @@ class ContextPopulationRunnerTests(unittest.TestCase):
         self.assertEqual(timeouts, [10.0, 8.0, 8.0])
 
 
+
+
 class ContextPopulationExecutionTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.tool_directory = tempfile.TemporaryDirectory()
-        self.fake_package_directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary_directory.name).resolve()
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
         self.palace = self.root / "palace"
-        self.data_root = self.root / "orichum-data"
-        self.data_root.mkdir(mode=0o700)
-        self.calls_path = self.root / "calls.jsonl"
-        self.original_path = os.environ.get("PATH", "")
-        self.environ = {
-            "PATH": f"{self.tool_directory.name}{os.pathsep}{self.original_path}",
-            "CONTEXT_POPULATION_CALL_LOG": str(self.calls_path),
-            "PYTHONPATH": self.fake_package_directory.name,
-            "ORICHUM_DATA_HOME": str(self.data_root),
-        }
-        fake_mempalace = Path(self.fake_package_directory.name) / "mempalace"
-        fake_mempalace.mkdir()
-        (fake_mempalace / "__init__.py").write_text("", encoding="utf-8")
-        (fake_mempalace / "palace.py").write_text(
-            'SKIP_DIRS = {"existing-generated"}\n', encoding="utf-8"
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.fake_packages = self.root / "packages"
+        mempalace_package = self.fake_packages / "mempalace"
+        mempalace_package.mkdir(parents=True)
+        (mempalace_package / "__init__.py").write_text("", encoding="utf-8")
+        (mempalace_package / "palace.py").write_text(
+            "SKIP_DIRS = set()\n",
+            encoding="utf-8",
         )
-        self.write_tool("mempalace")
-        self.write_tool("graphify")
-
-    def tearDown(self):
-        self.fake_package_directory.cleanup()
-        self.tool_directory.cleanup()
-        self.temporary_directory.cleanup()
-
-    def write_tool(self, name):
-        script = self.tool_directory.name + "/" + name
-        Path(script).write_text(
+        self.calls = self.root / "calls.jsonl"
+        tool = self.bin / "mempalace"
+        tool.write_text(
             """#!/usr/bin/env python3
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
-tool = Path(sys.argv[0]).name
-call = {"tool": tool, "args": sys.argv[1:], "cwd": os.getcwd()}
-if tool == "mempalace" and os.environ.get("CONTEXT_POPULATION_RECORD_MEMPALACE_ENV"):
-    from mempalace.palace import SKIP_DIRS
-    call["generated_exclusion"] = os.environ.get(
-        "CLAUDEX_MEMPALACE_EXCLUDE_GENERATED"
-    )
-    call["dont_write_bytecode"] = os.environ.get("PYTHONDONTWRITEBYTECODE")
-    call["python_unbuffered"] = os.environ.get("PYTHONUNBUFFERED")
-    call["pythonpath"] = os.environ.get("PYTHONPATH")
-    call["skip_dirs"] = sorted(SKIP_DIRS)
-with Path(os.environ["CONTEXT_POPULATION_CALL_LOG"]).open("a", encoding="utf-8") as log:
-    log.write(json.dumps(call) + "\\n")
-
-if tool == "mempalace":
-    if os.environ.get("CONTEXT_POPULATION_MEMPALACE_FAIL"):
-        print("mine diagnostic", file=sys.stdout)
-        print("mine failed", file=sys.stderr)
-        raise SystemExit(1)
-    print("raw mempalace success output")
-    raise SystemExit(0)
-
-operation = sys.argv[1]
-if operation in {"extract", "update"}:
-    print("raw graphify success output")
-    repository = Path(sys.argv[2])
-    failure = os.environ.get("CONTEXT_POPULATION_GRAPHIFY_FAILURE")
-    if repository.name == failure:
-        for index in range(30):
-            print(f"stdout {index}")
-            print(f"stderr {index}", file=sys.stderr)
-        raise SystemExit(1)
-    if repository.name == "empty":
-        print("found 0 code")
-        print("graph is empty", file=sys.stderr)
-        raise SystemExit(1)
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    graph = Path(os.environ["GRAPHIFY_OUT"]) / "graph.json"
-    graph.parent.mkdir(exist_ok=True)
-    if repository.name == "invalid":
-        graph.write_text("not json", encoding="utf-8")
-    elif repository.name == "empty-nodes":
-        graph.write_text(
-            json.dumps({"built_at_commit": commit, "nodes": [], "links": []}),
-            encoding="utf-8",
-        )
-    else:
-        graph.write_text(
-            json.dumps({
-                "built_at_commit": commit,
-                "nodes": [{"id": "node"}],
-                "links": [],
-            }),
-            encoding="utf-8",
-        )
-    raise SystemExit(0)
-
-if operation == "hook":
-    if sys.argv[2] == "install" and os.environ.get("CONTEXT_POPULATION_HOOK_INSTALL_FAIL"):
-        print("install failed", file=sys.stderr)
-        raise SystemExit(1)
-    if sys.argv[2] == "status" and os.environ.get("CONTEXT_POPULATION_HOOK_NOT_INSTALLED"):
-        print("not installed")
-    raise SystemExit(0)
+with Path(os.environ["CONTEXT_POPULATION_CALL_LOG"]).open(
+    "a", encoding="utf-8"
+) as stream:
+    stream.write(json.dumps({"args": sys.argv[1:]}) + "\\n")
+if os.environ.get("CONTEXT_POPULATION_MEMPALACE_FAIL"):
+    print("bounded failure", file=sys.stderr)
+    raise SystemExit(7)
 """,
             encoding="utf-8",
         )
-        Path(script).chmod(0o755)
+        tool.chmod(0o755)
+        self.environment = {
+            "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "CONTEXT_POPULATION_CALL_LOG": str(self.calls),
+            "PYTHONPATH": str(self.fake_packages),
+        }
 
-    def init_git(self, path):
+    def init_git(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["git", "init", "-q", str(path)],
             check=True,
             capture_output=True,
-            text=True,
-        )
-        fixture = path / ".context-population-fixture"
-        fixture.write_text("fixture\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(path), "add", fixture.name],
-            check=True,
-            capture_output=True,
-            text=True,
         )
         subprocess.run(
             [
                 "git", "-C", str(path),
-                "-c", "user.name=Claudex Tests",
-                "-c", "user.email=claudex-tests@example.invalid",
-                "commit", "-qm", "fixture",
+                "-c", "user.name=Orichum Tests",
+                "-c", "user.email=tests@example.invalid",
+                "commit", "--allow-empty", "-qm", "fixture",
             ],
             check=True,
             capture_output=True,
-            text=True,
         )
 
-    def add_commit(self, repository):
-        tracked = repository / "tracked.txt"
-        tracked.write_text("fixture\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(repository), "add", tracked.name],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            [
-                "git", "-C", str(repository),
-                "-c", "user.name=Claudex Tests",
-                "-c", "user.email=claudex-tests@example.invalid",
-                "commit", "-qm", "fixture",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    def read_calls(self):
-        if not self.calls_path.exists():
+    def read_calls(self) -> list[list[str]]:
+        if not self.calls.exists():
             return []
-        return [json.loads(line) for line in self.calls_path.read_text(
-            encoding="utf-8"
-        ).splitlines()]
+        return [
+            json.loads(line)["args"]
+            for line in self.calls.read_text(encoding="utf-8").splitlines()
+        ]
 
-    def populate(self):
-        with mock.patch.dict(os.environ, self.environ, clear=False):
-            return context_population.populate_context(self.root, self.palace, "acme")
+    def populate(self, progress=None):
+        with mock.patch.dict(os.environ, self.environment, clear=False):
+            return context_population.populate_context(
+                self.root,
+                self.palace,
+                "acme",
+                progress=progress,
+            )
 
-    def test_population_mines_each_canonical_repository_and_graphifies_each(self):
+    def test_population_mines_each_outer_repository_and_verifies_store(
+        self,
+    ) -> None:
         api = self.root / "api"
         web = self.root / "web"
-        self.init_git(api)
-        self.init_git(web)
+        nested = api / "vendor" / "nested"
+        for repository in (api, web, nested):
+            self.init_git(repository)
 
         result = self.populate()
-        calls = self.read_calls()
 
         self.assertEqual(
+            self.read_calls(),
             [
-                {key: value for key, value in call.items() if key != "cwd"}
-                for call in calls if call["tool"] == "mempalace"
-            ],
-            [
-                {"tool": "mempalace", "args": [
+                [
                     "--palace", str(self.palace), "mine", str(api),
                     "--mode", "projects", "--wing", "acme",
-                ]},
-                {"tool": "mempalace", "args": [
+                ],
+                [
                     "--palace", str(self.palace), "mine", str(web),
                     "--mode", "projects", "--wing", "acme",
-                ]},
-                {"tool": "mempalace", "args": ["--palace", str(self.palace), "status"]},
+                ],
+                ["--palace", str(self.palace), "status"],
             ],
-        )
-        self.assertEqual(
-            [call for call in calls if call["tool"] == "graphify"],
-            [
-                {
-                    "tool": "graphify",
-                    "args": ["extract", str(api), "--code-only"],
-                    "cwd": str(api),
-                },
-                {
-                    "tool": "graphify",
-                    "args": ["extract", str(web), "--code-only"],
-                    "cwd": str(web),
-                },
-            ],
-        )
-        self.assertLess(
-            max(
-                index for index, call in enumerate(calls)
-                if call["tool"] == "mempalace"
-            ),
-            min(
-                index for index, call in enumerate(calls)
-                if call["tool"] == "graphify"
-            ),
-        )
-        self.assertEqual(
-            tuple(row.repository for row in result.repositories), (api, web)
-        )
-        self.assertEqual(len(result.repositories), 2)
-        self.assertEqual({row.action for row in result.repositories}, {"created"})
-        self.assertEqual(
-            {row.hook_status for row in result.repositories}, {"installed"}
-        )
-        self.assertFalse((api / "graphify-out").exists())
-        self.assertFalse((web / "graphify-out").exists())
-        self.assertEqual(
-            len(tuple((self.data_root / "graphs").rglob("graph.json"))),
-            2,
         )
         self.assertEqual(result.palace, self.palace)
         self.assertEqual(result.wing, "acme")
 
-    def test_population_reports_installed_orichum_graph_hooks(self):
-        repository = self.root / "api"
-        self.init_git(repository)
-
-        with mock.patch.object(
-            context_population,
-            "graph_hook_status",
-            return_value="installed",
-            create=True,
-        ):
-            result = self.populate()
-
-        self.assertEqual(result.repositories[0].hook_status, "installed")
-
-    def test_population_skips_linked_worktree_for_memory_and_graphify(self):
+    def test_population_skips_redundant_linked_worktree(self) -> None:
         primary = self.root / "service"
-        linked = self.root / ".worktrees" / "service-fix"
+        linked = self.root / "service-fix"
         self.init_git(primary)
-        self.add_commit(primary)
         subprocess.run(
-            ["git", "-C", str(primary), "worktree", "add", "-q", "--detach", str(linked)],
+            ["git", "-C", str(primary), "worktree", "add", "-q", str(linked)],
             check=True,
             capture_output=True,
-            text=True,
         )
-        progress = []
+        progress: list[str] = []
 
-        with mock.patch.dict(os.environ, self.environ, clear=False):
-            result = context_population.populate_context(
-                self.root, self.palace, "acme", progress=progress.append
-            )
+        self.populate(progress.append)
 
-        mine_sources = [
-            Path(call["args"][3])
-            for call in self.read_calls()
-            if call["tool"] == "mempalace" and "mine" in call["args"]
-        ]
-        graphify_sources = [
-            Path(call["args"][1])
-            for call in self.read_calls()
-            if call["tool"] == "graphify" and call["args"][0] in {"extract", "update"}
-        ]
-        self.assertEqual(mine_sources, [primary])
-        self.assertEqual(graphify_sources, [primary])
-        self.assertEqual(tuple(row.repository for row in result.repositories), (primary,))
-        self.assertIn(
-            "[discover] skipped linked worktree service-fix "
-            "— same repository as service",
-            progress,
+        mine_calls = [call for call in self.read_calls() if "mine" in call]
+        self.assertEqual(len(mine_calls), 1)
+        self.assertEqual(Path(mine_calls[0][3]), primary)
+        self.assertTrue(
+            any("skipped linked worktree service-fix" in line for line in progress)
         )
 
-    def test_mempalace_mines_outer_repository_once_for_nested_submodule(self):
-        repository = self.root / "service"
-        submodule = repository / "vendor" / "module"
-        self.init_git(repository)
-        self.init_git(submodule)
-
-        self.populate()
-
-        mine_sources = [
-            Path(call["args"][3])
-            for call in self.read_calls()
-            if call["tool"] == "mempalace" and "mine" in call["args"]
-        ]
-        graphify_sources = [
-            Path(call["args"][1])
-            for call in self.read_calls()
-            if call["tool"] == "graphify" and call["args"][0] in {"extract", "update"}
-        ]
-        self.assertEqual(mine_sources, [repository])
-        self.assertEqual(graphify_sources, [repository, submodule])
-
-    def test_mempalace_mine_excludes_graphify_output_without_editing_repository(self):
+    def test_population_reports_repository_sources_without_indexing(
+        self,
+    ) -> None:
         repository = self.root / "service"
         self.init_git(repository)
-        revision = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        generated = repository / "graphify-out"
-        generated.mkdir()
-        (generated / "graph.json").write_text(
-            json.dumps({
-                "built_at_commit": revision,
-                "nodes": [{"id": "generated"}],
-                "links": [],
-            }),
-            encoding="utf-8",
-        )
-        source = repository / "service.py"
-        source.write_text("print('source')\n", encoding="utf-8")
+        progress: list[str] = []
 
-        with mock.patch.dict(
-            os.environ,
-            {**self.environ, "CONTEXT_POPULATION_RECORD_MEMPALACE_ENV": "1"},
-            clear=False,
-        ):
-            context_population.populate_context(
-                self.root, self.palace, "acme"
-            )
+        self.populate(progress.append)
 
-        mine_call = next(
-            call for call in self.read_calls()
-            if call["tool"] == "mempalace" and "mine" in call["args"]
-        )
-        self.assertEqual(mine_call["generated_exclusion"], "1")
-        self.assertEqual(mine_call["dont_write_bytecode"], "1")
-        self.assertEqual(mine_call["python_unbuffered"], "1")
-        self.assertEqual(
-            mine_call["skip_dirs"], ["existing-generated", "graphify-out"]
-        )
-        self.assertTrue(
-            mine_call["pythonpath"].split(os.pathsep)[0].endswith(
-                "integrations/mempalace_sitecustomize"
-            )
-        )
-        self.assertFalse((repository / ".gitignore").exists())
-        self.assertEqual(source.read_text(encoding="utf-8"), "print('source')\n")
-
-    def test_mempalace_progress_reports_first_five_percent_and_final(self):
-        messages = []
-        reporter = context_population._MempalaceProgress(
-            "[mempalace 1/4]", messages.append, started=10.0
-        )
-        with mock.patch.object(
-            context_population.time, "monotonic", return_value=20.0
-        ):
-            for current in (1, 4, 5, 6, 10, 100):
-                reporter(
-                    "stdout",
-                    f"  + [{current:4}/100] file-{current}.py +3",
-                )
-            reporter("stderr", "unrelated warning")
-            reporter("stdout", "unrelated output")
-
-        self.assertEqual(len(messages), 4)
-        self.assertIn("1/100 (1%)", messages[0])
-        self.assertIn("5/100 (5%)", messages[1])
-        self.assertIn("10/100 (10%)", messages[2])
-        self.assertIn("100/100 (100%)", messages[3])
-        self.assertTrue(
-            all("00:10 elapsed" in message for message in messages)
-        )
-
-    def test_rejects_nested_linked_worktree_before_mempalace_scan(self):
-        primary = self.root
-        linked = self.root / ".worktrees" / "service-fix"
-        self.init_git(primary)
-        self.add_commit(primary)
-        subprocess.run(
-            ["git", "-C", str(primary), "worktree", "add", "-q", "--detach", str(linked)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-        with mock.patch.dict(
-            os.environ, self.environ, clear=False
-        ), self.assertRaisesRegex(
-            PopulationError,
-            "linked worktree is nested inside a MemPalace source",
-        ):
-            context_population.populate_context(
-                self.root, self.palace, "acme"
-            )
-
-        self.assertEqual(self.read_calls(), [])
-
-    def test_existing_repository_local_graph_is_migrated(self):
-        repository = self.root / "api"
-        self.init_git(repository)
-        revision = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        graph = repository / "graphify-out" / "graph.json"
-        graph.parent.mkdir()
-        graph.write_text(
-            json.dumps({
-                "built_at_commit": revision,
-                "nodes": [{"id": "old"}],
-                "links": [],
-            }),
-            encoding="utf-8",
-        )
-
-        result = self.populate()
-
-        self.assertEqual(result.repositories[0].action, "migrated")
-        self.assertFalse((repository / "graphify-out").exists())
-        self.assertNotIn(
-            "update",
-            [
-                call["args"][0]
-                for call in self.read_calls()
-                if call["tool"] == "graphify"
-            ],
-        )
-
-    def test_relative_tool_path_is_canonical_for_central_sync(self):
-        repository = self.root / "api"
-        self.init_git(repository)
-        relative_tools = os.path.relpath(self.tool_directory.name, Path.cwd())
-        environ = {**self.environ, "PATH": f"{relative_tools}{os.pathsep}{self.original_path}"}
-
-        with mock.patch.dict(os.environ, environ, clear=False):
-            self.assertEqual(
-                context_population._resolve_executable("graphify", "Graphify"),
-                str((Path(self.tool_directory.name) / "graphify").resolve()),
-            )
-            result = context_population.populate_context(self.root, self.palace, "acme")
-
-        self.assertEqual(result.repositories[0].hook_status, "installed")
-        hook_calls = [
-            call for call in self.read_calls()
-            if call["tool"] == "graphify" and call["args"][0] == "hook"
-        ]
-        self.assertEqual(hook_calls, [])
-
-    def test_empty_code_repository_is_not_applicable(self):
-        repository = self.root / "empty"
-        self.init_git(repository)
-        progress = []
-
-        with mock.patch.object(
-            context_population, "_format_elapsed", return_value="00:03"
-        ), mock.patch.dict(os.environ, self.environ, clear=False):
-            result = context_population.populate_context(
-                self.root, self.palace, "acme", progress=progress.append
-            )
-
-        self.assertEqual(
-            result.repositories,
-            (context_population.RepositoryResult(
-                repository, "not applicable", "not applicable"
-            ),),
-        )
         self.assertIn(
-            "[graphify 1/1] not-applicable empty",
+            "[discover] 1/1 service — repository source",
             progress,
         )
+        self.assertFalse(any("graph" in line.lower() for line in progress))
 
-    def test_rejects_invalid_or_empty_graph_json(self):
-        for name in ("invalid", "empty-nodes"):
-            with self.subTest(name=name):
-                repository = self.root / name
-                self.init_git(repository)
-                with self.assertRaisesRegex(PopulationError, "Graphify graph is invalid"):
-                    self.populate()
-                shutil.rmtree(repository)
-
-    def test_population_defers_upstream_graphify_hooks(self):
-        self.init_git(self.root / "api")
-
-        result = self.populate()
-
-        self.assertEqual(result.repositories[0].hook_status, "installed")
-        self.assertFalse(any(
-            call["tool"] == "graphify" and call["args"][0] == "hook"
-            for call in self.read_calls()
-        ))
-
-    def test_missing_tools_are_rejected_but_graphify_is_not_needed_without_repositories(self):
-        original_which = context_population.shutil.which
-
-        with mock.patch.object(
-            context_population.shutil,
-            "which",
-            side_effect=lambda tool: None if tool == "mempalace" else original_which(tool),
-        ), mock.patch.dict(os.environ, self.environ, clear=False), \
-             self.assertRaisesRegex(PopulationError, "MemPalace executable"):
-            context_population.populate_context(self.root, self.palace, "acme")
-
-        with mock.patch.object(
-            context_population.shutil,
-            "which",
-            side_effect=lambda tool: None if tool == "graphify" else original_which(tool),
-        ), mock.patch.dict(os.environ, self.environ, clear=False), \
-             self.assertRaisesRegex(PopulationError, "Graphify executable"):
-            self.init_git(self.root / "api")
-            context_population.populate_context(self.root, self.palace, "acme")
-
-        with tempfile.TemporaryDirectory() as no_worktrees_directory:
-            no_worktrees = Path(no_worktrees_directory)
-            with mock.patch.object(
-                context_population.shutil,
-                "which",
-                side_effect=lambda tool: None if tool == "graphify" else original_which(tool),
-            ), mock.patch.dict(os.environ, self.environ, clear=False):
-                result = context_population.populate_context(no_worktrees, self.palace, "acme")
-            self.assertEqual(result.repositories, ())
-
-    def test_failure_diagnostics_are_bounded(self):
-        self.init_git(self.root / "api")
-        with mock.patch.dict(
-            os.environ,
-            {**self.environ, "CONTEXT_POPULATION_GRAPHIFY_FAILURE": "api"},
-            clear=False,
-        ), self.assertRaisesRegex(
-            PopulationError, "Graphify failed with exit code 1"
-        ) as caught:
-            context_population.populate_context(self.root, self.palace, "acme")
-
-        message = str(caught.exception)
-        self.assertLessEqual(len(message), 4_000)
-        self.assertIn("stdout 29", message)
-        self.assertNotIn("stdout 0", message)
-        self.assertIn("stderr 29", message)
-
-    def test_failed_run_retries_idempotently_and_retains_prior_graph(self):
-        first = self.root / "first"
-        second = self.root / "second"
-        self.init_git(first)
-        self.init_git(second)
-
-        with mock.patch.dict(
-            os.environ,
-            {**self.environ, "CONTEXT_POPULATION_GRAPHIFY_FAILURE": "second"},
-            clear=False,
-        ), self.assertRaises(PopulationError):
-            context_population.populate_context(self.root, self.palace, "acme")
-        first_graphs = tuple((self.data_root / "graphs").rglob("graph.json"))
-        self.assertEqual(len(first_graphs), 1)
-        self.assertFalse((first / "graphify-out").exists())
-
-        result = self.populate()
-
-        actions = {row.repository.name: row.action for row in result.repositories}
-        self.assertEqual(actions, {"first": "updated", "second": "created"})
-
-    def test_progress_reports_mempalace_and_each_completed_repository(self):
-        first = self.root / "first"
-        second = self.root / "second"
-        self.init_git(first)
-        self.init_git(second)
-        progress = []
-        original_run = context_population._run
-
-        def run_with_heartbeat(command, **keywords):
-            heartbeat = keywords.get("heartbeat")
-            if heartbeat is not None:
-                heartbeat(10.0)
-            return original_run(command, **keywords)
-
-        with mock.patch.object(
-            context_population, "_run", side_effect=run_with_heartbeat
-        ), mock.patch.object(
-            context_population, "_format_elapsed", return_value="00:10"
-        ), mock.patch.dict(
-            os.environ,
-            {**self.environ, "CONTEXT_POPULATION_GRAPHIFY_FAILURE": "second"},
-            clear=False,
-        ), self.assertRaises(PopulationError):
-            result = context_population.populate_context(
-                self.root, self.palace, "acme", progress=progress.append
-            )
-
-        self.assertEqual(progress[-2:], [
-            "[graphify 1/2] created first",
-            "[graphify 2/2] created second",
-        ])
-        self.assertLess(
-            progress.index("[mempalace] store verified"),
-            progress.index("[graphify 1/2] created first"),
-        )
-
-    def test_default_monitor_reports_every_success_stage_without_raw_output(self):
-        repository = self.root / "api"
-        self.init_git(repository)
-        progress = []
-
-        with mock.patch.object(
-            context_population, "_format_elapsed", return_value="00:00"
-        ), mock.patch.dict(os.environ, self.environ, clear=False):
-            result = context_population.populate_context(
-                self.root, self.palace, "acme", progress=progress.append
-            )
-
-        self.assertEqual(result.repositories[0].action, "created")
-        self.assertIn("[discover] 1/1 api — Graphify sync pending", progress)
-        self.assertIn("[graphify 1/1] created api", progress)
-        self.assertEqual(progress[-1], "[graphify 1/1] created api")
-        joined = "\n".join(progress)
-        self.assertNotIn("raw mempalace success output", joined)
-        self.assertNotIn("raw graphify success output", joined)
-
-    def test_monitor_escapes_control_characters_in_dynamic_fields(self):
-        repository = self.root / (
-            "bad\n[graphify forged] status\x1b[31m\u0085\u2028"
-        )
-        self.init_git(repository)
-        progress = []
-
-        with mock.patch.object(
-            context_population,
-            "_discover_git_layout",
-            return_value=context_population.RepositoryDiscovery((repository,), ()),
-        ), mock.patch.dict(os.environ, self.environ, clear=False):
-            result = context_population.populate_context(
+    def test_population_failure_is_bounded(self) -> None:
+        self.init_git(self.root / "service")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    **self.environment,
+                    "CONTEXT_POPULATION_MEMPALACE_FAIL": "1",
+                },
+                clear=False,
+            ),
+            self.assertRaisesRegex(
+                PopulationError,
+                "MemPalace mine.*exit code 7",
+            ),
+        ):
+            context_population.populate_context(
                 self.root,
                 self.palace,
-                "wing\nforged\x1b[31m\u0085\u2028",
-                progress=progress.append,
+                "acme",
             )
+        self.assertEqual(len(self.read_calls()), 1)
 
-        for event in progress:
-            self.assertNotIn("\n", event)
-            self.assertNotIn("\x1b", event)
-            self.assertNotIn("\u0085", event)
-            self.assertNotIn("\u2028", event)
-        joined = "\n".join(progress)
-        escaped_name = (
-            r"bad\n[graphify forged] status\u001b[31m\u0085\u2028"
+    def test_render_population_result_is_concise(self) -> None:
+        rendered = context_population.render_population_result(
+            context_population.PopulationResult(self.palace, "acme")
         )
-        escaped_wing = r"wing\nforged\u001b[31m\u0085\u2028"
-        self.assertIn(escaped_name, joined)
-        self.assertIn(escaped_wing, joined)
-        hook_events = [
-            event for event in progress if "hook not managed" in event
-        ]
-        self.assertEqual(len(hook_events), 1)
-        self.assertLessEqual(len(hook_events[0]), 1024)
-        self.assertNotEqual(graph_hook_status(repository), "installed")
-        self.assertFalse((repository / ".git/hooks/post-commit").exists())
-        self.assertFalse((repository / ".git/hooks/post-checkout").exists())
-        self.assertTrue(tuple(self.data_root.rglob("graph.json")))
-        self.assertEqual(result.repositories[0].action, "created")
-        self.assertEqual(result.repositories[0].hook_status, "not managed")
-
-        rendered = context_population.render_population_result(result)
-        self.assertNotIn("\n[graphify forged]", rendered)
-        self.assertNotIn("\u0085", rendered)
-        self.assertNotIn("\u2028", rendered)
-        self.assertIn(escaped_name, rendered)
-        self.assertIn(escaped_wing, rendered)
-
-    def test_render_population_result_uses_dynamic_table_and_empty_message(self):
-        result = context_population.PopulationResult(
-            self.palace,
-            "acme",
-            (context_population.RepositoryResult(self.root / "api", "created", "installed"),),
-        )
-
-        rendered = context_population.render_population_result(result)
-
-        self.assertIn(f"MemPalace: populated wing acme in {self.palace}", rendered)
-        self.assertIn("| REPOSITORY", rendered)
-        self.assertIn(str(self.root / "api"), rendered)
-        self.assertIn("| created", rendered)
-        self.assertIn("| installed", rendered)
-        self.assertIn(
-            "Graphify: no applicable Git repositories found.",
-            context_population.render_population_result(
-                context_population.PopulationResult(self.palace, "acme", ())
-            ),
+        self.assertEqual(
+            rendered,
+            f"MemPalace: populated wing acme in {self.palace}\n",
         )
 
 

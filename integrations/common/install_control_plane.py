@@ -188,41 +188,35 @@ def _journal_checkpoint(phase: str) -> None:
     """Test seam after the journal domain is bound to held descriptors."""
 
 
-def _verify_install_lock(snapshot_root: Path, descriptor: int) -> int:
+def _verify_install_lock(lock_path: Path, descriptor: int) -> None:
     if type(descriptor) is not int or descriptor < 0:
         raise InstallControlPlaneError(
             "held installer lock descriptor is invalid"
         )
-    lock_path = snapshot_root.parent / "install.lock"
-    parent_descriptor = -1
+    lock_path = Path(lock_path).absolute()
     try:
         held = os.fstat(descriptor)
         current_lock = os.lstat(lock_path)
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        parent_descriptor = os.open("..", flags, dir_fd=descriptor)
-        held_parent = os.fstat(parent_descriptor)
-        current_parent = os.lstat(snapshot_root.parent)
+        resolved = lock_path.resolve(strict=True)
     except OSError as error:
         raise InstallControlPlaneError(
             "held installer lock is unavailable"
         ) from error
     if (
-        not stat.S_ISDIR(held.st_mode)
+        resolved != lock_path
+        or not stat.S_ISDIR(held.st_mode)
         or held.st_uid != os.getuid()
+        or stat.S_IMODE(held.st_mode) != 0o700
         or stat.S_ISLNK(current_lock.st_mode)
         or not stat.S_ISDIR(current_lock.st_mode)
         or current_lock.st_uid != os.getuid()
+        or stat.S_IMODE(current_lock.st_mode) != 0o700
         or (held.st_dev, held.st_ino)
         != (current_lock.st_dev, current_lock.st_ino)
-        or (held_parent.st_dev, held_parent.st_ino)
-        != (current_parent.st_dev, current_parent.st_ino)
     ):
-        os.close(parent_descriptor)
         raise InstallControlPlaneError(
-            "held installer lock does not fence the journal state directory"
+            "held installer lock identity is invalid"
         )
-    return parent_descriptor
 
 
 @dataclass
@@ -235,12 +229,30 @@ class _JournalDomain:
 @contextmanager
 def _journal_domain(
     snapshot_root: Path,
+    install_lock_path: Path,
     install_lock_fd: int,
     *,
     create: bool,
 ):
     snapshot_root = _private_child(snapshot_root)
-    state_fd = _verify_install_lock(snapshot_root, install_lock_fd)
+    _verify_install_lock(install_lock_path, install_lock_fd)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    state_fd = os.open(snapshot_root.parent, flags)
+    opened_state = os.fstat(state_fd)
+    current_state = os.lstat(snapshot_root.parent)
+    if (
+        not stat.S_ISDIR(opened_state.st_mode)
+        or opened_state.st_uid != os.getuid()
+        or stat.S_IMODE(opened_state.st_mode) != 0o700
+        or (opened_state.st_dev, opened_state.st_ino)
+        != (current_state.st_dev, current_state.st_ino)
+    ):
+        os.close(state_fd)
+        raise InstallControlPlaneError(
+            "installer journal parent changed while opening"
+        )
     domain = _JournalDomain(
         state_fd=state_fd,
         name=snapshot_root.name,
@@ -495,6 +507,8 @@ def _snapshot(
 def _candidate_payload(
     repository_root: Path, installed_root: Path, name: str
 ) -> bytes:
+    if name == "controller-policy.md":
+        return (repository_root / "config" / name).read_bytes()
     installed = installed_root / name
     if _lexists(installed):
         return _private_bytes(installed, name, MAX_CONFIG_BYTES)
@@ -583,13 +597,28 @@ def _load_manifest(journal_fd: int) -> dict[str, object]:
         raise InstallControlPlaneError(
             "installer control-plane manifest is invalid"
         ) from error
+    if not isinstance(manifest, dict):
+        raise InstallControlPlaneError(
+            "installer control-plane manifest is invalid"
+        )
+    has_prior_policy = "priorPolicyPresent" in manifest
+    has_policy_digest = "activatedPolicyDigest" in manifest
+    policy_fields_valid = (
+        not has_prior_policy
+        and not has_policy_digest
+    ) or (
+        has_prior_policy
+        and has_policy_digest
+        and isinstance(manifest.get("priorPolicyPresent"), bool)
+        and isinstance(manifest.get("activatedPolicyDigest"), str)
+    )
     if (
-        not isinstance(manifest, dict)
-        or manifest.get("schemaVersion") != 2
+        manifest.get("schemaVersion") != 2
         or manifest.get("phase")
         not in _ACTIVE_PHASES | _TERMINAL_PHASES
         or not isinstance(manifest.get("priorModelPresent"), bool)
         or not isinstance(manifest.get("priorBindingPresent"), bool)
+        or not policy_fields_valid
         or not isinstance(manifest.get("installedRoot"), str)
         or not isinstance(manifest.get("bootstrapDigests"), dict)
         or not isinstance(manifest.get("activationStates"), list)
@@ -691,12 +720,14 @@ def activate(
     candidate_root: Path,
     installed_root: Path,
     snapshot_root: Path,
+    install_lock_path: Path,
     install_lock_fd: int,
 ) -> None:
     candidate_root = Path(candidate_root).resolve(strict=True)
     installed_root = Path(installed_root).resolve(strict=True)
     with _journal_domain(
         snapshot_root,
+        install_lock_path,
         install_lock_fd,
         create=True,
     ) as journal:
@@ -738,10 +769,21 @@ def _activate_bound(
             "installed-stack-bindings",
             MAX_BINDING_BYTES,
         )
+        policy_path = installed_root / "controller-policy.md"
+        prior_policy = _snapshot(
+            policy_path,
+            journal.journal_fd,
+            "installed-controller-policy",
+            MAX_CONFIG_BYTES,
+        )
+        candidate_policy = (
+            candidate_root / "controller-policy.md"
+        ).read_bytes()
         bootstrap_payloads = {
             name: (candidate_root / name).read_bytes()
             for name in _BOOTSTRAP_FILES
-            if not _lexists(installed_root / name)
+            if name != "controller-policy.md"
+            and not _lexists(installed_root / name)
         }
         initial_model = (
             (candidate_root / "model-stacks.json").read_bytes()
@@ -766,6 +808,8 @@ def _activate_bound(
             "installedRoot": str(installed_root),
             "priorModelPresent": prior_model is not None,
             "priorBindingPresent": prior_binding is not None,
+            "priorPolicyPresent": prior_policy is not None,
+            "activatedPolicyDigest": _digest(candidate_policy),
             "priorState": prior_state,
             "bootstrapDigests": {
                 name: _digest(payload)
@@ -784,6 +828,12 @@ def _activate_bound(
                 exclusive=True,
             )
             _activation_checkpoint(f"bootstrap:{name}")
+        _atomic_private(
+            policy_path,
+            candidate_policy,
+            exclusive=False,
+        )
+        _activation_checkpoint("controller-policy-installed")
         if initial_model is not None:
             _atomic_private(
                 model_path,
@@ -825,11 +875,13 @@ def _activate_bound(
 def rollback(
     installed_root: Path,
     snapshot_root: Path,
+    install_lock_path: Path,
     install_lock_fd: int,
 ) -> None:
     installed_root = Path(installed_root).resolve(strict=True)
     with _journal_domain(
         snapshot_root,
+        install_lock_path,
         install_lock_fd,
         create=False,
     ) as journal:
@@ -875,6 +927,17 @@ def _rollback_bound(
             if manifest["priorBindingPresent"]
             else None
         )
+        policy_managed = "priorPolicyPresent" in manifest
+        original_policy = (
+            _private_bytes_at(
+                journal.journal_fd,
+                "installed-controller-policy.data",
+                "installed controller-policy snapshot",
+                MAX_CONFIG_BYTES,
+            )
+            if policy_managed and manifest["priorPolicyPresent"]
+            else None
+        )
         prior_state = manifest.get("priorState")
         if not isinstance(prior_state, dict):
             raise InstallControlPlaneError(
@@ -911,6 +974,29 @@ def _rollback_bound(
                     )
         except StackStoreError:
             conflicts.append("model-stacks.json/stack-bindings.json")
+
+        if policy_managed:
+            policy_path = installed_root / "controller-policy.md"
+            current_policy_digest = _optional_digest(
+                policy_path,
+                "controller-policy.md",
+                MAX_CONFIG_BYTES,
+            )
+            prior_policy_digest = (
+                None if original_policy is None else _digest(original_policy)
+            )
+            if current_policy_digest == manifest["activatedPolicyDigest"]:
+                if original_policy is None:
+                    policy_path.unlink()
+                    _fsync_directory(installed_root)
+                else:
+                    _atomic_private(
+                        policy_path,
+                        original_policy,
+                        exclusive=False,
+                    )
+            elif current_policy_digest != prior_policy_digest:
+                conflicts.append("controller-policy.md")
 
         bootstrap_digests = manifest["bootstrapDigests"]
         if not isinstance(bootstrap_digests, dict):
@@ -976,16 +1062,27 @@ def _rollback_bound(
 def recover(
     installed_root: Path,
     snapshot_root: Path,
+    install_lock_path: Path,
     install_lock_fd: int,
 ) -> None:
     """Recover an unfinished journal while the installer lock is owned."""
-    rollback(installed_root, snapshot_root, install_lock_fd)
+    rollback(
+        installed_root,
+        snapshot_root,
+        install_lock_path,
+        install_lock_fd,
+    )
 
 
-def finalize(snapshot_root: Path, install_lock_fd: int) -> None:
+def finalize(
+    snapshot_root: Path,
+    install_lock_path: Path,
+    install_lock_fd: int,
+) -> None:
     """Remove a committed journal after the outer install is durable."""
     with _journal_domain(
         snapshot_root,
+        install_lock_path,
         install_lock_fd,
         create=False,
     ) as journal:

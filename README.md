@@ -54,7 +54,7 @@ Check the installed Orichum release with `orichum --version`. See the
 limitations.
 
 To remove the Orichum runtime while keeping accounts, sessions, project
-configuration, graphs, and Mempalace palaces for a later reinstall:
+configuration, and Mempalace palaces for a later reinstall:
 
 ```bash
 ./install.sh --uninstall
@@ -123,8 +123,9 @@ orichum context add ~/projects --pool shared
 ```
 
 This is a one-time foreground setup. Orichum discovers repositories, prepares
-Mempalace and Graphify data, installs its Graphify refresh hooks, and saves the
-context only after population succeeds.
+durable Mempalace project memory, and saves the context only after population
+succeeds. Live source and relationship context is built lazily by LeanCTX
+inside each session.
 
 Docker MCP Toolkit is optional. Add a profile only when the project needs one:
 
@@ -177,8 +178,6 @@ orichum doctor
 | Inspect a session's routes | `orichum session routes SESSION_ID` |
 | Resume a session | `orichum resume SESSION_ID` |
 | Monitor context savings | `orichum leanctx stats`, `orichum leanctx watch`, or `orichum leanctx dashboard` |
-| Refresh the current code graph | `orichum graph .` |
-| Inspect graph state without changing it | `orichum graph status .` |
 | Check the installation | `orichum doctor` |
 | Upgrade Orichum | Run `./install.sh --upgrade` from the Orichum checkout |
 
@@ -194,8 +193,8 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
   [Model stacks](docs/model-stacks.md).
 - **Resumes and family changes:** resume a frozen session or fork it with a
   bounded handoff onto another stack. See [Sessions](docs/sessions.md).
-- **Memory and code graphs:** Mempalace recalls durable decisions; Graphify
-  answers structural repository questions. Both are used on demand. See
+- **Memory and code intelligence:** Mempalace recalls durable decisions;
+  LeanCTX reads live source and answers structural or impact questions. See
   [Memory and code graph](docs/memory-and-code-graph.md).
 - **Live source context:** LeanCTX gives the controller compact reads, search,
   trees, lossless expansion, and approved text patches while preserving
@@ -215,7 +214,7 @@ flowchart LR
     P["Project directory"] --> O["Orichum"]
     O --> S["Isolated Claude Code session"]
     S --> M["Selected account and model"]
-    O -. "loads only relevant context" .-> T["LeanCTX · Graphify · Mempalace · MCP_DOCKER"]
+    O -. "loads only relevant context" .-> T["LeanCTX · Mempalace · MCP_DOCKER"]
 ```
 
 The directory where you run `orichum` selects the project configuration.
@@ -242,12 +241,12 @@ orichum provider accounts
 orichum stack list
 orichum context list
 orichum sessions
-orichum graph status .
+orichum leanctx stats
 ```
 
 The [Troubleshooting guide](docs/troubleshooting.md) covers unavailable routes,
-connection failures, GitHub identity, missing MCPs, stale graphs, population
-delays, and installer port conflicts.
+connection failures, GitHub identity, missing MCPs, LeanCTX activity,
+population delays, and installer port conflicts.
 
 ## Documentation
 
@@ -265,7 +264,7 @@ delays, and installer port conflicts.
 | [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
 | [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
 | [LeanCTX](docs/leanctx.md) | Compact source context, fallbacks, savings statistics, and live monitoring |
-| [Memory and code graph](docs/memory-and-code-graph.md) | Mempalace, Graphify, hooks, worktrees, and retrieval |
+| [Memory and code intelligence](docs/memory-and-code-graph.md) | How LeanCTX live context and Mempalace durable memory work together |
 | [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
 | [Architecture](docs/architecture.md) | Components, request flow, ownership, and security boundaries |
 | [Troubleshooting](docs/troubleshooting.md) | Symptoms, diagnostics, and recovery |
@@ -287,11 +286,9 @@ delays, and installer port conflicts.
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — provides
   provider authentication and model access.
 - [LeanCTX](https://github.com/yvgude/lean-ctx) — provides compact live file,
-  tree, and search context.
+  tree, search, graph, callgraph, and impact context.
 - [Mempalace](https://github.com/MemPalace/mempalace) — provides durable
   project memory.
-- [Graphify](https://github.com/Graphify-Labs/graphify) — provides repository
-  knowledge graphs.
 - [Docker MCP Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
   — provides project-specific external tools through Orichum's `MCP_DOCKER`
   integration.

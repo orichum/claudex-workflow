@@ -20,6 +20,7 @@ from .session_config import (
     require_owned_component,
     require_private_direct_child,
     verify_context_binding,
+    verify_leanctx_attachment,
 )
 
 
@@ -38,6 +39,8 @@ class LeanctxRun:
     project_root: Path
     created_at: str
     has_activity: bool
+    attached: bool = True
+    created_at_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -122,15 +125,6 @@ def _verified_run(
     candidate: Path,
 ) -> LeanctxRun | None:
     run_dir = require_private_direct_child(sessions, candidate)
-    try:
-        os.lstat(run_dir / "leanctx")
-    except FileNotFoundError:
-        return None
-    leanctx = require_owned_component(
-        run_dir,
-        "leanctx",
-        private=True,
-    )
     manifest_path = run_dir / ".complete"
     try:
         os.lstat(manifest_path)
@@ -148,7 +142,14 @@ def _verified_run(
     )
     context = binding.context
     route = context.get("route") if isinstance(context, dict) else None
-    project = route.get("contextRootReal") if isinstance(route, dict) else None
+    repository = (
+        context.get("repoRootReal") if isinstance(context, dict) else None
+    )
+    project = (
+        repository
+        if isinstance(repository, str) and repository
+        else route.get("contextRootReal") if isinstance(route, dict) else None
+    )
     if not isinstance(project, str) or not project:
         raise LeanctxMonitorError("session project context is invalid")
     project_root = Path(project)
@@ -158,12 +159,38 @@ def _verified_run(
         manifest_stat.st_mtime,
         tz=timezone.utc,
     ).isoformat(timespec="seconds").replace("+00:00", "Z")
+    unattached = LeanctxRun(
+        run_id=binding.run_id,
+        run_dir=binding.run_dir,
+        project_root=project_root.resolve(strict=False),
+        created_at=created_at,
+        has_activity=False,
+        attached=False,
+        created_at_ns=manifest_stat.st_mtime_ns,
+    )
+    try:
+        os.lstat(run_dir / "leanctx")
+    except FileNotFoundError:
+        return unattached
+    try:
+        os.lstat(run_dir / "leanctx" / "config.toml")
+    except FileNotFoundError:
+        return unattached
+    try:
+        leanctx = verify_leanctx_attachment(run_dir)
+    except SessionError as error:
+        if "does not match its contract" in str(error):
+            return unattached
+        raise LeanctxMonitorError(
+            "LeanCTX attachment is unavailable or unsafe"
+        ) from error
     return LeanctxRun(
         run_id=binding.run_id,
         run_dir=binding.run_dir,
         project_root=project_root.resolve(strict=False),
         created_at=created_at,
         has_activity=_activity_exists(leanctx),
+        created_at_ns=manifest_stat.st_mtime_ns,
     )
 
 
@@ -191,14 +218,20 @@ def discover_runs(
             )
             if run is not None:
                 runs.append(run)
-    except (LeanctxMonitorError, SessionError, OSError) as error:
+    except LeanctxMonitorError:
+        raise
+    except (SessionError, OSError) as error:
         raise LeanctxMonitorError(
             "completed LeanCTX run is invalid"
         ) from error
     return tuple(
         sorted(
             runs,
-            key=lambda run: (run.created_at, run.run_id),
+            key=lambda run: (
+                run.created_at_ns,
+                run.created_at,
+                run.run_id,
+            ),
             reverse=True,
         )
     )
@@ -210,7 +243,7 @@ def select_run(
     run_id: str | None,
     current_run_id: str | None = None,
 ) -> LeanctxRun:
-    """Select an explicit, current, or newest active run for a project."""
+    """Select an explicit, current, or newest run for a project."""
     if run_id is not None:
         if not _RUN_ID.fullmatch(run_id):
             raise LeanctxMonitorError("run identifier is invalid")
@@ -229,13 +262,26 @@ def select_run(
             for run in matches:
                 if run.run_id == current_run_id:
                     return run
-        active = tuple(run for run in matches if run.has_activity)
-        candidates = active or matches
-        return max(candidates, key=lambda run: (run.created_at, run.run_id))
+        return max(
+            matches,
+            key=lambda run: (
+                run.created_at_ns,
+                run.created_at,
+                run.run_id,
+            ),
+        )
     raise LeanctxMonitorError(
         "current project has no LeanCTX activity; "
         "run 'orichum leanctx list' to inspect available runs"
     )
+
+
+def require_attached(run: LeanctxRun) -> None:
+    if not run.attached:
+        raise LeanctxMonitorError(
+            f"LeanCTX is not attached to run {run.run_id}; "
+            "rerun install.sh and start a new Orichum session"
+        )
 
 
 def leanctx_environment(

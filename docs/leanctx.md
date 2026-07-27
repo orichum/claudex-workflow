@@ -1,61 +1,66 @@
 # LeanCTX
 
-LeanCTX is Orichum's live source-context layer. It gives the controller compact
-file reads, source search, project trees, lossless expansion, approved text
-patches, and compressed shell output without replacing Claude Code's native
-tools.
+LeanCTX is Orichum's only live code-context and code-intelligence layer. It
+provides compact reads, search, trees, expansion, repository graphs, impact
+analysis, callgraphs, anchored text patches, and compressed observational shell
+output.
 
-## What Orichum enables
+## Fixed session contract
 
-Each physical session gets one headless stdio MCP process with exactly:
+Every physical session receives one headless LeanCTX MCP with exactly:
 
 - `ctx_read`
 - `ctx_search`
 - `ctx_tree`
 - `ctx_expand`
+- `ctx_graph`
+- `ctx_impact`
+- `ctx_callgraph`
 - `ctx_patch`
 - `ctx_shell`
 
-Orichum pins the process to the active Git repository and stores its config,
-cache, state, and data under that session's private run directory. Concurrent
-sessions therefore do not share LeanCTX state. Orichum preapproves the four
-read-only context tools. `ctx_patch` and `ctx_shell` stay under Claude Code's
-normal tool approval because they change text or execute commands. Index
-construction is capped at two threads per session to reduce contention when
-several sessions index at once.
+Orichum validates that exact surface during installation and doctor checks,
+then builds a temporary one-file graph, resolves its symbol, and runs impact
+analysis. Unexpected, missing, or non-functional tools fail readiness instead
+of silently changing model behavior.
 
-## What Orichum does not enable
+The process is pinned to the active Git repository. A launch from a configured
+multi-repository parent is pinned to that verified parent. Config, cache, index,
+graph, and state remain under the physical session's private run directory.
+Concurrent sessions do not share or mutate each other's LeanCTX state.
 
-Orichum does not use LeanCTX's setup or wrapping commands, global rules, shell
-hooks, daemon, request proxy, graph, memory, provider connectors, autonomous
-features, or universal `ctx_call` gateway.
+## How the graph works
 
-Those responsibilities already belong elsewhere:
+LeanCTX builds its index and property graph lazily when graph, impact, or
+callgraph context is first requested. Orichum does not run a separate graph
+command, precompute repository output, install Git refresh hooks, or write
+generated graph files into the checkout.
 
-| Need | Authority |
-|---|---|
-| Current source reads, search, exploration, anchored patches, and compressed observational shell output | LeanCTX |
-| Repository relationships and impact | Graphify |
-| Durable decisions and conventions | Mempalace |
-| Models, accounts, sessions, and policy | Orichum |
+Use the graph tools naturally through the controller:
+
+- symbol and relationship questions route to `ctx_graph`;
+- change-risk questions route to `ctx_impact`;
+- callers and callees route to `ctx_callgraph`.
+
+The controller does not choose between LeanCTX and another graph engine.
 
 ## Exactness and fallback
 
-Compressed context is for understanding. An edit follows an anchored
-`ctx_read` with `ctx_patch`, so the patch is based on current source context.
-`ctx_shell` is for observational commands; use native `Bash` for state
-changes. Native `Read`, `Edit`, and `Write` remain the fallback when LeanCTX is
-missing, unsafe, or unsuitable. Decisive test and verification output remains
-raw.
+Compressed context is for understanding. Supported text edits use an anchored
+`ctx_read` followed by `ctx_patch`. `ctx_shell` is observational; state-changing
+Git, package, service, deployment, and infrastructure commands use native
+`Bash`.
 
-If LeanCTX is missing, unsafe, or the launch directory is not inside a Git
-repository, Orichum omits the MCP. The session continues with Claude Code's
-native read and search tools.
+Native `Read`, `Edit`, and `Write` remain available for unsupported formats,
+binary files, exact verification, or a LeanCTX failure. They are fallbacks, not
+parallel optimizers.
 
-## Monitor LeanCTX
+Orichum disables LeanCTX's autonomous gateway, global shell hooks, daemon,
+provider connectors, memory, request proxy, and universal `ctx_call` surface.
 
-From a configured project, inspect the current Orichum run. Outside a live
-session, Orichum selects the newest run that has recorded LeanCTX activity:
+## Monitor savings
+
+From a project:
 
 ```bash
 orichum leanctx stats
@@ -63,36 +68,21 @@ orichum leanctx watch
 orichum leanctx dashboard
 ```
 
-`stats` prints a savings snapshot, `watch` opens LeanCTX's live terminal
-monitor, and `dashboard` opens the authenticated Observatory on
-`127.0.0.1`. The dashboard runs in the foreground and stops with Ctrl+C;
-Orichum does not install another service. Press `q` to leave the terminal
-monitor.
+`stats` prints a snapshot, `watch` opens the terminal observatory, and
+`dashboard` starts the authenticated local web observatory in the foreground.
+Stop it with Ctrl+C.
 
-List physical runs or select one explicitly:
+Select a physical run when needed:
 
 ```bash
 orichum leanctx list
-orichum leanctx list --limit 50
-orichum leanctx list --all
 orichum leanctx stats --run run.mrds3ghq
 orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
 ```
 
-The list shows the newest 20 physical runs by default. Use `--limit` for a
-different bound or `--all` for the complete history. Without `--run`, Orichum
-uses the current physical run when that identity is available. Otherwise it
-selects the newest run with recorded activity for the current project, falling
-back to that project's newest run only when none has activity. It never crosses
-project boundaries. A physical `run.*` ID identifies one LeanCTX process and
-its metrics; it is different from the logical `oc-s-*` session ID used by
-`orichum resume`. Historical physical runs remain selectable with `--run`.
-
-The web dashboard opens a browser by default. Use `--open none` to print its
-local URL without opening one. It uses a temporary configuration copy, so
-dashboard configuration changes are nonpersistent and cannot mutate or
-invalidate a live session. Metrics, events, and activity still come from the
-selected run.
+Without `--run`, Orichum uses the current attached run or the newest run for
+the current project. It does not cross project boundaries or substitute an
+older run merely because it has more activity.
 
 ## Verify
 
@@ -100,7 +90,6 @@ selected run.
 orichum doctor
 ```
 
-The doctor checks Orichum's managed binary with a real MCP handshake and
-rejects any advertised tool outside the fixed six-tool contract. It deliberately
-does not run LeanCTX's global doctor because Orichum does not use LeanCTX's
-global integration mode.
+Doctor performs a real MCP handshake with the managed binary and verifies the
+nine-tool contract against an isolated temporary fixture. It does not index
+your project or launch a model session.

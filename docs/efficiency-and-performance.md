@@ -39,21 +39,28 @@ patch.
 
 ## Tool-schema efficiency
 
-Orichum keeps six tools resident in eligible model requests:
+Orichum keeps native `Bash` and its nine LeanCTX tools resident in eligible
+model requests:
 
 - native `Bash`;
-- LeanCTX `ctx_read`, `ctx_search`, `ctx_expand`, `ctx_patch`, and `ctx_shell`.
+- LeanCTX read, search, tree, expansion, graph, impact, callgraph, patch, and
+  shell tools.
 
 Other native and project-specific tools are marked for deferred loading, and
-Claude receives the tool-search primitive. Live acceptance showed the expected
-sequence: `ToolSearch` loaded Graphify and Mempalace only when the prompt needed
-them. This avoids injecting optional Graphify, Mempalace, and MCP_DOCKER schemas
-into every model turn.
+Claude receives the tool-search primitive. Mempalace and MCP_DOCKER schemas are
+loaded only when needed. Keeping the small LeanCTX surface resident makes code
+routing deterministic while avoiding a second graph-tool choice.
 
-The exact LeanCTX MCP is intentionally limited to six tools. Four read-only
-tools are preapproved; patch and shell keep normal approval. The universal
-gateway, duplicate shell path, session memory, composition, and LeanCTX graph
-paths are disabled because Orichum already owns those responsibilities.
+This request transform is enabled only for model protocols that Orichum has
+verified with Claude Code's tool-search contract. Unknown Kimi, Gemini, or
+future model routes are passed through unchanged instead of receiving
+Anthropic-specific request fields that could break inference. Provider support
+does not by itself imply tool-deferral protocol support.
+
+The exact LeanCTX MCP is intentionally limited to nine tools. Seven read-only
+context and code-intelligence tools are preapproved; patch and shell keep
+normal approval. The universal gateway, session memory, composition, autonomy,
+daemon, and provider paths remain disabled.
 
 ## Prompt-cache evidence
 
@@ -68,7 +75,6 @@ provider cache continuity—not a claim of a universal 96.7% saving.
 |---|---:|---:|---:|---:|---:|
 | GPT controller + LeanCTX read | 12.52 s | $0.134653 | 24,658 | 11,776 | 219 |
 | Resume same logical session | 4.40 s | $0.011648 | 807 | 11,776 | 69 |
-| Graphify + Mempalace live context | 9.45 s | $0.102776 | 17,947 | 18,432 | 153 |
 | GPT/Terra explorer | 12.15 s | $0.055014 | 3,509 | 20,480 | 124 |
 | Sonnet critic | 88.28 s | $0.214390 | 13,293 | 10,752 | 187 |
 | Opus architect | 34.54 s | $0.207710 | 24,172 | 0 | 170 |
@@ -87,7 +93,7 @@ At idle after all sessions exited:
 | Orichum route proxy | 0.0% | 23,968 KiB |
 | Total shared resident footprint | 0.0% | 92,112 KiB (about 90 MiB) |
 
-No per-session Claudex translator, LeanCTX, Graphify MCP, or Mempalace MCP
+No per-session Claudex translator, LeanCTX, or Mempalace MCP
 process remained after the corresponding session ended. One-shot live session
 process trees peaked at roughly 355–380 MiB RSS in the sampled runs.
 
@@ -101,7 +107,7 @@ The efficient daily-driver path is:
 1. defer optional schemas;
 2. use LeanCTX map/signature/search for understanding;
 3. use anchored reads only for edits;
-4. query Graphify for relationships;
+4. use LeanCTX graph tools for relationships and impact;
 5. query Mempalace only for durable history;
 6. delegate only when independent specialist work justifies its latency and
    token cost.

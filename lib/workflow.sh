@@ -72,7 +72,7 @@ install_state_component_field() {
 }
 
 print_component_status_table() {
-  (($# == 8)) || return 2
+  (($# == 7)) || return 2
   local value
   for value in "$@"; do
     case "$value" in
@@ -88,9 +88,8 @@ print_component_status_table() {
     Claudex "$3" \
     LeanCTX "$4" \
     Mempalace "$5" \
-    Graphify "$6" \
-    Routing "$7" \
-    'Controller plugin' "$8"
+    Routing "$6" \
+    'Controller plugin' "$7"
 }
 
 linux_environment_kind() {
@@ -551,61 +550,7 @@ read_service_ports() {
   fi
   [[ -f "$ports_file" && ! -L "$ports_file" ]] || return 1
   jq -er '
-    def next_port($used):
-      first(
-        range(13456; 65536) as $candidate |
-        select(($used | index($candidate)) == null) |
-        $candidate
-      );
     select(type == "object") |
-    if keys == ["cliproxyPort", "headroomPort"] then
-      . as $legacy |
-      ($legacy + {routeProxyPort:
-        next_port([
-          $legacy.cliproxyPort,
-          $legacy.headroomPort,
-          13456
-        ])}) |
-      . + {claudexProxyPort:
-        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])} |
-      del(.headroomPort)
-    elif keys == [
-      "claudexProxyPort",
-      "cliproxyPort",
-      "headroomPort"
-    ] then
-      {
-        routeProxyPort: .claudexProxyPort,
-        cliproxyPort,
-        headroomPort
-      } |
-      . + {claudexProxyPort:
-        next_port([.cliproxyPort, .headroomPort, .routeProxyPort])} |
-      del(.headroomPort)
-    elif keys == ["cliproxyPort", "headroomPort", "routeProxyPort"] then
-      . as $legacy |
-      {
-        claudexProxyPort: next_port([
-          $legacy.cliproxyPort,
-          $legacy.routeProxyPort
-        ]),
-        cliproxyPort: $legacy.cliproxyPort,
-        routeProxyPort: $legacy.routeProxyPort
-      }
-    elif keys == [
-      "claudexProxyPort",
-      "cliproxyPort",
-      "headroomPort",
-      "routeProxyPort"
-    ] then del(.headroomPort)
-    elif keys == [
-      "claudexProxyPort",
-      "cliproxyPort",
-      "routeProxyPort"
-    ] then .
-    else
-      empty
-    end |
     select(keys == [
       "claudexProxyPort",
       "cliproxyPort",
@@ -803,19 +748,18 @@ print_install_summary() {
   local claudex_binary="$4"
   local cliproxy_binary="$5"
   local mempalace_binary="$6"
-  local graphify_binary="$7"
-  local cliproxy_service_file="$8"
-  local cliproxy_port="$9"
-  local cliproxy_action="${10}"
-  local claudex_proxy_service_file="${11}"
-  local claudex_proxy_port="${12}"
-  local route_proxy_port="${13}"
-  local claudex_proxy_action="${14}"
-  local python_entrypoint="${15}"
-  local python_version="${16}"
-  local python_realpath="${17}"
-  local python_action="${18}"
-  local leanctx_binary="${19}"
+  local cliproxy_service_file="$7"
+  local cliproxy_port="$8"
+  local cliproxy_action="$9"
+  local claudex_proxy_service_file="${10}"
+  local claudex_proxy_port="${11}"
+  local route_proxy_port="${12}"
+  local claudex_proxy_action="${13}"
+  local python_entrypoint="${14}"
+  local python_version="${15}"
+  local python_realpath="${16}"
+  local python_action="${17}"
+  local leanctx_binary="${18}"
 
   printf '%s\n' \
     '' \
@@ -827,7 +771,6 @@ print_install_summary() {
     "  CLIProxyAPI:       $cliproxy_binary" \
     "  LeanCTX:           $leanctx_binary" \
     "  MemPalace MCP:     $mempalace_binary" \
-    "  Graphify MCP:      $graphify_binary" \
     '' \
     'Python runtime' \
     '  Python request: 3.14.x' \
@@ -877,52 +820,6 @@ def valid_port(value):
     except (TypeError, ValueError):
         return False
     return str(port) == str(value) and 1024 <= port <= 65535
-
-
-def headroom_arguments_owned(arguments):
-    if not isinstance(arguments, list) or len(arguments) not in (12, 13, 14, 15):
-        return False
-    normalized = list(arguments)
-    if normalized[-1:] == ["--disable-kompress"]:
-        normalized.pop()
-    arguments = normalized
-    executable = arguments[0]
-    if not os.path.isabs(executable) or os.path.basename(executable) != "headroom":
-        return False
-    if mode == "new" and executable != f"{data_root}/headroom/bin/headroom":
-        return False
-    port = arguments[5]
-    legacy = [
-        "proxy",
-        "--host", "127.0.0.1",
-        "--port", port,
-        "--mode", "token",
-        "--no-cache",
-        "--intercept-tool-results",
-        "--lossless",
-        "--code-aware",
-    ]
-    if arguments[1:] == legacy:
-        return valid_port(port)
-    upstream = arguments[7]
-    prefix = "http://127.0.0.1:"
-    upstream_port = upstream[len(prefix):] if upstream.startswith(prefix) else ""
-    return (
-        valid_port(port)
-        and valid_port(upstream_port)
-        and port != upstream_port
-        and arguments[1:] == [
-            "proxy",
-            "--host", "127.0.0.1",
-            "--port", port,
-            "--anthropic-api-url", f"{prefix}{upstream_port}",
-            "--mode", "token",
-            "--no-cache",
-            "--intercept-tool-results",
-            "--lossless",
-            "--code-aware",
-        ]
-    )
 
 
 def claudex_proxy_arguments_owned(arguments):
@@ -1009,26 +906,7 @@ if b"<plist" in raw[:500]:
             )
         )
     else:
-        labels = {
-            "new": {"io.orichum.headroom"},
-            "legacy": {
-                "com.user.claudex-headroom",
-                "com.user.headroom-proxy",
-            },
-            "either": {
-                "io.orichum.headroom",
-                "com.user.claudex-headroom",
-                "com.user.headroom-proxy",
-            },
-        }
-        environment = document.get("EnvironmentVariables")
-        owned = (
-            document.get("Label") in labels[mode]
-            and headroom_arguments_owned(arguments)
-            and isinstance(environment, dict)
-            and environment.get("HEADROOM_CONFIG_DIR") == f"{data_root}/headroom/config"
-            and environment.get("HEADROOM_WORKSPACE_DIR") == f"{data_root}/headroom/state"
-        )
+        owned = False
     raise SystemExit(0 if owned else 1)
 
 lines = [
@@ -1168,261 +1046,12 @@ if kind == "claudex-proxy":
     )
     raise SystemExit(0 if owned else 1)
 
-expected_descriptions = {
-    "new": {"Description=Orichum Headroom proxy"},
-    "legacy": {
-        "Description=Claudex Headroom proxy",
-        "Description=Headroom proxy for Claudex",
-    },
-    "either": {
-        "Description=Orichum Headroom proxy",
-        "Description=Claudex Headroom proxy",
-        "Description=Headroom proxy for Claudex",
-    },
-}
-owned = (
-    len(descriptions) == 1
-    and descriptions[0] in expected_descriptions[mode]
-    and headroom_arguments_owned(arguments)
-    and environment.get("HEADROOM_CONFIG_DIR") == f"{data_root}/headroom/config"
-    and environment.get("HEADROOM_WORKSPACE_DIR") == f"{data_root}/headroom/state"
-)
-raise SystemExit(0 if owned else 1)
+raise SystemExit(1)
 PY
 }
 
 cliproxy_service_is_owned() {
   service_definition_is_owned "$1" "$2" cliproxy
-}
-
-headroom_service_is_owned() {
-  service_definition_is_owned "$1" "$2" headroom "${3:-either}"
-}
-
-headroom_private_runtime_is_safe() {
-  local data_root="$1"
-  local data_physical runtime_physical
-  [[ "$data_root" == /* && "$data_root" != / ]] || return 1
-  if [[ ! -e "$data_root/headroom" && ! -L "$data_root/headroom" ]]; then
-    return 0
-  fi
-  [[ -d "$data_root" && ! -L "$data_root" ]] && \
-    [[ -d "$data_root/headroom" && ! -L "$data_root/headroom" ]] && \
-    [[ "$(path_uid "$data_root/headroom")" == "$(id -u)" ]] || return 1
-  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
-  runtime_physical="$(cd -P -- "$data_root/headroom" && pwd)" || return 1
-  [[ "$runtime_physical" == "$data_physical/headroom" ]]
-}
-
-legacy_private_tool_layout_is_safe() (
-  local data_root="$1"
-  local legacy_root="$data_root/headroom"
-  local legacy_tool_dir="$legacy_root/tools"
-  local legacy_bin_dir="$legacy_root/bin"
-  local data_physical legacy_physical source_path source_physical
-  local environment entry_name entry_path current_uid
-  headroom_private_runtime_is_safe "$data_root" || return 1
-  if [[ ! -e "$legacy_tool_dir" && ! -L "$legacy_tool_dir" && \
-        ! -e "$legacy_bin_dir" && ! -L "$legacy_bin_dir" ]]; then
-    return 0
-  fi
-  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
-  legacy_physical="$(cd -P -- "$legacy_root" && pwd)" || return 1
-  [[ "$legacy_physical" == "$data_physical/headroom" ]] || return 1
-  current_uid="$(id -u)"
-  for source_path in "$legacy_tool_dir" "$legacy_bin_dir"; do
-    if [[ -e "$source_path" || -L "$source_path" ]]; then
-      [[ -d "$source_path" && ! -L "$source_path" ]] && \
-        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || return 1
-    fi
-  done
-  for environment in mempalace graphifyy; do
-    source_path="$legacy_tool_dir/$environment"
-    if [[ -e "$source_path" || -L "$source_path" ]]; then
-      [[ -d "$source_path" && ! -L "$source_path" ]] && \
-        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || return 1
-      source_physical="$(cd -P -- "$source_path" && pwd)" || return 1
-      [[ "$source_physical" == "$legacy_physical/tools/$environment" ]] || \
-        return 1
-    fi
-  done
-  shopt -s nullglob
-  for entry_path in "$legacy_bin_dir"/*; do
-    entry_name="$(basename "$entry_path")"
-    [[ "$entry_name" != headroom ]] || continue
-    [[ -L "$entry_path" ]] || return 1
-    source_physical="$(workflow_physical_path "$entry_path")" || return 1
-    case "$source_physical" in
-      "$legacy_physical/tools/mempalace/"*|\
-      "$legacy_physical/tools/graphifyy/"*) ;;
-      *) return 1 ;;
-    esac
-  done
-)
-
-preflight_owned_headroom_installation() {
-  local platform="$1"
-  local data_root="$2"
-  local cleanup_index service_file service_label service_unit ownership_mode
-  local target_state loaded_definition
-  local -a service_files service_labels service_units ownership_modes
-  headroom_private_runtime_is_safe "$data_root" || {
-    workflow_die "refusing unsafe private Headroom runtime"
-    return 1
-  }
-  legacy_private_tool_layout_is_safe "$data_root" || {
-    workflow_die "refusing unsafe legacy private tool layout"
-    return 1
-  }
-  case "$platform" in
-    darwin)
-      service_files=(
-        "$HOME/Library/LaunchAgents/io.orichum.headroom.plist"
-        "$HOME/Library/LaunchAgents/com.user.claudex-headroom.plist"
-        "$HOME/Library/LaunchAgents/com.user.headroom-proxy.plist"
-      )
-      service_labels=(
-        io.orichum.headroom
-        com.user.claudex-headroom
-        com.user.headroom-proxy
-      )
-      service_units=(- - -)
-      ;;
-    systemd)
-      service_files=(
-        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-headroom.service"
-        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-headroom.service"
-        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
-      )
-      service_labels=(- - -)
-      service_units=(
-        orichum-headroom.service
-        claudex-headroom.service
-        headroom-proxy.service
-      )
-      ;;
-    *) return 1 ;;
-  esac
-  ownership_modes=(new legacy legacy)
-  for cleanup_index in "${!service_files[@]}"; do
-    service_file="${service_files[$cleanup_index]}"
-    ownership_mode="${ownership_modes[$cleanup_index]}"
-    if [[ -e "$service_file" || -L "$service_file" ]]; then
-      headroom_service_is_owned \
-        "$service_file" "$data_root" "$ownership_mode" || {
-          workflow_die "refusing to remove unknown service file: $service_file"
-          return 1
-        }
-    fi
-  done
-  for cleanup_index in "${!service_files[@]}"; do
-    service_file="${service_files[$cleanup_index]}"
-    service_label="${service_labels[$cleanup_index]}"
-    service_unit="${service_units[$cleanup_index]}"
-    target_state="$(managed_service_target_state \
-      "$platform" "$service_label" "$service_unit")" || {
-        workflow_die "Headroom service target could not be inspected safely"
-        return 1
-      }
-    if [[ "$target_state" == loaded ]]; then
-      if [[ ! -f "$service_file" || -L "$service_file" ]]; then
-        workflow_die "refusing loaded unknown Headroom target"
-        return 1
-      fi
-      loaded_definition="$(managed_service_definition_path \
-        "$platform" "$service_label" "$service_unit" 2>/dev/null)" || {
-          workflow_die "Headroom service definition could not be inspected safely"
-          return 1
-        }
-      if [[ "$loaded_definition" != "$service_file" ]]; then
-        workflow_die "refusing loaded unknown Headroom target"
-        return 1
-      fi
-      managed_headroom_loaded_identity_is_owned \
-        "$platform" "$service_label" "$service_unit" "$service_file" || {
-          workflow_die "refusing loaded foreign Headroom identity"
-          return 1
-        }
-    fi
-  done
-}
-
-remove_owned_headroom_installation() {
-  local platform="$1"
-  local data_root="$2"
-  local service_file="$3"
-  local service_label="$4"
-  local service_unit="$5"
-  local ownership_mode="$6"
-  local remaining_service_file
-  local target_state loaded_definition
-  local -a known_service_files
-  [[ "$data_root" == /* && "$data_root" != / ]] || return 1
-  if [[ ! -d "$data_root" || -L "$data_root" ]]; then
-    workflow_die "refusing to remove Headroom from unsafe data root"
-    return 1
-  fi
-  preflight_owned_headroom_installation "$platform" "$data_root" || return 1
-  if [[ "$platform" == darwin ]]; then
-    known_service_files=(
-      "$HOME/Library/LaunchAgents/io.orichum.headroom.plist"
-      "$HOME/Library/LaunchAgents/com.user.claudex-headroom.plist"
-      "$HOME/Library/LaunchAgents/com.user.headroom-proxy.plist"
-    )
-  else
-    known_service_files=(
-      "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-headroom.service"
-      "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/claudex-headroom.service"
-      "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/headroom-proxy.service"
-    )
-  fi
-  if [[ ! -e "$service_file" && ! -L "$service_file" ]]; then
-    for remaining_service_file in "${known_service_files[@]}"; do
-      [[ ! -e "$remaining_service_file" && \
-         ! -L "$remaining_service_file" ]] || return 0
-    done
-    rm -rf -- "$data_root/headroom"
-    return
-  fi
-  headroom_service_is_owned \
-    "$service_file" "$data_root" "$ownership_mode" || {
-      workflow_die "refusing to remove unknown service file: $service_file"
-      return 1
-    }
-  target_state="$(managed_service_target_state \
-    "$platform" "$service_label" "$service_unit")" || return 1
-  if [[ "$target_state" == loaded ]]; then
-    loaded_definition="$(managed_service_definition_path \
-      "$platform" "$service_label" "$service_unit" 2>/dev/null)" || return 1
-    if [[ "$loaded_definition" != "$service_file" ]]; then
-      workflow_die "refusing to remove loaded unknown Headroom target"
-      return 1
-    fi
-    managed_headroom_loaded_identity_is_owned \
-      "$platform" "$service_label" "$service_unit" "$service_file" || {
-        workflow_die "refusing to remove loaded foreign Headroom identity"
-        return 1
-      }
-  fi
-  case "$platform" in
-    darwin)
-      if [[ "$target_state" == loaded ]]; then
-        launchctl bootout "gui/$(id -u)" "$service_file" \
-          >/dev/null 2>&1 || return 1
-      fi
-      ;;
-    systemd)
-      systemctl --user stop "$service_unit" >/dev/null 2>&1 || return 1
-      systemctl --user disable "$service_unit" >/dev/null 2>&1 || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  rm -f -- "$service_file" || return 1
-  for remaining_service_file in "${known_service_files[@]}"; do
-    [[ ! -e "$remaining_service_file" && \
-       ! -L "$remaining_service_file" ]] || return 0
-  done
-  rm -rf -- "$data_root/headroom"
 }
 
 claudex_proxy_service_is_owned() {
@@ -1501,135 +1130,6 @@ managed_service_definition_path() {
   esac
   [[ "$definition_path" == /* ]] || return 1
   printf '%s\n' "$definition_path"
-}
-
-managed_headroom_loaded_identity_is_owned() {
-  local platform="$1"
-  local label="$2"
-  local unit="$3"
-  local service_file="$4"
-  local loaded_output loaded_environment=
-  case "$platform" in
-    darwin)
-      loaded_output="$(launchctl print \
-        "gui/$(id -u)/$label" 2>/dev/null)" || return 1
-      ;;
-    systemd)
-      loaded_output="$(systemctl --user show \
-        --property ExecStart --value "$unit" 2>/dev/null)" || return 1
-      loaded_environment="$(systemctl --user show \
-        --property Environment --value "$unit" 2>/dev/null)" || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  workflow_python - \
-    "$platform" "$service_file" "$loaded_output" "$loaded_environment" <<'PY'
-import plistlib
-import shlex
-import sys
-from pathlib import Path
-
-platform = sys.argv[1]
-service_file = Path(sys.argv[2])
-loaded_text = sys.argv[3]
-loaded_environment_text = sys.argv[4]
-
-
-def systemd_words(value):
-    return shlex.split(value.replace("%%", "%").replace("$$", "$"))
-
-
-if platform == "darwin":
-    document = plistlib.loads(service_file.read_bytes())
-    expected_arguments = document.get("ProgramArguments")
-    expected_environment = document.get("EnvironmentVariables")
-    if not isinstance(expected_arguments, list) or not isinstance(
-        expected_environment, dict
-    ):
-        raise SystemExit(1)
-    loaded_program = None
-    loaded_arguments = []
-    loaded_values = {}
-    section = None
-    for raw_line in loaded_text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("program = "):
-            loaded_program = line[len("program = ") :]
-            continue
-        if line == "arguments = {":
-            section = "arguments"
-            continue
-        if line == "environment = {":
-            section = "environment"
-            continue
-        if line == "}":
-            section = None
-            continue
-        if section == "arguments" and line:
-            try:
-                values = shlex.split(line)
-            except ValueError:
-                raise SystemExit(1)
-            loaded_arguments.append(values[0] if len(values) == 1 else line)
-        elif section == "environment" and " => " in line:
-            key, value = line.split(" => ", 1)
-            loaded_values[key] = value
-    owned = (
-        loaded_program == expected_arguments[0]
-        and loaded_arguments == expected_arguments
-        and all(
-            loaded_values.get(key) == value
-            for key, value in expected_environment.items()
-        )
-    )
-    raise SystemExit(0 if owned else 1)
-
-lines = [
-    line.strip()
-    for line in service_file.read_text(encoding="utf-8").splitlines()
-    if line.strip() and not line.lstrip().startswith(("#", ";"))
-]
-exec_lines = [
-    line[len("ExecStart=") :] for line in lines if line.startswith("ExecStart=")
-]
-if len(exec_lines) != 1:
-    raise SystemExit(1)
-try:
-    expected_arguments = systemd_words(exec_lines[0])
-except ValueError:
-    raise SystemExit(1)
-expected_environment = {}
-for line in lines:
-    if not line.startswith("Environment="):
-        continue
-    try:
-        values = shlex.split(line[len("Environment=") :].replace("%%", "%"))
-    except ValueError:
-        raise SystemExit(1)
-    for value in values:
-        if "=" in value:
-            key, item = value.split("=", 1)
-            expected_environment[key] = item
-
-loaded_command = loaded_text.strip()
-if "argv[]=" in loaded_command:
-    loaded_command = loaded_command.split("argv[]=", 1)[1]
-    loaded_command = loaded_command.split(" ; ", 1)[0]
-try:
-    loaded_arguments = shlex.split(loaded_command)
-    loaded_values = {}
-    for value in shlex.split(loaded_environment_text.replace("%%", "%")):
-        if "=" in value:
-            key, item = value.split("=", 1)
-            loaded_values[key] = item
-except ValueError:
-    raise SystemExit(1)
-owned = loaded_arguments == expected_arguments and all(
-    loaded_values.get(key) == value
-    for key, value in expected_environment.items()
-)
-raise SystemExit(0 if owned else 1)
-PY
 }
 
 managed_service_main_pid_value() {
@@ -1844,6 +1344,18 @@ workflow_cleanup_init() {
   WORKFLOW_ROLLBACK_HANDLER=
 }
 
+orichum_lifecycle_lock_path() {
+  local lifecycle_root="$HOME/.local/state/orichum"
+  [[ "$HOME" == /* && -d "$HOME" && ! -L "$HOME" ]] || return 1
+  for path in \
+      "$HOME/.local" "$HOME/.local/state" "$lifecycle_root"; do
+    [[ ! -L "$path" ]] || return 1
+  done
+  install -d -m 0700 "$lifecycle_root" || return 1
+  chmod 0700 "$lifecycle_root" || return 1
+  printf '%s\n' "$lifecycle_root/install.lock"
+}
+
 register_cleanup_path() {
   local cleanup_path="$1"
   case "$cleanup_path" in
@@ -2020,6 +1532,12 @@ acquire_workflow_lock() {
   fi
 
   if mkdir "$lock_dir" 2>/dev/null; then
+    if ! chmod 0700 "$lock_dir"; then
+      rm -rf -- "$lock_dir"
+      release_workflow_lock_guard "$guard_dir" || true
+      workflow_die "installer lock permissions could not be secured"
+      return 1
+    fi
     lock_identity="$$:$RANDOM:$RANDOM"
     printf '%s\n' "$lock_identity" >"$lock_dir/identity"
     printf '%s\n' "$$" >"$lock_dir/pid"
@@ -2107,6 +1625,13 @@ acquire_workflow_lock() {
     else
       workflow_die "could not claim or restore installer lock; acquisition guard retained (fail-closed)"
     fi
+    return 1
+  fi
+  if ! chmod 0700 "$lock_dir"; then
+    rm -rf -- "$lock_dir"
+    resolve_workflow_lock_quarantine || true
+    release_workflow_lock_guard "$guard_dir" || true
+    workflow_die "installer lock permissions could not be secured"
     return 1
   fi
   lock_identity="$$:$RANDOM:$RANDOM"
@@ -2474,7 +1999,7 @@ verified_route_runtime_digest() {
   local python_version="$3"
   local descriptor="$4"
   "$python_runtime" -I -B - \
-    "$workflow_root/integrations/common" "$python_runtime" \
+    "$workflow_root" "$python_runtime" \
     "$python_version" "$descriptor" <<'PY'
 import hashlib
 import os
@@ -2505,16 +2030,79 @@ def add_file(label: str, path: Path) -> None:
     digest.update(b"\0")
 
 
+def add_tree(relative: str) -> None:
+    base = root / relative
+    for directory, names, files in os.walk(
+        base, topdown=True, followlinks=False
+    ):
+        current = Path(directory)
+        observed = os.lstat(current)
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != uid
+            or stat.S_IMODE(observed.st_mode) & 0o022
+        ):
+            raise SystemExit(1)
+        names[:] = sorted(name for name in names if name != "__pycache__")
+        for name in names:
+            child = current / name
+            child_state = os.lstat(child)
+            if (
+                stat.S_ISLNK(child_state.st_mode)
+                or not stat.S_ISDIR(child_state.st_mode)
+            ):
+                raise SystemExit(1)
+        for name in sorted(files):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = current / name
+            add_file(path.relative_to(root).as_posix(), path)
+
+
 add_file("python", runtime)
 digest.update(version.encode())
 digest.update(b"\0")
-for path in sorted(root.glob("*.py")):
-    add_file(path.name, path)
+for relative in (
+    "VERSION",
+    "lib/workflow.sh",
+    "bin/orichum",
+    "bin/orichum-route-proxy",
+    "bin/orichum-statusline",
+    "controller/settings.json",
+    "config/plugins.json",
+):
+    add_file(relative, root / relative)
+add_tree("integrations/common")
+add_tree("controller/plugin")
 value = digest.hexdigest()
 descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 descriptor.write_text(value + "\n", encoding="ascii")
 os.chmod(descriptor, 0o600)
 print(value)
+PY
+}
+
+route_service_runtime_digest() {
+  (($# == 1)) || return 2
+  local service_file="$1"
+  workflow_python - "$service_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    raw = path.read_bytes()
+except OSError:
+    raise SystemExit(1)
+matches = re.findall(
+    rb"Orichum route runtime SHA-256: ([0-9a-f]{64})",
+    raw,
+)
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0].decode("ascii"))
 PY
 }
 
@@ -2630,139 +2218,6 @@ print(value)
 PY
 }
 
-migrate_legacy_private_tools() (
-  local data_root="$1"
-  local tool_dir="$2"
-  local bin_dir="$3"
-  local legacy_root="$data_root/headroom"
-  local legacy_tool_dir="$legacy_root/tools"
-  local legacy_bin_dir="$legacy_root/bin"
-  local data_physical legacy_physical source_physical destination_physical
-  local environment source_path destination_path temporary_path
-  local cleanup_index entry_name entry_path translated_target
-  local current_uid
-  local -a legacy_entries legacy_targets
-  private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || {
-    workflow_die "refusing unsafe private tool migration layout"
-    return 1
-  }
-  legacy_private_tool_layout_is_safe "$data_root" || {
-    workflow_die "refusing unsafe legacy private tool layout"
-    return 1
-  }
-  if [[ ! -e "$legacy_tool_dir" && ! -L "$legacy_tool_dir" && \
-        ! -e "$legacy_bin_dir" && ! -L "$legacy_bin_dir" ]]; then
-    return 0
-  fi
-  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
-  legacy_physical="$(cd -P -- "$legacy_root" && pwd)" || return 1
-  [[ "$legacy_physical" == "$data_physical/headroom" ]] || return 1
-  current_uid="$(id -u)"
-  for source_path in "$legacy_tool_dir" "$legacy_bin_dir"; do
-    if [[ -e "$source_path" || -L "$source_path" ]]; then
-      [[ -d "$source_path" && ! -L "$source_path" ]] && \
-        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || {
-          workflow_die "refusing unsafe legacy private tool layout"
-          return 1
-        }
-    fi
-  done
-  for environment in mempalace graphifyy; do
-    source_path="$legacy_tool_dir/$environment"
-    if [[ -e "$source_path" || -L "$source_path" ]]; then
-      [[ -d "$source_path" && ! -L "$source_path" ]] && \
-        [[ "$(path_uid "$source_path")" == "$current_uid" ]] || {
-          workflow_die "refusing unsafe legacy private tool environment"
-          return 1
-        }
-      source_physical="$(cd -P -- "$source_path" && pwd)" || return 1
-      [[ "$source_physical" == "$legacy_physical/tools/$environment" ]] || \
-        return 1
-    fi
-  done
-  shopt -s nullglob
-  for entry_path in "$legacy_bin_dir"/*; do
-    entry_name="$(basename "$entry_path")"
-    [[ "$entry_name" != headroom ]] || continue
-    source_physical="$(workflow_physical_path "$entry_path")" || return 1
-    case "$source_physical" in
-      "$legacy_physical/tools/mempalace/"*)
-        translated_target="$tool_dir/mempalace/${source_physical#"$legacy_physical/tools/mempalace/"}"
-        ;;
-      "$legacy_physical/tools/graphifyy/"*)
-        translated_target="$tool_dir/graphifyy/${source_physical#"$legacy_physical/tools/graphifyy/"}"
-        ;;
-      *)
-        workflow_die "refusing unknown legacy private tool entrypoint"
-        return 1
-        ;;
-    esac
-    legacy_entries+=("$entry_name")
-    legacy_targets+=("$translated_target")
-  done
-  for environment in mempalace graphifyy; do
-    source_path="$legacy_tool_dir/$environment"
-    destination_path="$tool_dir/$environment"
-    if [[ ! -e "$source_path" && ! -L "$source_path" ]] || \
-       [[ ! -e "$destination_path" && ! -L "$destination_path" ]]; then
-      continue
-    fi
-    [[ -d "$destination_path" && ! -L "$destination_path" ]] && \
-      [[ "$(path_uid "$destination_path")" == "$current_uid" ]] || {
-        workflow_die "refusing unsafe migrated private tool environment"
-        return 1
-      }
-    destination_physical="$(cd -P -- "$destination_path" && pwd)" || return 1
-    [[ "$destination_physical" == \
-       "$(cd -P -- "$tool_dir" && pwd)/$environment" ]] && \
-      diff -qr -- "$source_path" "$destination_path" >/dev/null || {
-        workflow_die "refusing conflicting private tool migration state"
-        return 1
-      }
-  done
-  for cleanup_index in "${!legacy_entries[@]}"; do
-    entry_name="${legacy_entries[$cleanup_index]}"
-    destination_path="$bin_dir/$entry_name"
-    if [[ ! -e "$destination_path" && ! -L "$destination_path" ]]; then
-      continue
-    fi
-    [[ -L "$destination_path" ]] && \
-      [[ "$(readlink "$destination_path")" == \
-         "${legacy_targets[$cleanup_index]}" ]] || {
-        workflow_die "refusing stale private tool migration entrypoint"
-        return 1
-      }
-  done
-  for environment in mempalace graphifyy; do
-    source_path="$legacy_tool_dir/$environment"
-    destination_path="$tool_dir/$environment"
-    if [[ ! -e "$source_path" && ! -L "$source_path" ]]; then
-      continue
-    fi
-    if [[ -e "$destination_path" || -L "$destination_path" ]]; then
-      continue
-    fi
-    temporary_path="$tool_dir/.migrate-$environment.$$.$RANDOM"
-    rm -rf -- "$temporary_path"
-    cp -pPR "$source_path" "$temporary_path" || {
-      rm -rf -- "$temporary_path"
-      return 1
-    }
-    mv "$temporary_path" "$destination_path" || {
-      rm -rf -- "$temporary_path"
-      return 1
-    }
-  done
-  for cleanup_index in "${!legacy_entries[@]}"; do
-    entry_name="${legacy_entries[$cleanup_index]}"
-    destination_path="$bin_dir/$entry_name"
-    if [[ -e "$destination_path" || -L "$destination_path" ]]; then
-      continue
-    fi
-    ln -s "${legacy_targets[$cleanup_index]}" "$destination_path" || return 1
-  done
-)
-
 snapshot_private_tree() {
   local source_path="$1"
   local snapshot_dir="$2"
@@ -2825,8 +2280,6 @@ snapshot_private_tool_state() {
   install -d -m 0700 "$snapshot_dir"
   snapshot_private_tree "$tool_dir/mempalace" \
     "$snapshot_dir" mempalace-environment
-  snapshot_private_tree "$tool_dir/graphifyy" \
-    "$snapshot_dir" graphify-environment
   snapshot_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
 }
 
@@ -2841,8 +2294,6 @@ restore_private_tool_state() {
   }
   restore_private_tree "$tool_dir/mempalace" \
     "$snapshot_dir" mempalace-environment
-  restore_private_tree "$tool_dir/graphifyy" \
-    "$snapshot_dir" graphify-environment
   restore_private_tree "$bin_dir" "$snapshot_dir" private-tool-bin
 }
 
@@ -2854,277 +2305,10 @@ private_tool_state_matches() {
   private_tool_layout_is_owned "$data_root" "$tool_dir" "$bin_dir" || return 1
   private_tree_matches_snapshot "$tool_dir/mempalace" \
     "$snapshot_dir" mempalace-environment &&
-    private_tree_matches_snapshot "$tool_dir/graphifyy" \
-      "$snapshot_dir" graphify-environment &&
     private_tree_matches_snapshot "$bin_dir" \
       "$snapshot_dir" private-tool-bin
 }
 
-ensure_private_graph_root() (
-  local data_root="$1"
-  local graph_root data_physical graph_physical current_uid
-  [[ "$data_root" == /* && "$data_root" != / ]] || {
-    workflow_die "central graph data root must be an absolute private path"
-    return 1
-  }
-  [[ -d "$data_root" && ! -L "$data_root" ]] || {
-    workflow_die "central graph data root is unsafe"
-    return 1
-  }
-  data_physical="$(cd -P -- "$data_root" && pwd)" || return 1
-  graph_root="$data_physical/graphs"
-  current_uid="$(id -u)"
-  if [[ -e "$graph_root" || -L "$graph_root" ]]; then
-    [[ -d "$graph_root" && ! -L "$graph_root" ]] || {
-      workflow_die "central graph root is unsafe"
-      return 1
-    }
-    graph_physical="$(cd -P -- "$graph_root" && pwd)" || return 1
-    [[ "$graph_physical" == "$graph_root" && \
-       "$(path_uid "$graph_root")" == "$current_uid" && \
-       "$(path_mode "$graph_root")" == 700 ]] || {
-      workflow_die "central graph root is unsafe"
-      return 1
-    }
-    printf '%s\n' "$graph_root"
-    return 0
-  fi
-
-  if mkdir -m 0700 "$graph_root" 2>/dev/null; then
-    chmod 0700 "$graph_root" || return 1
-  elif [[ ! -e "$graph_root" && ! -L "$graph_root" ]]; then
-    workflow_die "central graph root could not be created"
-    return 1
-  fi
-  ensure_private_graph_root "$data_physical"
-)
-
-run_bounded_graphify_command() {
-  local python_runtime="$1"
-  local timeout_seconds="$2"
-  local working_directory="$3"
-  shift 3
-  "$python_runtime" -I -B - \
-    "$timeout_seconds" "$working_directory" "$@" <<'PY'
-import os
-import subprocess
-import sys
-
-timeout = float(sys.argv[1])
-working_directory = sys.argv[2]
-command = sys.argv[3:]
-try:
-    completed = subprocess.run(
-        command,
-        cwd=working_directory,
-        env=os.environ.copy(),
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
-except (OSError, subprocess.TimeoutExpired) as error:
-    print(f"ERROR: bounded Graphify command failed: {error}", file=sys.stderr)
-    raise SystemExit(1)
-if completed.returncode != 0:
-    output = completed.stdout[-8192:].decode("utf-8", "replace").strip()
-    if output:
-        print(output, file=sys.stderr)
-    raise SystemExit(completed.returncode)
-PY
-}
-
-probe_graphify_capabilities() (
-  local graphify_binary="$1"
-  local graphify_mcp="$2"
-  local python_runtime="$3"
-  local workflow_root="$4"
-  local temporary_parent="$5"
-  local probe_root repository output
-  [[ "$graphify_binary" == /* && -x "$graphify_binary" ]] || {
-    workflow_die "Graphify executable is unavailable for capability probing"
-    return 1
-  }
-  [[ "$graphify_mcp" == /* && -x "$graphify_mcp" ]] || {
-    workflow_die "Graphify MCP executable is unavailable for capability probing"
-    return 1
-  }
-  [[ "$python_runtime" == /* && -x "$python_runtime" ]] || {
-    workflow_die "Python runtime is unavailable for Graphify capability probing"
-    return 1
-  }
-  [[ "$workflow_root" == /* && -f \
-     "$workflow_root/integrations/common/mcp_probe.py" ]] || {
-    workflow_die "Graphify MCP probe is unavailable"
-    return 1
-  }
-  [[ "$temporary_parent" == /* && -d "$temporary_parent" && \
-     ! -L "$temporary_parent" ]] || {
-    workflow_die "Graphify capability probe parent is unsafe"
-    return 1
-  }
-
-  probe_root="$(mktemp -d "$temporary_parent/graphify-capability.XXXXXX")" || \
-    return 1
-  trap 'rm -rf -- "$probe_root"' EXIT
-  chmod 0700 "$probe_root"
-  repository="$probe_root/repo"
-  output="$probe_root/output"
-  git init --quiet "$repository" || return 1
-  printf 'def graphify_probe():\n    return "ready"\n' \
-    >"$repository/probe.py"
-  git -C "$repository" add probe.py || return 1
-  git -C "$repository" \
-    -c user.name=orichum-probe \
-    -c user.email=orichum-probe@example.invalid \
-    commit --quiet -m probe || return 1
-
-  GRAPHIFY_OUT="$output" run_bounded_graphify_command \
-    "$python_runtime" 20 "$repository" \
-    "$graphify_binary" extract "$repository" --code-only || return 1
-  [[ -f "$output/graph.json" && ! -L "$output/graph.json" ]] || {
-    workflow_die "Graphify absolute output probe did not create graph.json"
-    return 1
-  }
-  [[ ! -e "$repository/graphify-out" && \
-     ! -L "$repository/graphify-out" ]] || {
-    workflow_die "Graphify absolute output probe wrote inside its repository"
-    return 1
-  }
-  if rg -Fq 'graphify_probe_updated' "$output/graph.json"; then
-    workflow_die "Graphify extract probe returned unexpected updated source"
-    return 1
-  fi
-  printf 'def graphify_probe_updated():\n    return "refreshed"\n' \
-    >"$repository/probe.py"
-  git -C "$repository" add probe.py || return 1
-  git -C "$repository" \
-    -c user.name=orichum-probe \
-    -c user.email=orichum-probe@example.invalid \
-    commit --quiet -m update-probe || return 1
-  git -C "$repository" diff --quiet HEAD -- || {
-    workflow_die "Graphify update probe repository is not committed"
-    return 1
-  }
-  GRAPHIFY_OUT="$output" run_bounded_graphify_command \
-    "$python_runtime" 20 "$repository" \
-    "$graphify_binary" update "$repository" || return 1
-  [[ -f "$output/graph.json" && ! -L "$output/graph.json" ]] || {
-    workflow_die "Graphify update probe removed graph.json"
-    return 1
-  }
-  rg -Fq 'graphify_probe_updated' "$output/graph.json" || {
-    workflow_die "Graphify update probe left stale central output"
-    return 1
-  }
-  [[ ! -e "$repository/graphify-out" && \
-     ! -L "$repository/graphify-out" ]] || {
-    workflow_die "Graphify update probe wrote inside its repository"
-    return 1
-  }
-  PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B \
-    "$workflow_root/integrations/common/mcp_probe.py" \
-    --timeout 10 \
-    --require-tool query_graph \
-    --require-tool graph_stats \
-    -- "$graphify_mcp" --graph "$output/graph.json"
-)
-
-reconcile_graphify_storage() {
-  local data_root="$1"
-  local graphify_binary="$2"
-  local graphify_mcp="$3"
-  local python_runtime="$4"
-  local workflow_root="$5"
-  local temporary_parent="$6"
-  probe_graphify_capabilities \
-    "$graphify_binary" "$graphify_mcp" "$python_runtime" \
-    "$workflow_root" "$temporary_parent" || return 1
-  ensure_private_graph_root "$data_root" >/dev/null
-}
-
-graphify_doctor_diagnostics() {
-  local data_root="$1"
-  local config_root="$2"
-  local workflow_root="$3"
-  local python_runtime="$4"
-  PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-    "$workflow_root" "$config_root" <<'PY'
-import json
-import os
-import stat
-import sys
-from pathlib import Path
-
-sys.path.insert(0, sys.argv[1])
-from integrations.common.graph_hooks import graph_hook_status
-config_root = Path(sys.argv[2])
-try:
-    document = json.loads(
-        (config_root / "projects.json").read_text(encoding="utf-8")
-    )
-    configured = document.get("contexts", [])
-except (OSError, UnicodeError, json.JSONDecodeError):
-    configured = []
-
-repositories: set[Path] = set()
-directories_seen = 0
-scan_bounded = False
-for context in configured[:64]:
-    if not isinstance(context, dict):
-        continue
-    raw_root = context.get("root")
-    if not isinstance(raw_root, str):
-        continue
-    root = Path(raw_root).expanduser()
-    try:
-        root = root.resolve(strict=True)
-    except (OSError, RuntimeError):
-        continue
-    if not root.is_dir():
-        continue
-    stack = [root]
-    while stack:
-        current = stack.pop()
-        directories_seen += 1
-        if directories_seen > 10000 or len(repositories) >= 512:
-            scan_bounded = True
-            stack.clear()
-            break
-        try:
-            entries = tuple(os.scandir(current))
-        except OSError:
-            continue
-        names = {entry.name: entry for entry in entries}
-        git_entry = names.get(".git")
-        if git_entry is not None:
-            try:
-                mode = git_entry.stat(follow_symlinks=False).st_mode
-            except OSError:
-                mode = 0
-            if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
-                repositories.add(current)
-        for entry in entries:
-            if entry.name in {".git", "graphify-out"}:
-                continue
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
-            except OSError:
-                continue
-
-legacy = sum(
-    1 for repository in repositories
-    if os.path.lexists(repository / "graphify-out")
-)
-hook_states = [graph_hook_status(repository) for repository in repositories]
-hook_drift = sum(state != "installed" for state in hook_states)
-print(f"NOTICE repository-local legacy Graphify outputs: {legacy}")
-print(f"NOTICE repository graph hooks need reconciliation: {hook_drift}")
-if scan_bounded:
-    print("NOTICE repository graph diagnostic scan reached its safety bound")
-PY
-}
 
 snapshot_path() {
   local source_path="$1"
@@ -3915,165 +3099,6 @@ render_discovered_claudex_config() {
     "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port"
 }
 
-normalize_legacy_claudex_template() {
-  local input_file="$1"
-  local output_file="$2"
-  local route_proxy_port="$3"
-  valid_service_port "$route_proxy_port" || return 1
-  [[ -f "$input_file" && ! -L "$input_file" ]] || return 1
-  workflow_python - "$input_file" "$output_file" "$route_proxy_port" <<'PY'
-import copy
-import re
-import sys
-import tomllib
-from pathlib import Path
-
-source = Path(sys.argv[1])
-destination = Path(sys.argv[2])
-route_url = f"http://127.0.0.1:{int(sys.argv[3])}"
-text = source.read_text(encoding="utf-8")
-document = tomllib.loads(text)
-
-aliases = document.get("model_aliases")
-profiles = document.get("profiles")
-if (
-    not isinstance(aliases, dict)
-    or any(
-        not isinstance(aliases.get(name), str) or not aliases[name]
-        for name in ("fast", "balanced", "powerful")
-    )
-    or not isinstance(profiles, list)
-    or len(profiles) != 1
-):
-    raise SystemExit(1)
-profile = profiles[0]
-headers = profile.get("custom_headers")
-legacy_header = "X-Headroom-Base-Url"
-loopback_url = re.compile(r"http://127[.]0[.]0[.]1:([0-9]+)")
-base_url = profile.get("base_url")
-header_url = headers.get(legacy_header) if isinstance(headers, dict) else None
-if (
-    profile.get("name") != "gpt"
-    or profile.get("provider_type") != "DirectAnthropic"
-    or not isinstance(base_url, str)
-    or not isinstance(header_url, str)
-    or header_url != route_url
-):
-    raise SystemExit(1)
-base_match = loopback_url.fullmatch(base_url)
-if base_match is None or not 1 <= int(base_match.group(1)) <= 65535:
-    raise SystemExit(1)
-
-base_pattern = re.compile(
-    r'(?m)^(?P<prefix>[ \t]*base_url[ \t]*=[ \t]*)'
-    r'"http://127[.]0[.]0[.]1:[0-9]+"'
-    r'(?P<suffix>[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$))'
-)
-header_pattern = re.compile(
-    r'(?m)^[ \t]*X-Headroom-Base-Url[ \t]*=[ \t]*'
-    r'"http://127[.]0[.]0[.]1:[0-9]+"'
-    r'[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)'
-)
-normalized, base_count = base_pattern.subn(
-    lambda match: (
-        f'{match.group("prefix")}"{route_url}"{match.group("suffix")}'
-    ),
-    text,
-)
-normalized, header_count = header_pattern.subn("", normalized)
-if base_count != 1 or header_count != 1 or "headroom" in normalized.lower():
-    raise SystemExit(1)
-
-expected = copy.deepcopy(document)
-expected_profile = expected["profiles"][0]
-expected_profile["base_url"] = route_url
-del expected_profile["custom_headers"][legacy_header]
-if tomllib.loads(normalized) != expected:
-    raise SystemExit(1)
-destination.write_text(normalized, encoding="utf-8")
-PY
-}
-
-normalize_headroom_free_endpoint_snapshot() {
-  local ports_snapshot="$1"
-  local model_snapshot="$2"
-  local cliproxy_port="$3"
-  local claudex_proxy_port="$4"
-  local route_proxy_port="$5"
-  local ports_temporary= config_temporary=
-  valid_service_port "$cliproxy_port" || return 1
-  valid_service_port "$claudex_proxy_port" || return 1
-  valid_service_port "$route_proxy_port" || return 1
-  [[ "$cliproxy_port" != "$claudex_proxy_port" && \
-     "$cliproxy_port" != "$route_proxy_port" && \
-     "$claudex_proxy_port" != "$route_proxy_port" ]] || return 1
-  if [[ -e "$ports_snapshot" || -L "$ports_snapshot" ]]; then
-    [[ -f "$ports_snapshot" && ! -L "$ports_snapshot" ]] || return 1
-    ports_temporary="$(mktemp \
-      "$(dirname "$ports_snapshot")/.service-ports.rollback.XXXXXX")" || \
-      return 1
-    if ! jq -n \
-        --argjson cliproxy "$cliproxy_port" \
-        --argjson claudex_proxy "$claudex_proxy_port" \
-        --argjson route_proxy "$route_proxy_port" \
-        '{
-          claudexProxyPort: $claudex_proxy,
-          cliproxyPort: $cliproxy,
-          routeProxyPort: $route_proxy
-        }' >"$ports_temporary" || \
-       ! chmod 0600 "$ports_temporary"; then
-      rm -f -- "$ports_temporary"
-      return 1
-    fi
-  fi
-  if [[ -n "$model_snapshot" ]]; then
-    [[ -d "$model_snapshot" && ! -L "$model_snapshot" ]] && \
-      [[ -f "$model_snapshot/models.json" && \
-         ! -L "$model_snapshot/models.json" ]] && \
-      [[ -f "$model_snapshot/claudex.toml" && \
-         ! -L "$model_snapshot/claudex.toml" ]] || {
-        rm -f -- "$ports_temporary"
-        return 1
-      }
-    config_temporary="$(mktemp \
-      "$model_snapshot/.claudex.rollback.XXXXXX")" || {
-        rm -f -- "$ports_temporary"
-        return 1
-      }
-    if [[ -e "$model_snapshot/effective-models.json" || \
-          -L "$model_snapshot/effective-models.json" ]]; then
-      [[ -f "$model_snapshot/effective-models.json" && \
-         ! -L "$model_snapshot/effective-models.json" ]] && \
-        render_discovered_claudex_config \
-          "$model_snapshot/effective-models.json" "$config_temporary" \
-          "$cliproxy_port" "$claudex_proxy_port" "$route_proxy_port" || {
-            rm -f -- "$ports_temporary" "$config_temporary"
-            return 1
-          }
-    else
-      normalize_legacy_claudex_template \
-        "$model_snapshot/claudex.toml" "$config_temporary" \
-        "$route_proxy_port" || {
-          rm -f -- "$ports_temporary" "$config_temporary"
-          return 1
-        }
-    fi
-    if ! chmod 0600 "$config_temporary"; then
-      rm -f -- "$ports_temporary" "$config_temporary"
-      return 1
-    fi
-  fi
-  if [[ -n "$config_temporary" ]]; then
-    mv -f "$config_temporary" "$model_snapshot/claudex.toml" || {
-      rm -f -- "$ports_temporary" "$config_temporary"
-      return 1
-    }
-  fi
-  if [[ -n "$ports_temporary" ]]; then
-    mv -f "$ports_temporary" "$ports_snapshot"
-  fi
-}
-
 extract_semver() {
   printf '%s\n' "$1" | rg -o -m1 '[0-9]+\.[0-9]+\.[0-9]+' | head -1
 }
@@ -4192,7 +3217,7 @@ probe_leanctx_capabilities() {
   data_dir="$probe_root/data"
   install -d -m 0700 "$project_root" "$data_dir"
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
-    "$workflow_root" "$data_dir/config.toml" <<'PY'
+    "$workflow_root" "$data_dir/config.toml" "$project_root/probe.py" <<'PY'
 import os
 from pathlib import Path
 import sys
@@ -4215,15 +3240,45 @@ try:
     os.fsync(descriptor)
 finally:
     os.close(descriptor)
+
+source = Path(sys.argv[3])
+descriptor = os.open(
+    source,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+)
+try:
+    payload = (
+        b"def orichum_probe_target():\n"
+        b"    return 1\n\n"
+        b"def orichum_probe_caller():\n"
+        b"    return orichum_probe_target()\n"
+    )
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(descriptor, payload[offset:])
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
 PY
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -B \
     "$workflow_root/integrations/common/mcp_probe.py" \
+    --cwd "$project_root" \
     --exact-tool ctx_read \
     --exact-tool ctx_search \
     --exact-tool ctx_tree \
     --exact-tool ctx_expand \
+    --exact-tool ctx_graph \
+    --exact-tool ctx_impact \
+    --exact-tool ctx_callgraph \
     --exact-tool ctx_patch \
     --exact-tool ctx_shell \
+    --probe-call \
+      '{"name":"ctx_graph","arguments":{"action":"build"},"contains":"Project Graph: 1 files"}' \
+    --probe-call \
+      '{"name":"ctx_graph","arguments":{"action":"symbol","path":"probe.py::orichum_probe_target"},"contains":"probe.py::orichum_probe_target"}' \
+    --probe-call \
+      '{"name":"ctx_impact","arguments":{"action":"analyze","path":"probe.py"},"contains":"[ctx_impact:"}' \
     -- env \
     LEAN_CTX_ALLOW_REROOT=false \
     LEAN_CTX_AUTONOMY=false \
@@ -4575,17 +3630,22 @@ render_claudex_proxy_launch_agent() {
   local port="${4:-13456}"
   local upstream_port="${5:-8317}"
   local runtime_digest="${6:-}"
-  local escaped_binary escaped_state escaped_data escaped_log escaped_home
+  local route_runner
+  local escaped_binary escaped_runner escaped_state escaped_data
+  local escaped_log escaped_home escaped_workflow
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
   [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
-  escaped_binary="$(xml_escape "$data_root/bin/orichum-route-proxy")"
+  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
+  escaped_binary="$(xml_escape "$data_root/bin/orichum-python")"
+  escaped_runner="$(xml_escape "$route_runner")"
   escaped_state="$(xml_escape "$data_root/state")"
   escaped_data="$(xml_escape "$data_root")"
   escaped_log="$(xml_escape "$data_root/logs/route-proxy.log")"
   escaped_home="$(xml_escape "$HOME")"
+  escaped_workflow="$(xml_escape "$workflow_root")"
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -4597,6 +3657,10 @@ render_claudex_proxy_launch_agent() {
     '  <key>ProgramArguments</key>' \
     '  <array>' \
     "    <string>$escaped_binary</string>" \
+    '    <string>-I</string>' \
+    '    <string>-B</string>' \
+    '    <string>-c</string>' \
+    "    <string>$escaped_runner</string>" \
     '    <string>--port</string>' \
     "    <string>$port</string>" \
     '    <string>--upstream-port</string>' \
@@ -4622,8 +3686,10 @@ render_claudex_proxy_launch_agent() {
     '  <dict>' \
     '    <key>HOME</key>' \
     "    <string>$escaped_home</string>" \
-    '    <key>ORICHUM_DATA_HOME</key>' \
-    "    <string>$escaped_data</string>" \
+    '    <key>ORICHUM_WORKFLOW_ROOT</key>' \
+    "    <string>$escaped_workflow</string>" \
+    '    <key>ORICHUM_PYTHON</key>' \
+    "    <string>$escaped_binary</string>" \
     '  </dict>' \
     '</dict>' \
     '</plist>' >"$output_file"
@@ -4636,18 +3702,25 @@ render_claudex_proxy_systemd_user_unit() {
   local port="${4:-13456}"
   local upstream_port="${5:-8317}"
   local runtime_digest="${6:-}"
-  local executable state data home_environment data_environment
+  local route_runner executable runner state data home_environment
+  local workflow_environment python_environment
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
   [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
-  executable="$(systemd_quote "$data_root/bin/orichum-route-proxy")"
+  route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
+  executable="$(systemd_quote "$data_root/bin/orichum-python")"
+  runner="$(systemd_quote "$route_runner")"
   state="$(systemd_quote "$data_root/state")"
   data="$(systemd_quote "$data_root")"
   home_environment="$(systemd_environment_quote "HOME=$HOME")"
-  data_environment="$(
-    systemd_environment_quote "ORICHUM_DATA_HOME=$data_root"
+  workflow_environment="$(
+    systemd_environment_quote "ORICHUM_WORKFLOW_ROOT=$workflow_root"
+  )"
+  python_environment="$(
+    systemd_environment_quote \
+      "ORICHUM_PYTHON=$data_root/bin/orichum-python"
   )"
   printf '%s\n' \
     "# Orichum route runtime SHA-256: $runtime_digest" \
@@ -4658,11 +3731,12 @@ render_claudex_proxy_systemd_user_unit() {
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
+    "ExecStart=$executable -I -B -c $runner --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
     'Restart=always' \
     'RestartSec=3' \
     "Environment=$home_environment" \
-    "Environment=$data_environment" \
+    "Environment=$workflow_environment" \
+    "Environment=$python_environment" \
     'StandardOutput=journal' \
     'StandardError=journal' \
     '' \

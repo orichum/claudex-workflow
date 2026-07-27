@@ -17,7 +17,7 @@ orichum context add ~/personal --pool shared
 ```
 
 Docker is optional. A context without an MCP_DOCKER profile still receives its
-stack, account pool, memory, graph, and GitHub identity settings.
+stack, account pool, memory, LeanCTX, and GitHub identity settings.
 
 Adding a context is a one-time foreground operation. Orichum:
 
@@ -25,9 +25,7 @@ Adding a context is a one-time foreground operation. Orichum:
 2. follows declared Git submodules;
 3. skips duplicate linked worktrees of the same repository;
 4. mines each repository into the selected Mempalace wing;
-5. creates or refreshes repository-aware graphs in private central storage;
-6. installs and verifies Orichum's detached Graphify refresh hooks;
-7. saves the context only after population succeeds.
+5. saves the context only after population succeeds.
 
 Progress and elapsed time are printed by default.
 
@@ -44,15 +42,12 @@ orichum context remove ~/personal --yes
 ```
 
 Run `populate` when repositories were added after initial setup or when you
-explicitly need a full memory-and-graph refresh. Use `orichum graph ROOT` when
-only graphs need synchronization. Normal repository changes are refreshed by
-Orichum's post-commit and post-checkout hooks.
+explicitly want to refresh durable project memory. LeanCTX builds live source
+indexes and graphs lazily inside each physical session; it needs no project
+population command or Git refresh hook.
 
-Graph identity does not depend on the context root. Clean clones with the same
-normalized repository identity and commit can reuse the same central graph;
-dirty states remain isolated per checkout. See
-[Memory and code graph](memory-and-code-graph.md) for identity overrides,
-worktrees, migration, and pruning.
+See [Memory and code intelligence](memory-and-code-graph.md) for worktrees,
+multiple repositories, and the LeanCTX/Mempalace boundary.
 
 When `githubAccount` is configured, Orichum creates an isolated
 account-specific `GH_CONFIG_DIR` from an existing `gh auth` login. Concurrent

@@ -29,7 +29,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum context list` | Show configured parent-directory contexts |
 | `orichum context add ROOT ...` | Populate and add a context |
 | `orichum context update ROOT ...` | Change context routing |
-| `orichum context populate ROOT` | Explicitly refresh memory and graphs |
+| `orichum context populate ROOT` | Explicitly refresh durable project memory |
 | `orichum context remove ROOT` | Remove a context mapping |
 | `orichum context validate` | Validate all configured project contexts |
 | `orichum models list` | List declared models |
@@ -46,15 +46,11 @@ Installer modes are separate from the `orichum` command:
 | `orichum provider accounts` | List named accounts |
 | `orichum provider account ...` | Add, rename, reprioritize, enable, disable, sync, or remove |
 | `orichum plugin ...` | List, add, sync, update, or remove optional plugins |
-| `orichum graph [PATH]` | Build or refresh central Graphify data for repositories below `PATH` (default: `.`) |
-| `orichum graph status [PATH]` | Read graph, working-tree, hook, output, and Graphify version status without changing state |
-| `orichum graph identity PATH --set ID` | Set an explicit repository identity such as `github.com/xebia/X-ACE-UI` |
-| `orichum graph identity PATH --clear` | Clear the explicit identity and return to remote-derived identity |
 | `orichum leanctx list [--limit N \| --all]` | List recent LeanCTX physical runs and mark the implicitly selected run |
 | `orichum leanctx stats [--run RUN]` | Show an exact savings snapshot |
 | `orichum leanctx watch [--run RUN]` | Open LeanCTX's live terminal monitor |
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
-| `orichum doctor` | Validate the complete local installation |
+| `orichum doctor` | Validate local component ownership, configuration, protocols, and service health |
 | `orichum sessions [--limit N \| --all]` | List recent logical sessions |
 | `orichum sessions cleanup [--older-than DAYS] [--yes]` | Preview or remove inactive physical launch snapshots |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
@@ -71,20 +67,6 @@ Orichum rejects model, session, workspace, MCP, plugin, effort, tool-approval,
 and permission-mode options because those are bound by its validated control
 plane.
 
-## Graph examples
-
-```bash
-orichum graph .
-orichum graph ~/xebia
-orichum graph status .
-orichum graph identity . --set github.com/xebia/X-ACE-UI
-```
-
-`orichum graph status` is read-only. An explicit identity is useful for a
-repository without a remote or when clones that should share revision graphs
-cannot derive the same unambiguous fetch identity. Graph commands manage
-Graphify only; they do not mine or query Mempalace.
-
 ## LeanCTX monitoring
 
 ```bash
@@ -97,10 +79,11 @@ orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
 ```
 
 Inside a live session, monitoring uses that physical run. Otherwise it uses the
-newest run with recorded LeanCTX activity for the current project, falling back
-to the project's newest run only when none has activity. `--run RUN` selects an
-ID explicitly. Implicit selection never crosses project boundaries. `list`
-shows 20 runs by default; use `--limit N` or `--all` to change that bound.
+newest physical run for the current project, regardless of whether it has
+recorded activity. `--run RUN` selects an ID explicitly. Implicit selection
+never crosses project boundaries and never substitutes an older active run.
+`list` shows attachment and activity for 20 runs by default; use `--limit N` or
+`--all` to change that bound.
 
 `--port PORT` requests a specific loopback port. When omitted, Orichum selects
 the first available port starting at `3333`. `--open` accepts `browser`,

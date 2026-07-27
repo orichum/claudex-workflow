@@ -9,7 +9,10 @@ source "$workflow_root/lib/workflow.sh"
 data_root="$1"
 [[ -d "$data_root" && ! -L "$data_root" ]] || exit 1
 ORICHUM_PYTHON="$(orichum_python_entrypoint "$data_root")"
-validate_orichum_python "$data_root" "$ORICHUM_PYTHON" >/dev/null
+python_identity="$(
+  validate_orichum_python "$data_root" "$ORICHUM_PYTHON"
+)"
+IFS=$'\t' read -r python_version python_runtime <<<"$python_identity"
 export ORICHUM_PYTHON
 ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
 export ORICHUM_PYTHON_VALIDATED
@@ -43,6 +46,33 @@ case "$(uname -s)" in
   *) exit 1 ;;
 esac
 
+runtime_descriptor="$(mktemp "${TMPDIR:-/tmp}/orichum-runtime.XXXXXX")"
+temporary=
+trap 'rm -f -- "${runtime_descriptor:-}" "${temporary:-}"' EXIT
+installed_runtime_digest="$(route_service_runtime_digest "$route_file")" || {
+  printf '%s\n' \
+    'ERROR: Orichum route service has no valid runtime identity; run install.sh' \
+    >&2
+  exit 1
+}
+current_runtime_digest="$(
+  verified_route_runtime_digest \
+    "$workflow_root" "$python_runtime" "$python_version" \
+    "$runtime_descriptor"
+)" || {
+  printf '%s\n' \
+    'ERROR: Orichum runtime source cannot be verified; run install.sh' >&2
+  exit 1
+}
+rm -f -- "$runtime_descriptor"
+runtime_descriptor=
+if [[ "$current_runtime_digest" != "$installed_runtime_digest" ]]; then
+  printf '%s\n' \
+    'ERROR: Orichum runtime source differs from the installed route service; run install.sh' \
+    >&2
+  exit 1
+fi
+
 verify_service() {
   local file="$1" kind="$2" label="$3" unit="$4" port="$5" mode="${6:-}"
   if [[ -n "$mode" ]]; then
@@ -75,7 +105,6 @@ done
 [[ "$service_verification_ready" == true ]]
 
 temporary="$(mktemp "${TMPDIR:-/tmp}/orichum-models.XXXXXX")"
-trap 'rm -f -- "$temporary"' EXIT
 curl -fsS --connect-timeout 1 --max-time 3 \
   "http://127.0.0.1:$cliproxy_port/v1/models" >"$temporary"
 cliproxy_models_response_is_ready "$temporary"

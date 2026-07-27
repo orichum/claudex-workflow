@@ -26,7 +26,7 @@ class MempalaceMigrationTests(unittest.TestCase):
             {"drawer_id": "3", "wing": "complion", "room": "decisions", "content": "c"},
             {"drawer_id": "4", "wing": "wing_complion", "room": "patterns", "content": "d"},
             {"drawer_id": "5", "wing": "sessions", "room": "general", "content": "exclude"},
-            {"drawer_id": "6", "wing": "graphify_repo", "room": "general", "content": "exclude"},
+            {"drawer_id": "6", "wing": "other_repo", "room": "general", "content": "exclude"},
         ]
         routed = route_drawers(drawers)
         self.assertEqual([item["content"] for item in routed["xebia"]], ["a", "b"])

@@ -18,8 +18,7 @@ Route tools directly without calling another model to choose:
   binary or unsupported.
 - Use native Bash for Git, package, service, deployment, and other state
   changes; `ctx_shell` remains observational.
-- Use Graphify for repository relationships and impact when a valid graph is
-  present.
+- Use LeanCTX for repository relationships, call graphs, and impact analysis.
 - Recall concise project decisions from Mempalace only when durable history
   matters.
 - Load MCP_DOCKER only for a matching project profile and relevant live-service

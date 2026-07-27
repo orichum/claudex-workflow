@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for protocol-level MCP readiness validation."""
 
+import json
 import os
 import subprocess
 import sys
@@ -52,6 +53,20 @@ for line in sys.stdin:
             ]}
             if os.environ.get("FAKE_MCP_PAGINATED") == "1":
                 result["nextCursor"] = "page-2"
+    elif method == "tools/call":
+        name = request.get("params", {}).get("name")
+        if os.environ.get("FAKE_MCP_CALL_ERROR") == "1":
+            result = {
+                "content": [{"type": "text", "text": "failed"}],
+                "isError": True,
+            }
+        else:
+            result = {
+                "content": [
+                    {"type": "text", "text": f"{name} completed"}
+                ],
+                "isError": False,
+            }
     else:
         continue
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
@@ -65,17 +80,28 @@ for line in sys.stdin:
         exact: tuple[str, ...] = (),
         broken: bool = False,
         paginated: bool = False,
+        calls: tuple[dict[str, object], ...] = (),
+        call_error: bool = False,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         if broken:
             environment["FAKE_MCP_BROKEN"] = "1"
         if paginated:
             environment["FAKE_MCP_PAGINATED"] = "1"
+        if call_error:
+            environment["FAKE_MCP_CALL_ERROR"] = "1"
         command = [sys.executable, str(PROBE)]
         for tool in required:
             command.extend(["--require-tool", tool])
         for tool in exact:
             command.extend(["--exact-tool", tool])
+        for call in calls:
+            command.extend(
+                [
+                    "--probe-call",
+                    json.dumps(call, separators=(",", ":")),
+                ]
+            )
         command.extend(["--", sys.executable, str(self.server)])
         return subprocess.run(
             command, env=environment, text=True, capture_output=True, check=False,
@@ -126,6 +152,41 @@ for line in sys.stdin:
         completed = self.run_probe("query_graph", broken=True)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("MCP server exited before responding", completed.stderr)
+
+    def test_calls_a_tool_and_checks_expected_output(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "arguments": {"action": "build"},
+                    "contains": "query_graph completed",
+                },
+            ),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_rejects_a_failed_tool_call(self):
+        completed = self.run_probe(
+            calls=({"name": "query_graph"},),
+            call_error=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("MCP tool call failed: query_graph", completed.stderr)
+
+    def test_rejects_missing_expected_tool_output(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "contains": "missing output",
+                },
+            ),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "MCP tool call omitted expected output: query_graph",
+            completed.stderr,
+        )
 
 
 if __name__ == "__main__":
