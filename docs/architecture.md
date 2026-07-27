@@ -67,8 +67,10 @@ remain available as the fallback and for exact verification.
 4. Freeze the logical session route and integrity digests.
 5. Materialize the controller plugin, minimal MCP configuration, and private
    LeanCTX contract when the launch is inside a Git repository.
-6. Start and health-check the session's Claudex translator.
-7. Launch Claude Code with the strict MCP file and controller policy.
+6. Materialize a private controller policy containing the verified project,
+   Docker profile, GitHub account, and Mempalace wing bindings.
+7. Start and health-check the session's Claudex translator.
+8. Launch Claude Code with the strict MCP file and controller policy.
 
 Resume revalidates the current control plane and services but keeps the logical
 session's frozen route. Fork creates a new binding and carries only a bounded

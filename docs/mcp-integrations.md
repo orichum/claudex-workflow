@@ -32,6 +32,12 @@ tool approval and the live service's own authorization still apply.
 The generated MCP file belongs to one verified session context and is launched
 with strict MCP configuration.
 
+Orichum also appends the verified project root, Docker profile, GitHub account,
+and Mempalace wing to that physical session's controller policy. The named
+Docker profile is already selected by the session's gateway command; the
+controller must not activate or switch profiles globally. This keeps concurrent
+`xebia`, `realtime`, and profile-free sessions isolated from one another.
+
 LeanCTX receives a project jail at the active Git root and a private
 `run_dir/leanctx` directory containing its deterministic mode-`0600` config and
 session-local data. Orichum exposes a fixed surface for compact reads, source
