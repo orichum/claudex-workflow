@@ -899,6 +899,7 @@ if b"<plist" in raw[:500]:
                     and environment.get("ORICHUM_WORKFLOW_ROOT") == workflow_root
                     and environment.get("ORICHUM_PYTHON")
                     == f"{data_root}/bin/orichum-python"
+                    and environment.get("ORICHUM_DATA_HOME") == data_root
                 )
             )
         )
@@ -1023,6 +1024,7 @@ if kind == "claudex-proxy":
                 expected_environment,
                 expected_workflow_environment,
                 expected_python_environment,
+                expected_data_environment,
                 ]
             )
         )
@@ -1038,6 +1040,7 @@ if kind == "claudex-proxy":
                 and environment.get("ORICHUM_WORKFLOW_ROOT") == workflow_root
                 and environment.get("ORICHUM_PYTHON")
                 == f"{data_root}/bin/orichum-python"
+                and environment.get("ORICHUM_DATA_HOME") == data_root
             )
         )
     )
@@ -3399,6 +3402,8 @@ render_claudex_proxy_launch_agent() {
     "    <string>$escaped_workflow</string>" \
     '    <key>ORICHUM_PYTHON</key>' \
     "    <string>$escaped_binary</string>" \
+    '    <key>ORICHUM_DATA_HOME</key>' \
+    "    <string>$escaped_data</string>" \
     '  </dict>' \
     '</dict>' \
     '</plist>' >"$output_file"
@@ -3412,7 +3417,7 @@ render_claudex_proxy_systemd_user_unit() {
   local upstream_port="${5:-8317}"
   local runtime_digest="${6:-}"
   local route_runner executable runner state data home_environment
-  local workflow_environment python_environment
+  local workflow_environment python_environment data_environment
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
   [[ "$port" != "$upstream_port" ]] || return 1
@@ -3431,6 +3436,9 @@ render_claudex_proxy_systemd_user_unit() {
     systemd_environment_quote \
       "ORICHUM_PYTHON=$data_root/bin/orichum-python"
   )"
+  data_environment="$(
+    systemd_environment_quote "ORICHUM_DATA_HOME=$data_root"
+  )"
   printf '%s\n' \
     "# Orichum route runtime SHA-256: $runtime_digest" \
     '[Unit]' \
@@ -3446,6 +3454,7 @@ render_claudex_proxy_systemd_user_unit() {
     "Environment=$home_environment" \
     "Environment=$workflow_environment" \
     "Environment=$python_environment" \
+    "Environment=$data_environment" \
     'StandardOutput=journal' \
     'StandardError=journal' \
     '' \
