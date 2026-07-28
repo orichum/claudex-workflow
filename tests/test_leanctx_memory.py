@@ -80,6 +80,10 @@ class LeanctxMemoryTests(unittest.TestCase):
             "/private/data/leanctx/lean-ctx",
         )
         self.assertEqual(
+            environment["LEAN_CTX_SHELL_ALLOWLIST_OVERRIDE"],
+            "",
+        )
+        self.assertEqual(
             environment["XDG_DATA_HOME"],
             "/private/data/leanctx",
         )
@@ -99,7 +103,7 @@ class LeanctxMemoryTests(unittest.TestCase):
             "repoRootReal": "/work/project",
             "route": {
                 "contextRootReal": "/work",
-                "dockerProfile": None,
+                "atlassian": None,
                 "memoryAvailable": True,
                 "palacePathReal": "/private/retired",
             },
@@ -132,7 +136,7 @@ class LeanctxMemoryTests(unittest.TestCase):
                 "contexts": [
                     {
                         "root": str(root),
-                        "dockerProfile": None,
+                        "atlassian": None,
                         "modelStack": None,
                         "accountPools": ["shared"],
                         "githubAccount": None,
@@ -171,7 +175,7 @@ class LeanctxMemoryTests(unittest.TestCase):
                 "contexts": [
                         {
                             "root": str(root / "project"),
-                            "dockerProfile": None,
+                            "atlassian": None,
                             "modelStack": None,
                             "accountPools": ["shared"],
                             "githubAccount": None,
@@ -197,7 +201,7 @@ class LeanctxMemoryTests(unittest.TestCase):
                     "contexts": [
                         {
                             "root": str(root / "project"),
-                            "dockerProfile": None,
+                            "atlassian": None,
                             "modelStack": None,
                             "accountPools": ["shared"],
                             "githubAccount": None,
@@ -230,7 +234,7 @@ class LeanctxMemoryTests(unittest.TestCase):
                 "contexts": [
                     {
                         "root": str(root / "project"),
-                        "dockerProfile": None,
+                        "atlassian": None,
                         "modelStack": None,
                         "accountPools": ["shared"],
                         "githubAccount": None,

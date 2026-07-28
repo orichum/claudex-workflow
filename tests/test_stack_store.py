@@ -56,7 +56,7 @@ class StackStoreTests(unittest.TestCase):
             "contexts": [
                 {
                     "root": str(self.root / "project"),
-                    "dockerProfile": None,
+                    "atlassian": None,
                     "modelStack": None,
                     "accountPools": ["shared"],
                 }

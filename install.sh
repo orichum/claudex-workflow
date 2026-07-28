@@ -399,9 +399,20 @@ SERVICE_LABEL="io.orichum.cliproxy"
 runtime_transaction_active=false
 runtime_release=
 runtime_previous=-
+atlassian_tool_transaction_active=false
 
 rollback_consolidated_runtime_and_home() {
   local rollback_ready=true
+  if [[ "${atlassian_tool_transaction_active:-false}" == true ]]; then
+    rm -rf -- "$WORKFLOW_DATA_ROOT/tools" || rollback_ready=false
+    if [[ -f "$snapshot_dir/atlassian-tools.present" ]]; then
+      cp -pPR "$snapshot_dir/atlassian-tools.data" \
+        "$WORKFLOW_DATA_ROOT/tools" || rollback_ready=false
+    elif [[ ! -f "$snapshot_dir/atlassian-tools.absent" ]]; then
+      rollback_ready=false
+    fi
+    atlassian_tool_transaction_active=false
+  fi
   if [[ "${runtime_transaction_active:-false}" == true ]]; then
     rollback_orichum_runtime \
       "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" \
@@ -429,6 +440,7 @@ python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || \
 [[ -x "$WORKFLOW_ROOT/bin/orichum" ]] || \
   workflow_die "required launcher is missing or not executable: orichum"
 for helper in \
+    orichum-atlassian-mcp \
     orichum-context orichum-doctor orichum-login \
     orichum-plugin orichum-route-proxy orichum-runtime-ready \
     orichum-verify-cliproxy orichum-verify-leanctx-proxy; do
@@ -672,6 +684,9 @@ attempt_verified_fast_install() (
       "$WORKFLOW_DATA_ROOT/bin/claudex" &&
     managed_executable_is_safe \
       "$WORKFLOW_DATA_ROOT/bin/lean-ctx" &&
+    [[ -x "$WORKFLOW_DATA_ROOT/tools/bin/mcp-atlassian" ]] &&
+    "$WORKFLOW_DATA_ROOT/tools/bin/mcp-atlassian" \
+      --version >/dev/null 2>&1 &&
     printf '%s\t%s\t%s\n' \
       "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api")" \
       "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex")" \
@@ -864,6 +879,10 @@ if [[ "$controller_plugin_decision" != reused ]]; then
   rm -rf -- "$validation_config"
 fi
 
+snapshot_path "$WORKFLOW_DATA_ROOT/tools" \
+  "$snapshot_dir" atlassian-tools
+atlassian_tool_transaction_active=true
+
 install -d -m 0755 "$USER_BIN_DIR"
 install -d -m 0700 "$WORKFLOW_DATA_ROOT"
 install -d -m 0700 \
@@ -877,8 +896,27 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/leanctx/lean-ctx" \
   "$WORKFLOW_DATA_ROOT/leanctx/proxy/config" \
   "$WORKFLOW_DATA_ROOT/leanctx/proxy/state" \
-  "$WORKFLOW_DATA_ROOT/leanctx/proxy/cache"
+  "$WORKFLOW_DATA_ROOT/leanctx/proxy/cache" \
+  "$WORKFLOW_DATA_ROOT/tools" \
+  "$WORKFLOW_DATA_ROOT/tools/bin" \
+  "$WORKFLOW_DATA_ROOT/tools/uv"
 chmod 0700 "$WORKFLOW_DATA_ROOT/bin"
+
+atlassian_tool_arguments=(tool install)
+if [[ "$INSTALL_MODE" == upgrade ]]; then
+  atlassian_tool_arguments+=(--upgrade)
+fi
+atlassian_tool_arguments+=(mcp-atlassian)
+if [[ "$INSTALL_MODE" == upgrade || \
+      ! -x "$WORKFLOW_DATA_ROOT/tools/bin/mcp-atlassian" ]]; then
+  UV_TOOL_DIR="$WORKFLOW_DATA_ROOT/tools/uv" \
+  UV_TOOL_BIN_DIR="$WORKFLOW_DATA_ROOT/tools/bin" \
+    uv --quiet "${atlassian_tool_arguments[@]}" || \
+    workflow_die "mcp-atlassian could not be installed"
+fi
+"$WORKFLOW_DATA_ROOT/tools/bin/mcp-atlassian" \
+  --version >/dev/null 2>&1 || \
+  workflow_die "mcp-atlassian failed its executable readiness check"
 
 python_entrypoint="$(orichum_python_entrypoint "$WORKFLOW_DATA_ROOT")"
 snapshot_path "$python_entrypoint" "$snapshot_dir" orichum-python

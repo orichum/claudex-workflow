@@ -961,7 +961,7 @@ class StackWizardTests(unittest.TestCase):
             "contexts": [
                 {
                     "root": "/work/project",
-                    "dockerProfile": None,
+                    "atlassian": None,
                     "modelStack": None,
                     "accountPools": ["shared"],
                 }
@@ -1388,7 +1388,7 @@ class StackWizardTests(unittest.TestCase):
                 "contexts": [
                     {
                         "root": "/work/project",
-                        "dockerProfile": None,
+                        "atlassian": None,
                         "modelStack": "heavy",
                         "accountPools": ["shared"],
                     }

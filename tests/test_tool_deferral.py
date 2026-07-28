@@ -110,7 +110,7 @@ class ToolDeferralTests(unittest.TestCase):
             client_tool("Bash"),
             client_tool("Read"),
             client_tool("mcp__leanctx__ctx_graph"),
-            *client_tools(8, prefix="mcp__docker__tool_"),
+            *client_tools(8, prefix="mcp__sample__tool_"),
         ]
         result = transform_request(request("gpt-5.6-sol", tools))
         document = json.loads(result.body)

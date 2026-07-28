@@ -193,7 +193,7 @@ contexts="$(
     "$ROOT/bin/orichum" context list
 )"
 rg -Fq 'ACCOUNT POOLS' <<<"$contexts"
-rg -Fq 'MCP_DOCKER' "$ROOT/README.md"
+rg -Fq 'mcp-atlassian' "$ROOT/README.md"
 rg -Fq 'orichum fork' "$ROOT/docs/sessions.md"
 rg -Fq 'orichum models stacks' "$ROOT/docs/sessions.md"
 rg -Fq 'orichum stack available' "$ROOT/docs/model-stacks.md"

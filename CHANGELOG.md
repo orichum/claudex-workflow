@@ -10,6 +10,10 @@ All notable Orichum changes are recorded here.
   history and tool results after Orichum selects the session route.
 - `orichum leanctx stats` now separates per-session MCP savings from shared
   wire-proxy request savings.
+- `orichum context jira ROOT` stores Jira credentials directly on one private
+  project context.
+- Project-bound `mcp-atlassian` processes expose Jira reads and writes only in
+  sessions whose project declares Jira credentials.
 
 ### Changed
 
@@ -17,6 +21,14 @@ All notable Orichum changes are recorded here.
   CLIProxyAPI; inference traffic uses the shared optimizer.
 - Concurrent sessions share the resident LeanCTX proxy while retaining private
   Claudex translators and project-jailed LeanCTX MCP state.
+- Private LeanCTX MCP sessions use blocklist-only shell execution so arbitrary
+  finite CLIs work without maintaining an executable-name allowlist; project
+  jailing, secret redaction, dangerous-pattern blocking, and Claude Code
+  approvals remain active.
+- Project configuration now stores optional Jira credentials directly instead
+  of a Docker MCP profile or separate Atlassian account registry. Installer
+  reconciliation drops old profile and account-ID bindings without guessing
+  credentials.
 
 ### Fixed
 
@@ -26,6 +38,11 @@ All notable Orichum changes are recorded here.
   health endpoint; inference sockets remain fail-closed and attested.
 - Runtime creation suppresses Python bytecode so the immutable installed
   release remains content-verifiable.
+
+### Removed
+
+- Docker MCP Toolkit profiles and gateways from Orichum session routing.
+  Existing Docker profiles outside Orichum are untouched.
 
 ## 0.1.0-rc.2 - 2026-07-28
 
@@ -94,7 +111,7 @@ First release candidate of the unified Orichum harness.
   recovery.
 - Immutable logical sessions with resume and explicit cross-stack forks.
 - Deterministic LeanCTX source, graph, callgraph, and impact routing;
-  MCP_DOCKER profiles; and isolated GitHub identities.
+  project-bound Jira configurations; and isolated GitHub identities.
 - Interactive provider and model-stack configuration.
 - macOS ARM64, Linux AMD64, and WSL2-with-systemd acceptance contracts.
 

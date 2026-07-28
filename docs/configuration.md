@@ -11,16 +11,23 @@ orichum config paths
 |---|---|
 | `model-stacks.json` | Models, families, controller candidates, and specialist role candidates |
 | `providers.json` | Provider adapters, auth types, pools, and family route order |
-| `projects.json` | Parent paths, stack overrides, pools, GitHub identities, and Docker profiles |
+| `projects.json` | Parent paths, stack overrides, pools, GitHub identities, and optional Jira credentials |
 | `plugins.json` | Optional Claude Code marketplaces and plugins |
 | `runtime.json` | Controller effort, tool concurrency, and session subagent limit |
 | `controller-policy.md` | Product-managed sole-writer and deterministic tool-routing policy |
 | `accounts.json` | Private named-account registry managed by provider commands |
 | `stack-bindings.json` | Private machine-local named-account locks |
 
-Portable declarations contain credential references, not secrets.
-`accounts.json`, `stack-bindings.json`, authentication data, and session state
-are private machine-local files and must not be committed.
+Jira is the deliberate local exception to credential references:
+`orichum context jira ROOT` stores its URL, username, and token together on
+that project entry in private `projects.json`. The installed file is mode
+`0600`, contains the raw token, and must not be committed, shared, or copied
+into a repository. `orichum config show` redacts `apiToken`; `orichum context
+list` shows only the Jira URL. This keeps each project's Jira identity
+independent without another account registry.
+
+`projects.json`, `accounts.json`, `stack-bindings.json`, authentication data,
+and session state are private machine-local files and must not be committed.
 
 The installer preserves user-managed JSON configuration. Reconciliation
 normalizes `projects.json` to the current schema while preserving active
@@ -46,6 +53,12 @@ the otherwise consolidated layout. Logical sessions always remain below the
 selected data root so the CLI and resident route service resolve the same
 state.
 
-Prefer `orichum stack configure`, `orichum provider account`, `orichum context`,
-and `orichum plugin` commands over direct JSON editing. They validate and save
-changes transactionally.
+Prefer `orichum stack configure`, `orichum provider account`,
+`orichum context`, `orichum context jira`, and `orichum plugin`
+commands over direct JSON editing. They validate and save changes
+transactionally.
+
+Orichum's private LeanCTX MCP uses blocklist-only shell execution so arbitrary
+finite CLIs work without changing `~/.config/lean-ctx/config.toml`. Project
+jailing, secret redaction, dangerous-pattern blocking, and Claude Code command
+approval remain active.

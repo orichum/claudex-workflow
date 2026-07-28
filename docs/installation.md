@@ -33,7 +33,7 @@ The first run performs the complete installation. It:
 2. consolidates an earlier XDG-based installation into `~/.orichum` once;
 3. validates the focused configuration and controller plugin;
 4. installs the newest available CPython 3.14 patch privately;
-5. installs or upgrades CLIProxyAPI, Claudex, and LeanCTX;
+5. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, and `mcp-atlassian`;
 6. probes required CLIProxyAPI behavior, the exact bounded MCP surfaces, and
    LeanCTX's isolated proxy configuration;
 7. installs or reconciles the shared loopback services;
@@ -105,6 +105,8 @@ next available port.
 | Content-addressed runtime release | `~/.orichum/runtime/releases/DIGEST/` |
 | Managed binaries | `~/.orichum/bin/` |
 | Provider credentials | `~/.orichum/auth/` |
+| Project Jira credentials | `~/.orichum/config/projects.json` |
+| Managed Python tools | `~/.orichum/tools/bin/` |
 | Managed Python versions | `~/.orichum/python/` |
 | Stable private Python | `~/.orichum/bin/orichum-python` |
 | Logical sessions and install state | `~/.orichum/state/` |
@@ -146,11 +148,19 @@ runtime pointer and original directories. Existing live sessions should still
 be restarted after a successful migration because their physical session
 packages were created against the earlier installation contract.
 
+Installer reconciliation removes retired Docker MCP profile and Atlassian
+account-ID fields from project contexts. It does not guess or copy credentials:
+each migrated context receives `atlassian: null`. Configure Jira once with
+`orichum context jira ROOT` for every project that needs it, then start or
+resume a session.
+
 ## Services
 
 The shared resident services are CLIProxyAPI, the LeanCTX wire proxy, and the
 Orichum route proxy. Each active physical session owns only its Claudex
-translation proxy. All inference requests use the shared services; model
+translation proxy. A project-bound `mcp-atlassian` process is also
+session-scoped and exists only when that project declares Jira credentials. All
+inference requests use the shared services; model
 catalogue discovery bypasses LeanCTX and queries CLIProxyAPI through the route
 proxy.
 
@@ -188,6 +198,7 @@ This stops and removes only verified Orichum-owned services, removes the
 `orichum` launcher, and deletes replaceable managed runtime files. It preserves:
 
 - provider credentials and named accounts;
+- project-bound Atlassian credentials;
 - model and project configuration;
 - Claude and Orichum session state;
 - LeanCTX project knowledge and graphs.
@@ -203,7 +214,7 @@ To also permanently delete Orichum's data and configuration roots:
 Purge removes saved Orichum credentials, sessions, project configuration, and
 Orichum-managed LeanCTX data. It does not delete the repository checkout.
 
-Neither mode uninstalls standalone Claude Code, CLIProxyAPI, Claudex, LeanCTX,
-or uv installations. If a service definition or launcher with an
-Orichum name is not verifiably owned by this setup, uninstall stops before
+Neither mode touches standalone Claude Code, Docker MCP Toolkit, or tool
+installations outside `ORICHUM_HOME`. If a service definition or launcher with
+an Orichum name is not verifiably owned by this setup, uninstall stops before
 changing anything.

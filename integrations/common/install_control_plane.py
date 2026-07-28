@@ -708,7 +708,7 @@ def _candidate_payload(
 
 
 def _normalize_projects_payload(payload: bytes) -> bytes:
-    """Keep portable routing fields while dropping retired integrations."""
+    """Normalize private project bindings without guessing Jira credentials."""
     try:
         document = json.loads(payload)
     except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
@@ -724,25 +724,30 @@ def _normalize_projects_payload(payload: bytes) -> bytes:
         raise InstallControlPlaneError(
             "installed projects.json is invalid"
         )
-    required = (
+    common = (
         "root",
-        "dockerProfile",
         "modelStack",
         "accountPools",
     )
-    current = {*required, "githubAccount"}
-    retired = {"memoryPalace", "memoryWing"}
+    current = {*common, "atlassian", "githubAccount"}
+    retired = {
+        "atlassianAccount",
+        "dockerProfile",
+        "memoryPalace",
+        "memoryWing",
+    }
     normalized = []
     for context in document["contexts"]:
         if (
             not isinstance(context, dict)
-            or any(name not in context for name in required)
+            or any(name not in context for name in common)
             or not set(context).issubset(current | retired)
         ):
             raise InstallControlPlaneError(
                 "installed projects.json is invalid"
             )
-        item = {name: context[name] for name in required}
+        item = {name: context[name] for name in common}
+        item["atlassian"] = context.get("atlassian")
         if "githubAccount" in context:
             item["githubAccount"] = context["githubAccount"]
         normalized.append(item)

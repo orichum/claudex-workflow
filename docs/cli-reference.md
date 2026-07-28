@@ -28,8 +28,10 @@ Installer modes are separate from the `orichum` command:
 | `orichum config validate` | Validate focused configuration |
 | `orichum config paths` | Print the consolidated home, configuration, data, cache, and state paths |
 | `orichum context list` | Show configured parent-directory contexts |
-| `orichum context add ROOT [--docker PROFILE] [--model-stack STACK] [--pool POOL] [--github-account ACCOUNT]` | Add a parent-directory context; repeat `--pool` for ordered pools |
-| `orichum context update ROOT ...` | Replace pools or identities; set or inherit a stack; set or clear Docker/GitHub bindings |
+| `orichum context add ROOT [--model-stack STACK] [--pool POOL] [--github-account ACCOUNT]` | Add a parent-directory context; repeat `--pool` for ordered pools |
+| `orichum context jira ROOT [--url URL] [--username USER]` | Prompt for and save Jira credentials directly on a project context |
+| `orichum context jira ROOT --remove` | Remove Jira from a project context |
+| `orichum context update ROOT ...` | Replace pools or GitHub identity; set or inherit a stack |
 | `orichum context remove ROOT` | Remove a context mapping |
 | `orichum context validate` | Validate all configured project contexts |
 | `orichum models list` | List declared models |

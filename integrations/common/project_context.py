@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import contextvars
 import fcntl
+import getpass
 import json
 import os
 import stat
@@ -14,6 +15,11 @@ import tempfile
 from pathlib import Path
 from typing import Collection, Optional
 
+from .atlassian_mcp import (
+    AtlassianConfig,
+    AtlassianError,
+    normalize_atlassian,
+)
 from .github_identity import GithubIdentityError, validate_github_account
 from .model_routing import (
     RoutingError,
@@ -26,7 +32,7 @@ class ContextError(RuntimeError):
     pass
 
 
-_CONTEXT_REQUIRED_KEYS = {"root", "dockerProfile"}
+_CONTEXT_REQUIRED_KEYS = {"root", "atlassian"}
 _CONTEXT_OPTIONAL_KEYS = {
     "modelStack",
     "accountPools",
@@ -116,6 +122,13 @@ def _require_optional_non_blank(
     return _require_non_blank(value, label)
 
 
+def _atlassian_config(value: object) -> AtlassianConfig | None:
+    try:
+        return normalize_atlassian(value)
+    except AtlassianError as error:
+        raise ContextError(str(error)) from error
+
+
 def _structural_path(value: object, home: Path, label: str) -> Path:
     value = _require_non_blank(value, label)
     if value == "~" or value.startswith("~/"):
@@ -181,7 +194,7 @@ def validate_config_document(
     for index, raw_context in enumerate(raw_contexts):
         context = _context_object(raw_context, f"context {index}")
         root = _structural_path(context["root"], home, "root")
-        _require_optional_non_blank(context["dockerProfile"], "dockerProfile")
+        _atlassian_config(context["atlassian"])
         _model_stack(context.get("modelStack"), stacks)
         try:
             validate_github_account(context.get("githubAccount"))
@@ -258,9 +271,7 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
         if root_real == Path(root_real.anchor) or root_real == home.resolve(strict=False):
             raise ContextError("configured root is unsafe")
 
-        docker_profile = _require_optional_non_blank(
-            context["dockerProfile"], "dockerProfile"
-        )
+        atlassian = _atlassian_config(context["atlassian"])
         model_stack = _model_stack(context.get("modelStack"))
         if any(_contains(existing_root, root_real) or _contains(root_real, existing_root)
                for existing_root in canonical_roots):
@@ -269,7 +280,9 @@ def load_config(config_path: Path, home: Optional[Path] = None) -> dict:
         contexts.append(
             {
                 "root": root_real,
-                "dockerProfile": docker_profile,
+                "atlassian": (
+                    atlassian.as_json() if atlassian is not None else None
+                ),
                 "modelStack": model_stack,
             }
         )
@@ -296,7 +309,7 @@ def resolve_context(config: dict, launch_dir: Path) -> dict:
         route = {
             "id": selected["root"].name,
             "contextRootReal": str(selected["root"]),
-            "dockerProfile": selected["dockerProfile"],
+            "atlassianConfigured": selected["atlassian"] is not None,
             "modelStack": selected["modelStack"],
         }
 
@@ -333,7 +346,7 @@ def resolve_control_plane_context(
         context = raw
         expected = {
             "root",
-            "dockerProfile",
+            "atlassian",
             "modelStack",
             "accountPools",
         }
@@ -362,11 +375,14 @@ def resolve_control_plane_context(
         ):
             raise ContextError("configured roots must not overlap")
         canonical_roots.add(root)
+        atlassian = _atlassian_config(context["atlassian"])
         normalized.append(
             {
                 "root": root,
-                "dockerProfile": _require_optional_non_blank(
-                    context["dockerProfile"], "dockerProfile"
+                "atlassian": (
+                    atlassian.as_json()
+                    if atlassian is not None
+                    else None
                 ),
                 "modelStack": _model_stack(context["modelStack"]),
                 "githubAccount": validate_github_account(
@@ -853,6 +869,43 @@ def assign_stack_to_context(
         return matched
 
 
+def configure_project_atlassian(
+    config_path: Path,
+    launch_dir: Path,
+    config: AtlassianConfig | None,
+) -> Path:
+    """Set or clear Jira credentials directly on one project context."""
+    config_path = Path(config_path)
+    home = Path.home()
+    with _context_lock(config_path):
+        document = _read_context_document(config_path, home)
+        resolved = resolve_control_plane_context(
+            document, launch_dir, home=home
+        )
+        route = resolved.get("route")
+        if not isinstance(route, dict):
+            raise ContextError(
+                "current directory has no project context"
+            )
+        matched = Path(route["contextRootReal"])
+        for context in document["contexts"]:
+            root = _context_root(
+                context["root"], home, must_exist=True
+            )
+            if root.resolve() == matched:
+                context["atlassian"] = (
+                    config.as_json() if config is not None else None
+                )
+                break
+        else:
+            raise ContextError(
+                "matched project context disappeared"
+            )
+        validate_config_document(document, home)
+        _write_context_document(config_path, document)
+        return matched
+
+
 def _context_root(value: str, home: Path, *, must_exist: bool) -> Path:
     root = _structural_path(value, home, "root")
     if root == Path(root.anchor) or root == home:
@@ -918,7 +971,7 @@ def _build_add_candidate(
     root = _context_root(parsed.root, home, must_exist=True)
     context = {
         "root": str(root),
-        "dockerProfile": parsed.docker,
+        "atlassian": None,
         "modelStack": parsed.model_stack,
     }
     if "schemaVersion" in document:
@@ -928,8 +981,6 @@ def _build_add_candidate(
     if "schemaVersion" in document:
         requested = list(parsed.pool or ())
         if not requested:
-            if parsed.docker and parsed.docker in (account_pools or set()):
-                requested.append(parsed.docker)
             requested.append("shared")
         context["accountPools"] = list(dict.fromkeys(requested))
     candidate = {
@@ -943,7 +994,7 @@ def _render_context_table(contexts: list[dict], default_stack: str) -> str:
     columns = (
         ("PROJECT ROOT", "root"),
         ("MODEL STACK", "modelStack"),
-        ("MCP_DOCKER PROFILE", "dockerProfile"),
+        ("JIRA", "atlassian"),
         ("GITHUB ACCOUNT", "githubAccount"),
     )
 
@@ -955,6 +1006,8 @@ def _render_context_table(contexts: list[dict], default_stack: str) -> str:
         )
         if key == "modelStack" and value is None:
             return f"{default_stack} (global)"
+        if key == "atlassian" and isinstance(value, dict):
+            return str(value["url"])
         return "—" if value is None else value
 
     rows = [
@@ -1008,16 +1061,18 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
     commands.add_parser("list")
     add = commands.add_parser("add")
     add.add_argument("root")
-    add.add_argument("--docker")
     add.add_argument("--model-stack")
     add.add_argument("--pool", action="append")
     add.add_argument("--github-account")
+    jira = commands.add_parser("jira")
+    jira.add_argument("root")
+    jira.add_argument("--url")
+    jira.add_argument("--username")
+    jira.add_argument("--remove", action="store_true")
     update = commands.add_parser("update")
     update.add_argument("root")
-    update.add_argument("--docker")
     update.add_argument("--model-stack")
     update.add_argument("--pool", action="append")
-    update.add_argument("--no-docker", action="store_true")
     update.add_argument("--github-account")
     update.add_argument("--no-github-account", action="store_true")
     update.add_argument("--inherit-model-stack", action="store_true")
@@ -1095,27 +1150,81 @@ def context_main(arguments: Optional[list[str]] = None) -> int:
                 if parsed.command != "remove":
                     raise
                 index = _find_exact_context_index(contexts, parsed.root)
+            if parsed.command == "jira":
+                if parsed.remove:
+                    if parsed.url is not None or parsed.username is not None:
+                        raise ContextError(
+                            "--remove cannot be combined with Jira fields"
+                        )
+                    configured = None
+                else:
+                    existing = _atlassian_config(
+                        contexts[index]["atlassian"]
+                    )
+                    default_url = existing.url if existing is not None else ""
+                    default_username = (
+                        existing.username if existing is not None else ""
+                    )
+                    url = parsed.url or input(
+                        "Jira URL"
+                        + (f" [{default_url}]" if default_url else "")
+                        + ": "
+                    ).strip() or default_url
+                    username = parsed.username or input(
+                        "Jira username"
+                        + (
+                            f" [{default_username}]"
+                            if default_username
+                            else ""
+                        )
+                        + ": "
+                    ).strip() or default_username
+                    token = getpass.getpass(
+                        "Jira API token"
+                        + (" [keep existing]" if existing is not None else "")
+                        + ": "
+                    ).strip()
+                    if not token and existing is not None:
+                        token = existing.api_token
+                    try:
+                        configured = AtlassianConfig(
+                            url=url,
+                            username=username,
+                            api_token=token,
+                        )
+                    except AtlassianError as error:
+                        raise ContextError(str(error)) from error
+                candidate = {
+                    "schemaVersion": 1,
+                    "contexts": list(contexts),
+                }
+                replacement = dict(contexts[index])
+                replacement["atlassian"] = (
+                    configured.as_json()
+                    if configured is not None
+                    else None
+                )
+                candidate["contexts"][index] = replacement
+                _validate_context_candidate(
+                    candidate, home, routing_stacks, account_pools
+                )
+                _write_context_document(parsed.config, candidate)
+                return 0
             if parsed.command == "update":
                 if (
                     all(
                         value is None
                         for value in (
-                            parsed.docker,
                             parsed.model_stack,
                             parsed.pool,
                             parsed.github_account,
                         )
                     )
                     and not parsed.inherit_model_stack
-                    and not parsed.no_docker
                     and not parsed.no_github_account
                 ):
                     raise ContextError("update requires a replacement field")
                 replacement = dict(contexts[index])
-                if parsed.docker is not None:
-                    replacement["dockerProfile"] = parsed.docker
-                elif parsed.no_docker:
-                    replacement["dockerProfile"] = None
                 if parsed.model_stack is not None:
                     replacement["modelStack"] = parsed.model_stack
                 elif parsed.inherit_model_stack:
