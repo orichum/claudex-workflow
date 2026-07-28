@@ -108,11 +108,35 @@ physical_pwd() {
   pwd -P
 }
 
+orichum_home_dir() {
+  local home_root="${ORICHUM_HOME:-$HOME/.orichum}"
+  case "$home_root" in
+    /*) printf '%s' "${home_root%/}" ;;
+    *) workflow_die "ORICHUM_HOME must be an absolute path" ;;
+  esac
+}
+
 workflow_data_dir() {
-  local data_root="${ORICHUM_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/orichum}"
+  local data_root="${ORICHUM_DATA_HOME:-$(orichum_home_dir)}"
   case "$data_root" in
     /*) printf '%s' "$data_root" ;;
     *) workflow_die "ORICHUM_DATA_HOME must be an absolute path" ;;
+  esac
+}
+
+workflow_config_dir() {
+  local config_root="${ORICHUM_CONFIG_HOME:-$(orichum_home_dir)/config}"
+  case "$config_root" in
+    /*) printf '%s' "$config_root" ;;
+    *) workflow_die "ORICHUM_CONFIG_HOME must be an absolute path" ;;
+  esac
+}
+
+workflow_cache_dir() {
+  local cache_root="${ORICHUM_CACHE_HOME:-$(orichum_home_dir)/cache}"
+  case "$cache_root" in
+    /*) printf '%s' "$cache_root" ;;
+    *) workflow_die "ORICHUM_CACHE_HOME must be an absolute path" ;;
   esac
 }
 
@@ -758,12 +782,15 @@ print_install_summary() {
   local python_realpath="${15}"
   local python_action="${16}"
   local leanctx_binary="${17}"
+  local source_root="${18}"
+  local home_root="${19}"
 
   printf '%s\n' \
     '' \
     'Installation locations' \
-    "  Workflow checkout: $workflow_root" \
-    "  Workflow data:     $data_root" \
+    "  Orichum home:       $home_root" \
+    "  Runtime release:    $workflow_root" \
+    "  Installer source:   $source_root" \
     "  Launcher:          $user_bin_dir/orichum -> $workflow_root/bin/orichum" \
     "  Claudex runtime:   $claudex_binary" \
     "  CLIProxyAPI:       $cliproxy_binary" \
@@ -781,6 +808,9 @@ print_install_summary() {
     "  Claudex:     per-session from 127.0.0.1:$claudex_proxy_port" \
     "  Route proxy: $claudex_proxy_action at 127.0.0.1:$route_proxy_port" \
     "    $claudex_proxy_service_file"
+  if [[ "$data_root" != "$home_root" ]]; then
+    printf '  Advanced data override: %s\n' "$data_root"
+  fi
 }
 
 service_definition_is_owned() {
@@ -1295,7 +1325,7 @@ claudex_config_default_model() {
 
 validated_workflow_data_dir() {
   local checkout_root="$1"
-  local data_root="${ORICHUM_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/orichum}"
+  local data_root="${ORICHUM_DATA_HOME:-$(orichum_home_dir)}"
   workflow_python - "$data_root" "$HOME" "$checkout_root" <<'PY'
 import os
 import stat
@@ -1334,6 +1364,51 @@ else:
     inside_checkout = True
 if candidate in (root, home) or inside_checkout:
     raise SystemExit("refusing unsafe ORICHUM_DATA_HOME")
+print(candidate, end="")
+PY
+}
+
+validated_orichum_home_dir() {
+  local checkout_root="$1"
+  local home_root
+  home_root="$(orichum_home_dir)" || return 1
+  workflow_python - "$home_root" "$HOME" "$checkout_root" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+raw, user_home_raw, checkout_raw = sys.argv[1:]
+if not os.path.isabs(raw):
+    raise SystemExit("ORICHUM_HOME must be an absolute path")
+
+normalized = Path(os.path.normpath(raw))
+cursor = Path(normalized.anchor)
+for index, component in enumerate(normalized.parts[1:]):
+    cursor /= component
+    try:
+        value = os.lstat(cursor)
+    except FileNotFoundError:
+        break
+    except OSError as error:
+        raise SystemExit("ORICHUM_HOME existing ancestor is inaccessible") from error
+    if stat.S_ISLNK(value.st_mode):
+        raise SystemExit("ORICHUM_HOME existing ancestors must not be symlinks")
+    if index < len(normalized.parts[1:]) - 1 and not stat.S_ISDIR(value.st_mode):
+        raise SystemExit("ORICHUM_HOME existing ancestor is not a directory")
+
+candidate = normalized.resolve(strict=False)
+user_home = Path(user_home_raw).resolve(strict=True)
+checkout = Path(checkout_raw).resolve(strict=True)
+root = Path(candidate.anchor)
+try:
+    candidate.relative_to(checkout)
+except ValueError:
+    inside_checkout = False
+else:
+    inside_checkout = True
+if candidate in (root, user_home) or inside_checkout:
+    raise SystemExit("refusing unsafe ORICHUM_HOME")
 print(candidate, end="")
 PY
 }
@@ -1393,6 +1468,7 @@ workflow_cleanup() {
   if ((quarantine_status == 0)); then
     release_workflow_lock "${WORKFLOW_LOCK_DIR:-}" || true
     release_workflow_lock_guard "${WORKFLOW_LOCK_GUARD_DIR:-}" || true
+    rmdir "$HOME/.local/state/orichum" 2>/dev/null || true
   else
     printf 'ERROR: installer lock quarantine recovery failed; acquisition guard retained (fail-closed)\n' >&2
   fi
@@ -1940,7 +2016,10 @@ for label, value in zip(
     digest.update(value.encode())
     digest.update(b"\0")
 for index, path in enumerate(paths):
-    observed = os.lstat(path)
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        raise SystemExit(1)
     if (
         stat.S_ISLNK(observed.st_mode)
         or not stat.S_ISREG(observed.st_mode)
@@ -1997,7 +2076,10 @@ paths = [Path(value) for value in sys.argv[2:]]
 uid = os.getuid()
 digest = hashlib.sha256()
 for index, path in enumerate(paths):
-    observed = os.lstat(path)
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        raise SystemExit(1)
     if (
         stat.S_ISLNK(observed.st_mode)
         or not stat.S_ISREG(observed.st_mode)

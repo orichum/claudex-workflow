@@ -2,6 +2,7 @@
 set -euo pipefail
 
 WORKFLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="$WORKFLOW_ROOT"
 # shellcheck source=lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
@@ -183,17 +184,241 @@ verify_committed_control_plane() {
 }
 # END installed control-plane transaction
 
+# BEGIN consolidated home and runtime transaction
+prepare_orichum_home() {
+  local source_root="$1"
+  local home_root="$2"
+  local journal_root="$3"
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$home_root" \
+      "${XDG_DATA_HOME:-$HOME/.local/share}/orichum" \
+      "${XDG_CONFIG_HOME:-$HOME/.config}/orichum" \
+      "${XDG_CACHE_HOME:-$HOME/.cache}/orichum" \
+      "$journal_root" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.home_layout import prepare
+
+journal = prepare(
+    Path(sys.argv[2]),
+    Path(sys.argv[3]),
+    Path(sys.argv[4]),
+    Path(sys.argv[5]),
+    Path(sys.argv[6]),
+)
+if journal is not None:
+    print(journal, end="")
+PY
+  )
+}
+
+rollback_orichum_home() {
+  local source_root="$1"
+  local journal="$2"
+  [[ -n "$journal" ]] || return 0
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$journal" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.home_layout import rollback
+
+rollback(Path(sys.argv[2]))
+PY
+  )
+}
+
+commit_orichum_home() {
+  local source_root="$1"
+  local journal="$2"
+  [[ -n "$journal" ]] || return 0
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$journal" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.home_layout import commit
+
+commit(Path(sys.argv[2]))
+PY
+  )
+}
+
+stage_orichum_runtime() {
+  local source_root="$1"
+  local stage_root="$2"
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$stage_root" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.runtime_bundle import build
+
+print(build(root, Path(sys.argv[2])), end="")
+PY
+  )
+}
+
+activate_orichum_runtime() {
+  local source_root="$1"
+  local staged_release="$2"
+  local home_root="$3"
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$staged_release" "$home_root" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.runtime_bundle import activate
+
+release, previous = activate(Path(sys.argv[2]), Path(sys.argv[3]))
+print(f"{release}\t{previous or '-'}")
+PY
+  )
+}
+
+current_orichum_runtime() {
+  local source_root="$1"
+  local home_root="$2"
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$home_root" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.runtime_bundle import current_release
+
+release = current_release(Path(sys.argv[2]))
+print(release or "-", end="")
+PY
+  )
+}
+
+rollback_orichum_runtime() {
+  local source_root="$1"
+  local home_root="$2"
+  local release="$3"
+  local previous="$4"
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$home_root" "$release" "$previous" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.runtime_bundle import rollback_attempt
+
+rollback_attempt(
+    Path(sys.argv[2]),
+    Path(sys.argv[3]),
+    None if sys.argv[4] == "-" else Path(sys.argv[4]),
+)
+PY
+  )
+}
+
+prune_orichum_runtime() {
+  local source_root="$1"
+  local home_root="$2"
+  local release="$3"
+  (
+    cd "$source_root"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B - \
+      "$source_root" "$home_root" "$release" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.runtime_bundle import prune
+
+prune(Path(sys.argv[2]), (Path(sys.argv[3]),))
+PY
+  )
+}
+# END consolidated home and runtime transaction
+
 
 USER_BIN_DIR="${USER_BIN_DIR:-$HOME/.local/bin}"
+ORICHUM_HOME_ROOT="$(validated_orichum_home_dir "$SOURCE_ROOT")" || \
+  workflow_die "refusing unsafe ORICHUM_HOME"
+ORICHUM_HOME="$ORICHUM_HOME_ROOT"
+export ORICHUM_HOME
+home_migration_journal=
+home_migration_active=false
+home_migration_performed=false
+if [[ -z "${ORICHUM_DATA_HOME:-}" && \
+      -z "${ORICHUM_CONFIG_HOME:-}" && \
+      -z "${ORICHUM_CACHE_HOME:-}" ]]; then
+  home_migration_journal="$(
+    prepare_orichum_home \
+      "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" \
+      "${lifecycle_lock_path%/install.lock}"
+  )" || workflow_die "existing Orichum state could not be consolidated safely"
+  if [[ -n "$home_migration_journal" ]]; then
+    home_migration_active=true
+    home_migration_performed=true
+    printf 'Consolidating existing Orichum state into %s\n' \
+      "$ORICHUM_HOME_ROOT"
+  fi
+fi
 WORKFLOW_DATA_ROOT="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || \
   workflow_die "refusing unsafe ORICHUM_DATA_HOME"
-ORICHUM_CONFIG_ROOT="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
+ORICHUM_CONFIG_ROOT="$(workflow_config_dir)"
 INSTALLED_CONFIG_ROOT="$ORICHUM_CONFIG_ROOT"
 case "$ORICHUM_CONFIG_ROOT" in
   /*) ;;
   *) workflow_die "ORICHUM_CONFIG_HOME must be an absolute path" ;;
 esac
 SERVICE_LABEL="io.orichum.cliproxy"
+runtime_transaction_active=false
+runtime_release=
+runtime_previous=-
+
+rollback_consolidated_runtime_and_home() {
+  local rollback_ready=true
+  if [[ "${runtime_transaction_active:-false}" == true ]]; then
+    rollback_orichum_runtime \
+      "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" \
+      "$runtime_release" "$runtime_previous" || rollback_ready=false
+    runtime_transaction_active=false
+  fi
+  if [[ "${home_migration_active:-false}" == true ]]; then
+    rollback_orichum_home \
+      "$SOURCE_ROOT" "$home_migration_journal" || rollback_ready=false
+    home_migration_active=false
+  fi
+  [[ "$rollback_ready" == true ]]
+}
+if [[ "$home_migration_active" == true ]]; then
+  WORKFLOW_ROLLBACK_HANDLER=rollback_consolidated_runtime_and_home
+  WORKFLOW_TRANSACTION_ACTIVE=true
+fi
 
 for command_name in curl gh jq tar install python3 git rg uv; do
   command -v "$command_name" >/dev/null || workflow_die "missing required command: $command_name"
@@ -296,6 +521,27 @@ if [[ "$control_plane_recovery_needed" == true ]]; then
     workflow_die \
       "unfinished Orichum control-plane activation could not be recovered"
 fi
+
+staged_runtime_release="$(
+  stage_orichum_runtime "$SOURCE_ROOT" "$installer_temp/runtime-stage"
+)" || workflow_die "standalone Orichum runtime could not be staged"
+runtime_previous="$(
+  current_orichum_runtime "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT"
+)" || workflow_die "existing standalone Orichum runtime is invalid"
+runtime_release="$ORICHUM_HOME_ROOT/runtime/releases/$(basename "$staged_runtime_release")"
+runtime_transaction_active=true
+WORKFLOW_ROLLBACK_HANDLER=rollback_consolidated_runtime_and_home
+WORKFLOW_TRANSACTION_ACTIVE=true
+activation_result="$(
+  activate_orichum_runtime \
+    "$SOURCE_ROOT" "$staged_runtime_release" "$ORICHUM_HOME_ROOT"
+)" || workflow_die "standalone Orichum runtime could not be activated"
+IFS=$'\t' read -r activated_runtime_release activated_runtime_previous \
+  <<<"$activation_result"
+[[ "$activated_runtime_release" == "$runtime_release" && \
+   "$activated_runtime_previous" == "$runtime_previous" ]] || \
+  workflow_die "standalone Orichum runtime activation identity changed"
+WORKFLOW_ROOT="$runtime_release"
 
 install_contract_fingerprint() {
   python3 -I -B "$WORKFLOW_ROOT/integrations/common/install_state.py" \
@@ -583,11 +829,22 @@ attempt_verified_fast_install() (
     "$cliproxy_service" "$cliproxy_port" reused \
     "$route_service" "$claudex_port" "$route_port" reused \
     "$python_entrypoint" "$python_version" "$python_runtime" reused \
-    "$WORKFLOW_DATA_ROOT/bin/lean-ctx"
+    "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT"
   printf '\nFast readiness checks passed.\n'
 )
 
 if attempt_verified_fast_install; then
+  runtime_transaction_active=false
+  WORKFLOW_TRANSACTION_ACTIVE=false
+  if [[ "$home_migration_active" == true ]]; then
+    commit_orichum_home \
+      "$SOURCE_ROOT" "$home_migration_journal" || \
+      workflow_die "consolidated Orichum home could not be committed"
+    home_migration_active=false
+  fi
+  prune_orichum_runtime \
+    "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" "$runtime_release" || \
+    printf 'WARNING: obsolete Orichum runtime releases could not be removed.\n' >&2
   exit 0
 fi
 
@@ -657,16 +914,26 @@ fi
 python_transaction_active=false
 python_candidate_generation=
 rollback_python_activation() {
-  [[ "${python_transaction_active:-false}" == true ]] || return 0
-  restore_snapshot "$python_entrypoint" \
-    "$snapshot_dir" orichum-python || return 1
-  snapshot_path_matches "$python_entrypoint" \
-    "$snapshot_dir" orichum-python || return 1
-  remove_orichum_python_generation \
-    "$WORKFLOW_DATA_ROOT" "${python_candidate_generation:-}"
+  local rollback_ready=true
+  if [[ "${python_transaction_active:-false}" == true ]]; then
+    restore_snapshot "$python_entrypoint" \
+      "$snapshot_dir" orichum-python || rollback_ready=false
+    snapshot_path_matches "$python_entrypoint" \
+      "$snapshot_dir" orichum-python || rollback_ready=false
+    remove_orichum_python_generation \
+      "$WORKFLOW_DATA_ROOT" "${python_candidate_generation:-}" || \
+      rollback_ready=false
+  fi
+  [[ "$rollback_ready" == true ]]
+}
+rollback_python_and_consolidated() {
+  local rollback_ready=true
+  rollback_python_activation || rollback_ready=false
+  rollback_consolidated_runtime_and_home || rollback_ready=false
+  [[ "$rollback_ready" == true ]]
 }
 python_transaction_active=true
-WORKFLOW_ROLLBACK_HANDLER=rollback_python_activation
+WORKFLOW_ROLLBACK_HANDLER=rollback_python_and_consolidated
 WORKFLOW_TRANSACTION_ACTIVE=true
 IFS=$'\t' read -r \
   orichum_python_action orichum_python_version orichum_python_candidate \
@@ -959,20 +1226,47 @@ cliproxy_service_was_present=false
 cliproxy_service_owned=false
 if [[ -e "$service_file" || -L "$service_file" ]]; then
   cliproxy_service_was_present=true
-  cliproxy_service_is_owned "$service_file" "$WORKFLOW_DATA_ROOT" || \
+  if cliproxy_service_is_owned "$service_file" "$WORKFLOW_DATA_ROOT"; then
+    :
+  elif [[ "$home_migration_active" == true ]] && \
+       cliproxy_service_is_owned \
+         "$service_file" "${XDG_DATA_HOME:-$HOME/.local/share}/orichum"; then
+    :
+  else
     workflow_die "refusing to overwrite unknown service file: $service_file"
+  fi
   cliproxy_service_owned=true
 fi
 claudex_proxy_service_was_present=false
 claudex_proxy_service_owned=false
+prior_route_data_root="$WORKFLOW_DATA_ROOT"
+prior_route_workflow_root="$WORKFLOW_ROOT"
+if [[ "$runtime_previous" != "-" ]]; then
+  prior_route_workflow_root="$runtime_previous"
+fi
 if [[ -e "$claudex_proxy_service_file" || \
       -L "$claudex_proxy_service_file" ]]; then
   claudex_proxy_service_was_present=true
-  claudex_proxy_service_is_owned \
-    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
-    "$WORKFLOW_ROOT" || \
+  if claudex_proxy_service_is_owned \
+      "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+      "$WORKFLOW_ROOT"; then
+    :
+  elif [[ "$runtime_previous" != "-" ]] && \
+       claudex_proxy_service_is_owned \
+         "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
+         "$runtime_previous"; then
+    prior_route_workflow_root="$runtime_previous"
+  elif [[ "$home_migration_active" == true ]] && \
+       claudex_proxy_service_is_owned \
+         "$claudex_proxy_service_file" \
+         "${XDG_DATA_HOME:-$HOME/.local/share}/orichum" \
+         "$SOURCE_ROOT"; then
+    prior_route_data_root="${XDG_DATA_HOME:-$HOME/.local/share}/orichum"
+    prior_route_workflow_root="$SOURCE_ROOT"
+  else
     workflow_die \
       "refusing to overwrite unknown service file: $claudex_proxy_service_file"
+  fi
   claudex_proxy_service_owned=true
 fi
 claudex_proxy_manager_target_state="$(managed_service_target_state \
@@ -1076,12 +1370,18 @@ claudex_proxy_loaded_target_is_expected() {
 }
 
 claudex_proxy_prior_runtime_safe_to_stop() {
-  local current_pid target_state
+  local current_pid target_state loaded_definition
   target_state="$(managed_service_target_state \
     "$platform" "$claudex_proxy_service_label" \
     "$claudex_proxy_service_unit")" || return 1
-  claudex_proxy_loaded_target_is_expected || return 1
+  claudex_proxy_service_is_owned \
+    "$claudex_proxy_service_file" "$prior_route_data_root" \
+    "$prior_route_workflow_root" || return 1
   [[ "$target_state" == absent ]] && return 0
+  loaded_definition="$(managed_service_definition_path \
+    "$platform" "$claudex_proxy_service_label" \
+    "$claudex_proxy_service_unit" 2>/dev/null)" || return 1
+  [[ "$loaded_definition" == "$claudex_proxy_service_file" ]] || return 1
   current_pid="$(managed_service_main_pid_value \
     "$platform" "$claudex_proxy_service_label" \
     "$claudex_proxy_service_unit" 2>/dev/null)" || return 1
@@ -1367,6 +1667,7 @@ if [[ "$cliproxy_binary_changed" == true ]] || \
 fi
 
 model_config_root_path="$(model_config_root "$WORKFLOW_DATA_ROOT")"
+claude_settings_path="$WORKFLOW_DATA_ROOT/claude-config/settings.json"
 prior_model_generation=
 prior_model_generation_snapshot=
 endpoint_lock_owned=false
@@ -1381,6 +1682,7 @@ snapshot_path "$claudex_proxy_service_file" \
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
 snapshot_path "$USER_BIN_DIR/orichum" \
   "$snapshot_dir" orichum-launcher
+snapshot_path "$claude_settings_path" "$snapshot_dir" claude-settings
 cliproxy_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
@@ -1388,6 +1690,7 @@ endpoint_transaction_active=true
 orichum_launcher_mutated=false
 leanctx_transaction_active=false
 install_state_transaction_active=false
+claude_settings_transaction_active=false
 if [[ "$leanctx_binary_changed" == true ]]; then
   leanctx_transaction_active=true
 fi
@@ -1401,8 +1704,8 @@ restore_claudex_proxy_service() {
   snapshot_path_matches "$claudex_proxy_service_file" \
     "$snapshot_dir" claudex-proxy-service || recovery_ready=false
   claudex_proxy_service_is_owned \
-    "$claudex_proxy_service_file" "$WORKFLOW_DATA_ROOT" \
-    "$WORKFLOW_ROOT" || recovery_ready=false
+    "$claudex_proxy_service_file" "$prior_route_data_root" \
+    "$prior_route_workflow_root" || recovery_ready=false
 
   if [[ "$recovery_ready" != true ]] || \
      [[ "${claudex_proxy_recovery_prerequisites_ready:-false}" != true ]]; then
@@ -1477,6 +1780,59 @@ rollback_install_transaction() {
       "$INSTALLED_CONFIG_ROOT" "$control_plane_journal" \
       "$lifecycle_lock_path" "$WORKFLOW_LOCK_FD" || \
       rollback_ready=false
+  fi
+
+  if [[ "${claude_settings_transaction_active:-false}" == true ]]; then
+    if snapshot_path_matches \
+        "$claude_settings_path" "$snapshot_dir" claude-settings; then
+      :
+    else
+      local claude_settings_ready=true
+      local prior_settings=
+      if [[ -f "$snapshot_dir/claude-settings.present" ]]; then
+        prior_settings="$snapshot_dir/claude-settings.data"
+      elif [[ ! -f "$snapshot_dir/claude-settings.absent" ]]; then
+        claude_settings_ready=false
+      fi
+      if [[ "$claude_settings_ready" == true ]]; then
+        (
+          cd "$WORKFLOW_ROOT"
+          workflow_python - \
+            "$WORKFLOW_ROOT" "$claude_settings_path" \
+            "$snapshot_dir/claude-settings-installed.data" \
+            "$prior_settings" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.install_control_plane import (
+    InstallControlPlaneError,
+    rollback_claude_settings,
+)
+
+try:
+    rollback_claude_settings(
+        Path(sys.argv[2]),
+        Path(sys.argv[3]),
+        Path(sys.argv[4]) if sys.argv[4] else None,
+    )
+except InstallControlPlaneError as error:
+    raise SystemExit(str(error))
+PY
+        ) || {
+          claude_settings_ready=false
+          rollback_ready=false
+        }
+      fi
+      if [[ "$claude_settings_ready" == true ]]; then
+        snapshot_path_matches \
+          "$claude_settings_path" "$snapshot_dir" claude-settings || \
+          rollback_ready=false
+      else
+        rollback_ready=false
+      fi
+    fi
   fi
 
   if [[ "${python_transaction_active:-false}" == true ]]; then
@@ -1573,6 +1929,7 @@ rollback_install_transaction() {
     fi
   fi
 
+  rollback_consolidated_runtime_and_home || rollback_ready=false
   [[ "$rollback_ready" == true ]]
 }
 
@@ -1835,7 +2192,7 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
         "$MODEL_DISCOVERY_LOGIN_INCOMPLETE" ]]; then
     printf 'NOTICE: persistent Orichum route proxy is pending-provider-login.\n' >&2
     printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
-      "$WORKFLOW_ROOT" >&2
+      "$SOURCE_ROOT" >&2
   elif [[ -n "$prior_model_generation" ]] && \
        [[ "$ports_changed" == false ]] && \
        [[ "$cliproxy_binary_changed" == false ]] && \
@@ -1985,7 +2342,12 @@ verify_committed_control_plane \
   "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" || \
   workflow_die "committed Orichum control plane is invalid"
 install -m 0600 "$WORKFLOW_ROOT/controller/settings.json" \
-  "$WORKFLOW_DATA_ROOT/claude-config/settings.json"
+  "$snapshot_dir/claude-settings-installed.data"
+claude_settings_transaction_active=true
+activate_private_file_atomic \
+  "$snapshot_dir/claude-settings-installed.data" \
+  "$claude_settings_path" 0600 || \
+  workflow_die "isolated Claude settings could not be activated safely"
 committed_route_service_file="$claudex_proxy_service_file"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   committed_route_service_file="$claudex_proxy_desired_service_file"
@@ -2157,11 +2519,12 @@ print_install_summary \
   "$claudex_proxy_action" \
   "$ORICHUM_PYTHON" "$orichum_python_version" \
   "$orichum_python_candidate" "$orichum_python_action" \
-  "$WORKFLOW_DATA_ROOT/bin/lean-ctx"
+  "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
-    "$WORKFLOW_ROOT"
+    "$SOURCE_ROOT"
 elif [[ "$INSTALL_MODE" == upgrade || \
+        "$home_migration_performed" == true || \
         "$prior_install_state_verified" != true ]]; then
   printf '\nRunning Orichum doctor...\n'
   ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
@@ -2179,6 +2542,7 @@ finalize_installed_control_plane \
   "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" "$control_plane_journal" \
   "$lifecycle_lock_path" "$WORKFLOW_LOCK_FD" || \
   workflow_die "installed Orichum control-plane journal could not be finalized"
+runtime_transaction_active=false
 cliproxy_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
@@ -2187,4 +2551,14 @@ leanctx_transaction_active=false
 python_transaction_active=false
 config_transaction_active=false
 install_state_transaction_active=false
+claude_settings_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false
+if [[ "$home_migration_active" == true ]]; then
+  commit_orichum_home \
+    "$SOURCE_ROOT" "$home_migration_journal" || \
+    workflow_die "consolidated Orichum home could not be committed"
+  home_migration_active=false
+fi
+prune_orichum_runtime \
+  "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" "$runtime_release" || \
+  printf 'WARNING: obsolete Orichum runtime releases could not be removed.\n' >&2

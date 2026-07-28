@@ -32,12 +32,14 @@ jobs:
           command -v jq >/dev/null || brew install jq
           command -v rg >/dev/null || brew install ripgrep
           sudo npm install --global @anthropic-ai/claude-code
-          export ORICHUM_DATA_HOME="$RUNNER_TEMP/orichum-data"
-          export ORICHUM_CONFIG_HOME="$RUNNER_TEMP/orichum-config"
+          export ORICHUM_HOME="$RUNNER_TEMP/orichum-home"
+          export ORICHUM_DATA_HOME="$ORICHUM_HOME"
+          export ORICHUM_CONFIG_HOME="$ORICHUM_HOME/config"
           export USER_BIN_DIR="$RUNNER_TEMP/orichum-bin"
           export UV_TOOL_DIR="$RUNNER_TEMP/uv-tools"
           export UV_TOOL_BIN_DIR="$RUNNER_TEMP/orichum-bin"
           printf '%s\n' \
+            "ORICHUM_HOME=$ORICHUM_HOME" \
             "ORICHUM_DATA_HOME=$ORICHUM_DATA_HOME" \
             "ORICHUM_CONFIG_HOME=$ORICHUM_CONFIG_HOME" \
             "USER_BIN_DIR=$USER_BIN_DIR" \

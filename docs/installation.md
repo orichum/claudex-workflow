@@ -29,13 +29,15 @@ cd orichum
 
 The first run performs the complete installation. It:
 
-1. validates the focused configuration and controller plugin;
-2. installs the newest available CPython 3.14 patch privately;
-3. installs or upgrades CLIProxyAPI, Claudex, and LeanCTX;
-4. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
-5. installs or reconciles the shared loopback services;
-6. preserves valid configuration and authentication;
-7. runs `orichum doctor` and reports the final locations and ports once a
+1. builds and validates a small, content-addressed Orichum runtime release;
+2. consolidates an earlier XDG-based installation into `~/.orichum` once;
+3. validates the focused configuration and controller plugin;
+4. installs the newest available CPython 3.14 patch privately;
+5. installs or upgrades CLIProxyAPI, Claudex, and LeanCTX;
+6. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
+7. installs or reconciles the shared loopback services;
+8. preserves valid configuration and authentication;
+9. runs `orichum doctor` and reports the final locations and ports once a
    provider route is available.
 
 Without a logged-in provider, installation completes in
@@ -58,7 +60,7 @@ damaged component is repaired without upgrading unrelated tools. Fresh
 installations automatically use the complete path. Repairs can take longer
 than the fast-path target.
 
-The installer preserves an existing `~/.config/orichum/model-stacks.json`
+The installer preserves an existing `~/.orichum/config/model-stacks.json`
 because it may contain user-created stacks. Repository default-model changes
 apply automatically only to fresh installations. Existing users can review and
 adopt newer defaults without losing custom stacks through:
@@ -82,7 +84,7 @@ runtime, run:
 ```
 
 Verified state is stored at
-`~/.local/share/orichum/state/install-state.json`. The private manifest contains
+`~/.orichum/state/install-state.json`. The private manifest contains
 component identities and digests, not secrets. Do not edit it; the installer
 discards invalid state and safely reconciles the installation.
 
@@ -96,16 +98,52 @@ next available port.
 | Purpose | Default |
 |---|---|
 | Command | `~/.local/bin/orichum` |
-| Editable configuration | `~/.config/orichum/` |
-| Binaries, auth, logs, and service state | `~/.local/share/orichum/` |
-| Managed LeanCTX binary | `~/.local/share/orichum/bin/lean-ctx` |
-| Managed Python versions | `~/.local/share/orichum/python/` |
-| Stable private Python | `~/.local/share/orichum/bin/orichum-python` |
-| Logical session state | `~/.local/share/orichum/state/` |
-| Verified install state | `~/.local/share/orichum/state/install-state.json` |
+| Orichum home | `~/.orichum/` |
+| Editable configuration | `~/.orichum/config/` |
+| Immutable active runtime | `~/.orichum/runtime/current` |
+| Content-addressed runtime release | `~/.orichum/runtime/releases/DIGEST/` |
+| Managed binaries | `~/.orichum/bin/` |
+| Provider credentials | `~/.orichum/auth/` |
+| Managed Python versions | `~/.orichum/python/` |
+| Stable private Python | `~/.orichum/bin/orichum-python` |
+| Logical sessions and install state | `~/.orichum/state/` |
+| LeanCTX project knowledge | `~/.orichum/leanctx/` |
+| Logs and cache | `~/.orichum/logs/`, `~/.orichum/cache/` |
 
-Use `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and `ORICHUM_CACHE_HOME` to
-relocate these roots. Values must be absolute.
+Set `ORICHUM_HOME` to one absolute private directory before installation to
+relocate the entire layout. `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and
+`ORICHUM_CACHE_HOME` remain advanced, fine-grained overrides for automation and
+tests; ordinary installations should use only `ORICHUM_HOME`.
+
+The runtime release is an allowlisted payload, not a copy of the repository.
+It contains the launcher, runtime Python modules, controller plugin, built-in
+configuration, and installer helpers. It excludes `.git`, tests, docs, caches,
+and unrelated checkout files. Activation switches `runtime/current`
+atomically only after the release validates. Services and the launcher bind to
+the physical release, so later checkout edits cannot change a running install.
+After a successful reconciliation, obsolete releases are removed.
+
+The only normal paths outside `ORICHUM_HOME` are:
+
+- `~/.local/bin/orichum`, a launcher symlink;
+- the operating system's LaunchAgent or systemd user-unit files;
+- the per-user lifecycle lock while install or uninstall is running.
+
+The lifecycle lock directory is removed when the operation ends.
+
+## Existing installation migration
+
+When the old XDG layout is present and the fine-grained path overrides are not
+set, the installer moves its data, configuration, and cache into
+`ORICHUM_HOME`. The move is atomic and requires the old and new locations to be
+on the same filesystem. Temporary compatibility links keep existing services
+alive during reconciliation. They are removed only after the new runtime,
+services, configuration, and doctor checks succeed.
+
+If installation fails or is interrupted, the transaction restores the old
+runtime pointer and original directories. Existing live sessions should still
+be restarted after a successful migration because their physical session
+packages were created against the earlier installation contract.
 
 ## Services
 

@@ -35,10 +35,12 @@ jobs:
           set -euo pipefail
           python3 -m unittest \
             tests.test_install_control_plane \
+            tests.test_home_layout \
             tests.test_leanctx_monitor \
             tests.test_mcp_probe \
             tests.test_orichum_cli \
             tests.test_route_proxy \
+            tests.test_runtime_bundle \
             tests.test_session_config \
             tests.test_tool_deferral
           bash tests/test_smoke.sh

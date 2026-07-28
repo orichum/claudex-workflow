@@ -45,6 +45,9 @@ cd orichum
 The first install performs the complete setup. When a provider route is
 available, it also finishes with the full health check. Without one, it
 completes in `pending-provider-login` state and prints the next login command.
+Orichum installs its runtime and all user-managed state under `~/.orichum`;
+the checkout remains source code only, so editing configuration never dirties
+the repository and moving the checkout does not break the installed command.
 Later `./install.sh` runs quickly when everything is already verified and
 healthy. Use `./install.sh --upgrade` when you want Orichum to check upstream
 releases, upgrade managed tools, and run their complete probes; the full doctor
@@ -177,10 +180,12 @@ orichum doctor
 | List or inspect stacks | `orichum stack list` / `orichum stack show STACK` |
 | Check named accounts | `orichum provider accounts` |
 | List sessions | `orichum sessions` |
+| Inspect a session's live status | `orichum status SESSION_ID` |
 | Inspect a session's routes | `orichum session routes SESSION_ID` |
 | Resume a session | `orichum resume SESSION_ID` |
 | Monitor context savings | `orichum leanctx stats`, `orichum leanctx watch`, or `orichum leanctx dashboard` |
 | Check the installation | `orichum doctor` |
+| Show the active home, config, cache, and state paths | `orichum config paths` |
 | Upgrade Orichum | Run `./install.sh --upgrade` from the Orichum checkout |
 
 The complete command map is in the [CLI reference](docs/cli-reference.md).
@@ -216,9 +221,9 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
 flowchart LR
     P["Project directory"] --> O["Orichum"]
     O --> S["Isolated Claude Code session"]
-    S --> M["Selected account and model"]
-    O --> L["LeanCTX"]
-    O -. "only when the project declares a profile" .-> D["MCP_DOCKER"]
+    M["Selected account and model"] -. "frozen route" .-> S
+    S --> L["LeanCTX context and knowledge"]
+    S -. "only when the project declares a profile" .-> D["MCP_DOCKER"]
 ```
 
 The directory where you run `orichum` selects the project configuration.

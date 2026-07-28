@@ -49,6 +49,55 @@ class OrichumCliTests(unittest.TestCase):
             status = orichum_cli.main(list(arguments))
         return status, stdout.getvalue(), stderr.getvalue()
 
+    def test_default_paths_are_consolidated_under_orichum_home(self) -> None:
+        home = self.root / "home"
+
+        paths = orichum_cli._paths({"HOME": str(home)})
+
+        self.assertEqual(
+            paths,
+            {
+                "home": home / ".orichum",
+                "cache": home / ".orichum" / "cache",
+                "config": home / ".orichum" / "config",
+                "data": home / ".orichum",
+                "state": home / ".orichum" / "state",
+            },
+        )
+
+    def test_orichum_home_can_be_overridden_as_one_unit(self) -> None:
+        home = self.root / "private-orichum"
+
+        paths = orichum_cli._paths(
+            {
+                "HOME": str(self.root / "home"),
+                "ORICHUM_HOME": str(home),
+            }
+        )
+
+        self.assertEqual(paths["home"], home)
+        self.assertEqual(paths["data"], home)
+        self.assertEqual(paths["config"], home / "config")
+        self.assertEqual(paths["cache"], home / "cache")
+        self.assertEqual(paths["state"], home / "state")
+
+    def test_fine_grained_path_overrides_remain_available(self) -> None:
+        paths = orichum_cli._paths(
+            {
+                "HOME": str(self.root / "home"),
+                "ORICHUM_HOME": str(self.root / "orichum"),
+                "ORICHUM_DATA_HOME": str(self.root / "data"),
+                "ORICHUM_CONFIG_HOME": str(self.root / "config"),
+                "ORICHUM_CACHE_HOME": str(self.root / "cache"),
+            }
+        )
+
+        self.assertEqual(paths["home"], self.root / "orichum")
+        self.assertEqual(paths["data"], self.root / "data")
+        self.assertEqual(paths["config"], self.root / "config")
+        self.assertEqual(paths["cache"], self.root / "cache")
+        self.assertEqual(paths["state"], self.root / "data" / "state")
+
     def test_config_validate_paths_and_redacted_show(self) -> None:
         status, stdout, stderr = self.run_cli("config", "validate")
         self.assertEqual((status, stdout, stderr), (0, "", ""))
@@ -62,6 +111,7 @@ class OrichumCliTests(unittest.TestCase):
                 "cache": str(self.root / "cache"),
                 "config": str(REPOSITORY_ROOT / "config"),
                 "data": str(self.root / "data"),
+                "home": str(Path.home() / ".orichum"),
                 "state": str(self.root / "data" / "state"),
             },
         )
@@ -340,6 +390,39 @@ class OrichumCliTests(unittest.TestCase):
                 "orichum-context",
                 ["add", "/work/acme", "--pool", "shared"],
             )
+
+    def test_delegated_command_help_reaches_the_owning_helper(self) -> None:
+        cases = (
+            (
+                ("context", "add", "--help"),
+                "orichum-context",
+                ["add", "--help"],
+            ),
+            (
+                ("context", "validate", "--help"),
+                "orichum-context",
+                ["validate", "--help"],
+            ),
+            (
+                ("plugin", "add", "--help"),
+                "orichum-plugin",
+                ["add", "--help"],
+            ),
+            (
+                ("plugin", "list", "--help"),
+                "orichum-plugin",
+                ["list", "--help"],
+            ),
+        )
+        for arguments, executable, expected in cases:
+            with self.subTest(arguments=arguments):
+                with mock.patch.object(
+                    orichum_cli, "_run_external", return_value=0
+                ) as run:
+                    status, stdout, stderr = self.run_cli(*arguments)
+
+                self.assertEqual((status, stdout, stderr), (0, "", ""))
+                run.assert_called_once_with(executable, expected)
 
     def test_runtime_service_ports_accepts_only_three_distinct_ports(
         self,
@@ -875,6 +958,113 @@ class OrichumCliTests(unittest.TestCase):
             run.assert_called_once_with(
                 "orichum-context", ["add", "/tmp/project"]
             )
+
+    def test_status_renders_the_selected_logical_session(self) -> None:
+        session_id = "oc-s-0000000000000001"
+
+        def render_status(**arguments: object) -> int:
+            arguments["output_stream"].write(
+                "ORICHUM │ xebia │ balanced\n"
+                "GPT · GPT 5.6 Sol │ Personal GPT [primary] │ "
+                "context — │ 5h 12% │ 7d 34%\n"
+            )
+            return 0
+
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "load_logical_session",
+                return_value=object(),
+            ) as load,
+            mock.patch.object(
+                orichum_cli,
+                "render_status_main",
+                side_effect=render_status,
+            ),
+        ):
+            status, stdout, stderr = self.run_cli("status", session_id)
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn(f"SESSION │ {session_id}", stdout)
+        self.assertIn("Personal GPT [primary]", stdout)
+        load.assert_called_once_with(
+            self.root / "data" / "state",
+            session_id,
+        )
+
+    def test_status_uses_the_current_session_environment(self) -> None:
+        session_id = "oc-s-0000000000000001"
+        self.environment["ORICHUM_SESSION_ID"] = session_id
+
+        def render_status(**arguments: object) -> int:
+            arguments["output_stream"].write("ORICHUM │ current\n")
+            return 0
+
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "load_logical_session",
+                return_value=object(),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "render_status_main",
+                side_effect=render_status,
+            ),
+        ):
+            status, stdout, stderr = self.run_cli("status")
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn(f"SESSION │ {session_id}", stdout)
+        self.assertIn("ORICHUM │ current", stdout)
+
+    def test_status_rejects_missing_or_malformed_session_before_config_load(
+        self,
+    ) -> None:
+        self.environment["ORICHUM_CONFIG_HOME"] = str(
+            self.root / "missing-config"
+        )
+        for arguments, message in (
+            (("status",), "orichum status <session-id>"),
+            (("status", "invalid"), "logical session ID is invalid"),
+        ):
+            with self.subTest(arguments=arguments):
+                status, stdout, stderr = self.run_cli(*arguments)
+                self.assertEqual((status, stdout), (2, ""))
+                self.assertIn(message, stderr)
+
+    def test_terminal_title_identifies_the_orichum_session(self) -> None:
+        prepared = SimpleNamespace(
+            logical=SimpleNamespace(
+                project_root=Path("/work/xebia"),
+                controller=SimpleNamespace(
+                    primary=SimpleNamespace(
+                        logical_model="claude-opus-5"
+                    )
+                ),
+            )
+        )
+        events: list[str] = []
+
+        class RecordingStream(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+            def flush(self) -> None:
+                events.append("flush")
+
+        stream = RecordingStream()
+        orichum_cli._set_terminal_title(
+            prepared,
+            stream=stream,
+            environment={"TERM": "xterm-256color"},
+        )
+
+        self.assertEqual(
+            stream.getvalue(),
+            "\x1b]0;Orichum — xebia — Opus 5\x07",
+        )
+        self.assertEqual(events, ["flush"])
 
     def test_plain_orichum_is_an_explicit_session_runtime_gate(self) -> None:
         status, stdout, stderr = self.run_cli()

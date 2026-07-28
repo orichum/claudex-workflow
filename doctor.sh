@@ -5,7 +5,8 @@ WORKFLOW_ROOT="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 data_root="$(workflow_data_dir)"
-config_root="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
+home_root="$(orichum_home_dir)"
+config_root="$(workflow_config_dir)"
 failures=0
 doctor_temp="$(mktemp -d "${TMPDIR:-/tmp}/orichum-doctor.XXXXXX")"
 trap 'rm -rf -- "$doctor_temp"' EXIT
@@ -23,6 +24,33 @@ if python_identity="$(
   ok "Private CPython 3.14 is active ($python_version; $python_realpath)"
 else
   fail 'Private CPython 3.14 is missing, unsafe, or inactive'
+fi
+
+runtime_pointer="$home_root/runtime/current"
+runtime_release_valid=false
+if [[ -n "$python_identity" && -L "$runtime_pointer" ]] && \
+   [[ "$(workflow_physical_path "$runtime_pointer" 2>/dev/null)" == \
+      "$WORKFLOW_ROOT" ]] && \
+   (
+     cd "$WORKFLOW_ROOT"
+     PYTHONDONTWRITEBYTECODE=1 "$orichum_python" -I -B - \
+       "$WORKFLOW_ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from integrations.common.runtime_bundle import validate
+
+validate(root)
+PY
+   ) >/dev/null 2>&1; then
+  runtime_release_valid=true
+fi
+if [[ "$runtime_release_valid" == true ]]; then
+  ok "standalone runtime is active ($WORKFLOW_ROOT)"
+else
+  fail 'standalone runtime is missing, stale, or not content-verified'
 fi
 
 if ORICHUM_CONFIG_HOME="$config_root" ORICHUM_DATA_HOME="$data_root" \
@@ -68,6 +96,64 @@ elif [[ "$provider_login_pending" == true && \
   ok 'Claudex template is pending provider login'
 else
   fail 'Claudex template conflates its listener with the recovery proxy'
+fi
+
+status_renderer="$WORKFLOW_ROOT/bin/orichum-statusline"
+isolated_claude_settings="$data_root/claude-config/settings.json"
+status_line_valid=false
+if [[ -n "$python_identity" ]] && \
+   [[ -d "$data_root/claude-config" && \
+      ! -L "$data_root/claude-config" ]] && \
+   [[ "$(path_mode "$data_root/claude-config")" == 700 ]] && \
+   [[ -f "$isolated_claude_settings" && \
+      ! -L "$isolated_claude_settings" ]] && \
+   [[ "$(path_mode "$isolated_claude_settings")" == 600 ]] && \
+   [[ "$(path_uid "$isolated_claude_settings")" == "$(id -u)" ]] && \
+   cmp -s "$WORKFLOW_ROOT/controller/settings.json" \
+     "$isolated_claude_settings" && \
+   [[ -f "$status_renderer" && ! -L "$status_renderer" && \
+      -x "$status_renderer" ]] && \
+   [[ "$(path_uid "$status_renderer")" == "$(id -u)" ]] && \
+   [[ "$(path_mode "$status_renderer")" == 755 ]] && \
+   [[ "$(
+     printf '{}' | \
+       ORICHUM_DATA_HOME="$data_root" \
+       ORICHUM_CONFIG_HOME="$config_root" \
+         "$status_renderer" 2>/dev/null
+   )" == 'ORICHUM │ status unavailable' ]]; then
+  status_line_valid=true
+fi
+if [[ "$status_line_valid" == true ]]; then
+  ok 'Orichum status line is installed and isolated'
+else
+  fail 'Orichum status line is missing, unsafe, or misconfigured'
+fi
+
+route_status_private=false
+route_status_file="$doctor_temp/route-status.json"
+route_status_code=
+if [[ "$ports_valid" == true ]]; then
+  route_status_code="$(
+    curl --silent --show-error \
+      --connect-timeout 1 --max-time 2 \
+      --output "$route_status_file" \
+      --write-out '%{http_code}' \
+      "http://127.0.0.1:${route_port}/status?session_id=oc-s-0000000000000000" \
+      2>/dev/null || true
+  )"
+fi
+if [[ "$route_status_code" == 404 ]] && \
+   jq -e '
+     type == "object" and
+     keys == ["error"] and
+     .error == "status not found"
+   ' "$route_status_file" >/dev/null 2>&1; then
+  route_status_private=true
+fi
+if [[ "$route_status_private" == true ]]; then
+  ok 'route telemetry endpoint is private and redacted'
+else
+  fail 'route telemetry endpoint is unavailable or exposed route data'
 fi
 
 if [[ -x "$data_root/bin/claudex" ]] && \

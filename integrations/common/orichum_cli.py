@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_HALF_UP
 import fcntl
 import http.client
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ import socket
 import stat
 import subprocess
 import sys
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, TextIO
 
 from . import leanctx_monitor
 from .account_registry import (
@@ -59,6 +60,7 @@ from .orichum_sessions import (
     resolve_logical_session,
     resolve_session_plan,
 )
+from .orichum_status import main as render_status_main
 from .model_routing import EffectiveStack, ROLES, RoutingError
 from .project_context import ContextError, resolve_control_plane_context
 from .provider_credentials import (
@@ -140,18 +142,54 @@ def _home(
 
 def _paths(environment: Mapping[str, str] | None = None) -> dict[str, Path]:
     environment = os.environ if environment is None else environment
-    data = _home(
-        environment, "ORICHUM_DATA_HOME", "XDG_DATA_HOME", ".local/share/orichum"
+    home_raw = environment.get("ORICHUM_HOME")
+    if home_raw is None:
+        user_home = environment.get("HOME")
+        home_raw = str(
+            (Path(user_home) if user_home else Path.home()) / ".orichum"
+        )
+    home = Path(home_raw).expanduser()
+    if not home.is_absolute():
+        raise CliError("ORICHUM_HOME must be an absolute path")
+    home = home.resolve(strict=False)
+
+    data_raw = environment.get("ORICHUM_DATA_HOME")
+    data = (
+        _home(
+            environment,
+            "ORICHUM_DATA_HOME",
+            "XDG_DATA_HOME",
+            ".local/share/orichum",
+        )
+        if data_raw is not None
+        else home
+    )
+    config = (
+        _home(
+            environment,
+            "ORICHUM_CONFIG_HOME",
+            "XDG_CONFIG_HOME",
+            ".config/orichum",
+        )
+        if environment.get("ORICHUM_CONFIG_HOME") is not None
+        else home / "config"
+    )
+    cache = (
+        _home(
+            environment,
+            "ORICHUM_CACHE_HOME",
+            "XDG_CACHE_HOME",
+            ".cache/orichum",
+        )
+        if environment.get("ORICHUM_CACHE_HOME") is not None
+        else home / "cache"
     )
     return {
-        "config": _home(
-            environment, "ORICHUM_CONFIG_HOME", "XDG_CONFIG_HOME", ".config/orichum"
-        ),
+        "home": home,
+        "config": config,
         "data": data,
         "state": data / "state",
-        "cache": _home(
-            environment, "ORICHUM_CACHE_HOME", "XDG_CACHE_HOME", ".cache/orichum"
-        ),
+        "cache": cache,
     }
 
 
@@ -429,6 +467,26 @@ def _session_list(sessions: Sequence[LogicalSession]) -> str:
         ("ID", "CREATED", "PROJECT", "STACK", "FAMILY", "MODEL", "PARENT"),
         rows,
     )
+
+
+def _session_status(paths: Mapping[str, Path], session_id: str) -> str:
+    load_logical_session(paths["state"], session_id)
+    output = StringIO()
+    render_status_main(
+        input_stream=StringIO("{}"),
+        output_stream=output,
+        environment={
+            "ORICHUM_SESSION_ID": session_id,
+            "ORICHUM_STATE_HOME": str(paths["state"]),
+            "ORICHUM_CONFIG_HOME": str(paths["config"]),
+            "ORICHUM_DATA_HOME": str(paths["data"]),
+            "TERM": "dumb",
+        },
+    )
+    rendered = output.getvalue()
+    if rendered == "ORICHUM │ status unavailable\n":
+        raise CliError("session status is unavailable; run orichum doctor")
+    return f"SESSION │ {session_id}\n{rendered}"
 
 
 def _physical_cleanup_report(
@@ -1901,6 +1959,8 @@ def _session_environment(
     claudex_config: Path,
 ) -> dict[str, str]:
     physical = prepared.physical
+    orichum_home = paths.get("home", paths["data"])
+    orichum_cache = paths.get("cache", orichum_home / "cache")
     claudex_home = physical.run_dir / "claudex-home"
     claudex_home.mkdir(mode=0o700)
     claudex_home.chmod(0o700)
@@ -1929,10 +1989,12 @@ def _session_environment(
     environment.update(
         {
             "HOME": str(claudex_home),
+            "ORICHUM_HOME": str(orichum_home),
             "ORICHUM_SESSION_ID": prepared.logical.id,
             "ORICHUM_STATE_HOME": str(paths["state"]),
             "ORICHUM_CONFIG_HOME": str(paths["config"]),
             "ORICHUM_DATA_HOME": str(paths["data"]),
+            "ORICHUM_CACHE_HOME": str(orichum_cache),
             "ORICHUM_PYTHON": managed_python,
             "ORICHUM_PYTHON_VALIDATED": managed_python,
             "CLAUDEX_CONFIG_FILE": str(claudex_config),
@@ -1971,6 +2033,33 @@ def _session_environment(
     if github_config is not None:
         environment["GH_CONFIG_DIR"] = str(github_config)
     return environment
+
+
+def _logical_model_display_name(model: str) -> str:
+    components = model.split("-")
+    if components and components[0] in {"claude", "gemini", "kimi"}:
+        components = components[1:]
+    return " ".join(component.title() for component in components)
+
+
+def _set_terminal_title(
+    prepared: PreparedLaunch,
+    *,
+    stream: TextIO = sys.stderr,
+    environment: Mapping[str, str] = os.environ,
+) -> None:
+    if environment.get("TERM", "").lower() == "dumb" or not stream.isatty():
+        return
+    title = (
+        f"Orichum — {prepared.logical.project_root.name} — "
+        f"{_logical_model_display_name(
+            prepared.logical.controller.primary.logical_model
+        )}"
+    )
+    if any(ord(character) < 32 or ord(character) == 127 for character in title):
+        return
+    stream.write(f"\x1b]0;{title[:120]}\x07")
+    stream.flush()
 
 
 def _launch_session(
@@ -2055,6 +2144,7 @@ def _launch_session(
     else:
         command.extend(["--session-id", prepared.logical.claude_session_id])
     command.extend(user_arguments)
+    _set_terminal_title(prepared, environment=environment)
     os.execvpe(str(claudex), command, environment)
 
 
@@ -2270,6 +2360,11 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="verify the complete local installation",
     )
+    status = commands.add_parser(
+        "status",
+        help="show live identity, routing, and quota for a session",
+    )
+    status.add_argument("session_id", nargs="?")
     sessions = commands.add_parser(
         "sessions",
         help="inspect and clean sessions",
@@ -2336,8 +2431,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if (
+        len(arguments) >= 2
+        and arguments[0] == "context"
+        and arguments[1] in {"add", "remove", "update", "validate"}
+    ):
+        return _run_external("orichum-context", arguments[1:])
+    if len(arguments) >= 2 and arguments[0] == "plugin":
+        return _run_external("orichum-plugin", arguments[1:])
+
     parser = build_parser()
-    parsed = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
+    parsed = parser.parse_args(arguments)
     try:
         if parsed.command is None:
             raise CliError("run Orichum through the installed launcher")
@@ -2352,10 +2457,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-        if parsed.command == "context" and parsed.context_command != "list":
-            context_arguments = [parsed.context_command]
-            context_arguments.extend(getattr(parsed, "arguments", ()))
-            return _run_external("orichum-context", context_arguments)
         if (
             parsed.command == "stack"
             and parsed.stack_command == "configure"
@@ -2372,13 +2473,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise CliError(
                 "provider configuration requires an interactive terminal"
             )
+        if parsed.command == "status":
+            session_id = parsed.session_id or os.environ.get(
+                "ORICHUM_SESSION_ID"
+            )
+            if not session_id:
+                raise CliError(
+                    "a logical session ID is required; run "
+                    "orichum status <session-id>"
+                )
+            if not re.fullmatch(r"oc-s-[a-f0-9]{16}", session_id):
+                raise CliError("logical session ID is invalid")
         paths, config = _load()
+        if parsed.command == "status":
+            print(_session_status(paths, session_id), end="")
+            return 0
         if parsed.command == "provider" and parsed.provider_command == "login":
             return _run_external("orichum-login", list(parsed.arguments))
-        if parsed.command == "plugin":
-            plugin_arguments = [parsed.plugin_command]
-            plugin_arguments.extend(getattr(parsed, "arguments", ()))
-            return _run_external("orichum-plugin", plugin_arguments)
         if parsed.command == "leanctx":
             runs = leanctx_monitor.discover_runs(
                 WORKFLOW_ROOT,

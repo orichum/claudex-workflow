@@ -65,6 +65,7 @@ for name, expected_directory in (
     ("python", True),
     ("tools", True),
     ("logs", True),
+    ("runtime", True),
     ("cliproxy.yaml", False),
     ("cliproxy-management.key", False),
 ):
@@ -237,7 +238,7 @@ orichum_uninstall() {
   local purge="${1:-false}"
   local workflow_root="${WORKFLOW_ROOT:?}"
   local user_bin_dir="${USER_BIN_DIR:-$HOME/.local/bin}"
-  local data_root config_root platform
+  local home_root data_root config_root cache_root platform runtime_root
   local cliproxy_file cliproxy_label cliproxy_unit cliproxy_state
   local route_file route_label route_unit route_state
   local launcher="$user_bin_dir/orichum"
@@ -246,14 +247,22 @@ orichum_uninstall() {
 
   data_root="$(validated_workflow_data_dir "$workflow_root")" || \
     workflow_die "refusing unsafe ORICHUM_DATA_HOME"
+  home_root="$(
+    orichum_uninstall_validate_private_root \
+      "$(orichum_home_dir)" "$workflow_root" ORICHUM_HOME
+  )" || return 1
   config_root="$(
     orichum_uninstall_validate_private_root \
-      "${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}" \
+      "$(workflow_config_dir)" \
       "$workflow_root" ORICHUM_CONFIG_HOME
   )" || return 1
   data_root="$(
     orichum_uninstall_validate_private_root \
       "$data_root" "$workflow_root" ORICHUM_DATA_HOME
+  )" || return 1
+  cache_root="$(
+    orichum_uninstall_validate_private_root \
+      "$(workflow_cache_dir)" "$workflow_root" ORICHUM_CACHE_HOME
   )" || return 1
   orichum_uninstall_validate_lifecycle_roots \
     "$data_root" "$config_root" "${WORKFLOW_LOCK_DIR:-}" || return 1
@@ -270,19 +279,41 @@ orichum_uninstall() {
     < <(orichum_uninstall_service_identity "$platform" cliproxy)
   IFS=$'\t' read -r route_file route_label route_unit \
     < <(orichum_uninstall_service_identity "$platform" route)
+  runtime_root="$workflow_root"
+  if [[ -L "$home_root/runtime/current" ]]; then
+    runtime_root="$(
+      workflow_physical_path "$home_root/runtime/current"
+    )" || {
+      workflow_die "installed Orichum runtime pointer is invalid"
+      return 1
+    }
+    case "$runtime_root" in
+      "$home_root/runtime/releases/"*) ;;
+      *)
+        workflow_die "installed Orichum runtime escapes Orichum home"
+        return 1
+        ;;
+    esac
+  fi
 
   cliproxy_state="$(orichum_uninstall_preflight_service \
     "$platform" cliproxy "$cliproxy_file" "$cliproxy_label" \
     "$cliproxy_unit" "$data_root" "$workflow_root")" || return 1
   route_state="$(orichum_uninstall_preflight_service \
     "$platform" route "$route_file" "$route_label" \
-    "$route_unit" "$data_root" "$workflow_root")" || return 1
+    "$route_unit" "$data_root" "$runtime_root")" || return 1
   orichum_uninstall_preflight_runtime "$data_root" || {
     workflow_die "refusing unsafe Orichum runtime layout"
     return 1
   }
+  if [[ "$home_root" != "$data_root" ]]; then
+    orichum_uninstall_preflight_runtime "$home_root" || {
+      workflow_die "refusing unsafe Orichum home runtime layout"
+      return 1
+    }
+  fi
   orichum_uninstall_launcher_is_owned \
-    "$launcher" "$workflow_root/bin/orichum" || {
+    "$launcher" "$runtime_root/bin/orichum" || {
       workflow_die "refusing unknown launcher: $launcher"
       return 1
     }
@@ -301,18 +332,13 @@ orichum_uninstall() {
   rm -f -- "$launcher"
 
   if [[ "$purge" == true ]]; then
-    if [[ "$config_root" == "$data_root" || \
-          "$config_root" == "$data_root/"* ]]; then
-      rm -rf -- "$data_root"
-    elif [[ "$data_root" == "$config_root/"* ]]; then
-      rm -rf -- "$config_root"
-    else
-      rm -rf -- "$data_root" "$config_root"
-    fi
+    rm -rf -- "$home_root" "$data_root" "$config_root" "$cache_root"
     printf '%s\n' \
       'Purged Orichum.' \
+      "  Removed home:   $home_root" \
       "  Removed data:   $data_root" \
       "  Removed config: $config_root" \
+      "  Removed cache:  $cache_root" \
       "  Preserved checkout: $workflow_root" \
       '  Standalone third-party installations were not changed.'
     return
@@ -323,6 +349,7 @@ orichum_uninstall() {
     "$data_root/python"
     "$data_root/tools"
     "$data_root/logs"
+    "$home_root/runtime"
     "$data_root/cliproxy.yaml"
     "$data_root/cliproxy-management.key"
   )

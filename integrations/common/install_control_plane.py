@@ -469,6 +469,193 @@ def _atomic_private(path: Path, payload: bytes, *, exclusive: bool) -> None:
                 pass
 
 
+def rollback_claude_settings(
+    destination: Path,
+    expected: Path,
+    snapshot: Path | None,
+) -> None:
+    """Restore managed Claude settings without replacing concurrent drift."""
+    destination = Path(destination).absolute()
+    expected_payload = _private_bytes(
+        Path(expected),
+        "managed Claude settings",
+        MAX_CONFIG_BYTES,
+    )
+    snapshot_payload: bytes | None = None
+    snapshot_mode = 0o600
+    if snapshot is not None:
+        snapshot = Path(snapshot)
+        before = os.lstat(snapshot)
+        snapshot_mode = stat.S_IMODE(before.st_mode)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or snapshot_mode & 0o022
+        ):
+            raise InstallControlPlaneError("prior Claude settings is unsafe")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(snapshot, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (
+                before.st_dev,
+                before.st_ino,
+            ):
+                raise InstallControlPlaneError(
+                    "prior Claude settings changed while opening"
+                )
+            payload = bytearray()
+            while len(payload) <= MAX_CONFIG_BYTES:
+                chunk = os.read(
+                    descriptor,
+                    min(65536, MAX_CONFIG_BYTES + 1 - len(payload)),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > MAX_CONFIG_BYTES:
+                raise InstallControlPlaneError(
+                    "prior Claude settings is too large"
+                )
+            after = os.fstat(descriptor)
+            if (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ) != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            ):
+                raise InstallControlPlaneError(
+                    "prior Claude settings changed while reading"
+                )
+            snapshot_payload = bytes(payload)
+        finally:
+            os.close(descriptor)
+
+    parent_before = os.lstat(destination.parent)
+    _require_private_root(destination.parent)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(destination.parent, flags)
+    parent_opened = os.fstat(directory_fd)
+    if (parent_opened.st_dev, parent_opened.st_ino) != (
+        parent_before.st_dev,
+        parent_before.st_ino,
+    ):
+        os.close(directory_fd)
+        raise InstallControlPlaneError(
+            "Claude settings directory changed while opening"
+        )
+
+    displaced = f".{destination.name}.rollback.{secrets.token_hex(8)}"
+    candidate = f".{destination.name}.prior.{secrets.token_hex(8)}"
+    displaced_exists = False
+    candidate_exists = False
+    restored = False
+    try:
+        if snapshot_payload is not None:
+            _atomic_private_at(
+                directory_fd,
+                candidate,
+                snapshot_payload,
+                exclusive=True,
+            )
+            candidate_exists = True
+            os.chmod(candidate, snapshot_mode, dir_fd=directory_fd)
+        try:
+            current = os.stat(
+                destination.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise InstallControlPlaneError(
+                "managed Claude settings is unavailable"
+            ) from error
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or stat.S_IMODE(current.st_mode) != 0o600
+        ):
+            raise InstallControlPlaneError(
+                "managed Claude settings is unsafe"
+            )
+        try:
+            os.rename(
+                destination.name,
+                displaced,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            displaced_exists = True
+        except OSError as error:
+            raise InstallControlPlaneError(
+                "Claude settings changed during rollback"
+            ) from error
+
+        current_payload = _private_bytes_at(
+            directory_fd,
+            displaced,
+            "managed Claude settings",
+            MAX_CONFIG_BYTES,
+        )
+        if current_payload != expected_payload:
+            raise InstallControlPlaneError(
+                "Claude settings changed during rollback"
+            )
+        if snapshot_payload is None:
+            if _exists_at(directory_fd, destination.name):
+                raise InstallControlPlaneError(
+                    "Claude settings changed during rollback"
+                )
+        else:
+            try:
+                os.link(
+                    candidate,
+                    destination.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as error:
+                raise InstallControlPlaneError(
+                    "Claude settings changed during rollback"
+                ) from error
+            os.unlink(candidate, dir_fd=directory_fd)
+            candidate_exists = False
+        os.fsync(directory_fd)
+        restored = True
+    finally:
+        if displaced_exists:
+            if not restored and not _exists_at(
+                directory_fd,
+                destination.name,
+            ):
+                try:
+                    os.link(
+                        displaced,
+                        destination.name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    pass
+            os.unlink(displaced, dir_fd=directory_fd)
+        if candidate_exists:
+            os.unlink(candidate, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        os.close(directory_fd)
+
+
 def _snapshot(
     path: Path,
     journal_fd: int,

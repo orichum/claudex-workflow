@@ -10,6 +10,19 @@ orichum stack list
 orichum provider accounts
 ```
 
+## Installation paths look scattered or runtime is stale
+
+`orichum config paths` should report `~/.orichum` as the home and data root,
+with configuration and cache below it. `orichum doctor` also verifies that the
+launcher and services use the content-addressed release selected by
+`~/.orichum/runtime/current`, not the Git checkout.
+
+If both an old XDG root and the matching path below `ORICHUM_HOME` exist, the
+installer stops instead of merging ambiguous data. Preserve both directories,
+decide which one is authoritative, and move the other aside before rerunning
+the installer. For an intentional non-default layout, set `ORICHUM_HOME`
+consistently for install and use `orichum config paths` to confirm it.
+
 ## Bound routes are not live
 
 The selected stack references a provider/model route that CLIProxyAPI is not
@@ -77,6 +90,19 @@ orichum leanctx list
 orichum leanctx stats
 orichum doctor
 ```
+
+For a status-line problem, inspect the same logical session outside the Claude
+interface:
+
+```bash
+orichum sessions
+orichum status SESSION_ID
+```
+
+If `orichum status` works but the in-session line is absent, restart that
+physical session after reinstalling. If both fail, `orichum doctor` reports
+whether the isolated Claude settings, renderer, or route telemetry endpoint is
+unavailable.
 
 If `--all` shows `ATTACHED no`, reinstall and start a new physical session;
 existing session MCP files are immutable. If the run is attached but has no

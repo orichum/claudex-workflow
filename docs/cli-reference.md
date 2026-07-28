@@ -1,7 +1,8 @@
 # CLI reference
 
-Run `orichum COMMAND --help` for the authoritative options installed on the
-current machine.
+Run `orichum --help` for the command map and
+`orichum COMMAND [SUBCOMMAND] --help` for the authoritative options installed
+on the current machine.
 
 Installer modes are separate from the `orichum` command:
 
@@ -25,7 +26,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum` / `orichum run` | Start a project-aware session |
 | `orichum config show` | Show the merged, redacted control plane |
 | `orichum config validate` | Validate focused configuration |
-| `orichum config paths` | Print installed configuration and data paths |
+| `orichum config paths` | Print the consolidated home, configuration, data, cache, and state paths |
 | `orichum context list` | Show configured parent-directory contexts |
 | `orichum context add ROOT [--docker PROFILE] [--model-stack STACK] [--pool POOL] [--github-account ACCOUNT]` | Add a parent-directory context; repeat `--pool` for ordered pools |
 | `orichum context update ROOT ...` | Replace pools or identities; set or inherit a stack; set or clear Docker/GitHub bindings |
@@ -58,6 +59,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum leanctx watch [--run RUN]` | Open LeanCTX's live terminal monitor |
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
 | `orichum doctor` | Validate local component ownership, configuration, protocols, and service health |
+| `orichum status [ID]` | Show the selected session's current model, named account, route state, and quota windows |
 | `orichum sessions [--limit N \| --all]` | List recent logical sessions |
 | `orichum sessions cleanup [--older-than DAYS] [--yes]` | Preview or remove inactive physical launch snapshots |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
@@ -105,4 +107,5 @@ and stops with Ctrl+C.
 
 Physical `run.*` IDs refer to one isolated LeanCTX runtime. Logical `oc-s-*`
 IDs refer to resumable Orichum sessions; use those with `resume`, `fork`, and
-`session routes`.
+`status` or `session routes`. Inside a live session, `orichum status` uses
+`ORICHUM_SESSION_ID`; from another shell, pass the logical ID explicitly.
