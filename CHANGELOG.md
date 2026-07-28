@@ -39,6 +39,8 @@ All notable Orichum changes are recorded here.
 
 - Bound the LeanCTX proxy ownership verifier into the attested route-runtime
   digest so an altered verifier cannot be accepted as the installed runtime.
+- Native release gates now validate the managed LeanCTX proxy port and
+  diagnostic-only steps no longer report a second false failure.
 - Route health checks no longer perform slow ownership attestations on the
   health endpoint; inference sockets remain fail-closed and attested.
 - Runtime creation suppresses Python bytecode so the immutable installed
