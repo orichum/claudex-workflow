@@ -435,7 +435,7 @@ class SessionConfigTests(unittest.TestCase):
 
     def test_session_rejects_runtime_plugin_symlink(self) -> None:
         session = self.create()
-        workflow = session.plugin_dir / "workflows" / "review.js"
+        workflow = session.plugin_dir / "audited-workflows" / "review.js"
         original = workflow.with_suffix(".original")
         workflow.rename(original)
         workflow.symlink_to(original)

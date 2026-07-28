@@ -12,11 +12,11 @@ read-only workflow without asking the user to choose:
 
 - Investigation, competing hypotheses, or evidence gathering:
   call Workflow with scriptPath
-  "${CLAUDE_PLUGIN_ROOT}/workflows/investigate.js" and structured args
+  "${CLAUDE_PLUGIN_ROOT}/audited-workflows/investigate.js" and structured args
   {question, scope, highRisk}.
 - Review, cross-checking, or consistency checking:
   call Workflow with scriptPath
-  "${CLAUDE_PLUGIN_ROOT}/workflows/review.js" and structured args
+  "${CLAUDE_PLUGIN_ROOT}/audited-workflows/review.js" and structured args
   {subject, scope, highRisk}.
 
 Set highRisk true only for security, authentication, concurrency, migration,
