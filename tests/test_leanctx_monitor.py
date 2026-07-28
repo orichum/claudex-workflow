@@ -408,7 +408,7 @@ class LeanctxMonitorTests(unittest.TestCase):
         directory = session.run_dir / "leanctx"
         self.assertEqual(
             environment["LEAN_CTX_CACHE_DIR"],
-            str(directory / "cache"),
+            str(self.data_root / "leanctx" / "cache"),
         )
         self.assertEqual(
             environment["LEAN_CTX_CONFIG_DIR"],

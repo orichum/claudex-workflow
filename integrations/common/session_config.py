@@ -393,7 +393,7 @@ def _materialize_leanctx(
         private=True,
         create=True,
     )
-    for name in ("config", "state", "cache"):
+    for name in ("config", "state"):
         require_owned_component(
             directory,
             name,
@@ -406,12 +406,13 @@ def _materialize_leanctx(
         private=True,
         create=True,
     )
-    require_owned_component(
-        shared,
-        "lean-ctx",
-        private=True,
-        create=True,
-    )
+    for name in ("cache", "lean-ctx"):
+        require_owned_component(
+            shared,
+            name,
+            private=True,
+            create=True,
+        )
     atomic_private_bytes(
         directory / "config" / "config.toml",
         leanctx_config_bytes(),
@@ -432,23 +433,23 @@ def verify_leanctx_attachment(run_dir: Path) -> Path:
             directory / "config",
             expected_mode=0o700,
         )
-        for name in ("state", "cache"):
-            require_private_direct_child(
-                directory,
-                directory / name,
-                expected_mode=0o700,
-            )
+        require_private_direct_child(
+            directory,
+            directory / "state",
+            expected_mode=0o700,
+        )
         data_root = run_dir.parents[2]
         shared = require_owned_component(
             data_root,
             "leanctx",
             private=True,
         )
-        require_owned_component(
-            shared,
-            "lean-ctx",
-            private=True,
-        )
+        for name in ("cache", "lean-ctx"):
+            require_owned_component(
+                shared,
+                name,
+                private=True,
+            )
         observed = _read_owned_file(config, "config.toml", 0o600)
     except SessionError as error:
         raise SessionError(

@@ -629,7 +629,7 @@ class SessionConfigTests(unittest.TestCase):
                     "LEAN_CTX_ALLOW_REROOT": "false",
                     "LEAN_CTX_AUTONOMY": "false",
                     "LEAN_CTX_BYPASS_HINTS": "off",
-                    "LEAN_CTX_CACHE_DIR": str(leanctx_dir / "cache"),
+                    "LEAN_CTX_CACHE_DIR": str(shared_data / "cache"),
                     "LEAN_CTX_CONFIG_DIR": str(leanctx_dir / "config"),
                     "LEAN_CTX_DATA_DIR": str(shared_data / "lean-ctx"),
                     "LEAN_CTX_FULL_TOOLS": "0",
@@ -645,6 +645,10 @@ class SessionConfigTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(leanctx_dir.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
         self.assertEqual(
+            stat.S_IMODE((shared_data / "cache").stat().st_mode),
+            0o700,
+        )
+        self.assertEqual(
             config.read_text(encoding="utf-8"),
             """compression_level = "lite"
 minimal_overhead = true
@@ -655,6 +659,7 @@ buddy_enabled = false
 enable_wakeup_ctx = true
 journal_enabled = false
 max_index_threads = 2
+max_ram_percent = 12
 no_degrade = true
 prefer_native_editor = false
 proxy_enabled = false
@@ -663,6 +668,10 @@ shadow_mode = false
 shell_activation = "off"
 shell_hook_disabled = true
 update_check_disabled = true
+
+[embedding]
+auto_download = true
+model = "minilm"
 """,
         )
 
@@ -735,6 +744,28 @@ update_check_disabled = true
                 session.effective_models_sha256,
             )
 
+    def test_leanctx_shared_cache_substitution_invalidates_session(self) -> None:
+        self.init_repository()
+        self.install_leanctx()
+        session = self.create()
+        cache = self.runtime / "leanctx" / "cache"
+        if not cache.exists():
+            cache.mkdir(mode=0o700)
+        cache.rmdir()
+        outside = self.fixture / "outside-leanctx-cache"
+        outside.mkdir(mode=0o700)
+        cache.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            SessionError, "LeanCTX configuration is unavailable or unsafe"
+        ):
+            verify_session(
+                self.workflow_root,
+                session.run_dir,
+                session.context_sha256,
+                session.effective_models_sha256,
+            )
+
     def test_two_sessions_share_data_but_isolate_runtime(self) -> None:
         self.init_repository()
         self.install_leanctx()
@@ -752,10 +783,13 @@ update_check_disabled = true
             first_server["env"]["LEAN_CTX_DATA_DIR"],
             second_server["env"]["LEAN_CTX_DATA_DIR"],
         )
+        self.assertEqual(
+            first_server["env"]["LEAN_CTX_CACHE_DIR"],
+            second_server["env"]["LEAN_CTX_CACHE_DIR"],
+        )
         for name in (
             "LEAN_CTX_CONFIG_DIR",
             "LEAN_CTX_STATE_DIR",
-            "LEAN_CTX_CACHE_DIR",
         ):
             self.assertNotEqual(
                 first_server["env"][name],

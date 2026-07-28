@@ -61,6 +61,13 @@ class LeanctxMemoryTests(unittest.TestCase):
         self.assertIn("enable_wakeup_ctx = true", config)
         self.assertIn("minimal_overhead = true", config)
         self.assertIn("journal_enabled = false", config)
+        parsed = tomllib.loads(config)
+        self.assertEqual(parsed["max_index_threads"], 2)
+        self.assertEqual(parsed["max_ram_percent"], 12)
+        self.assertEqual(
+            parsed["embedding"],
+            {"auto_download": True, "model": "minilm"},
+        )
 
     def test_server_shares_data_but_isolates_session_runtime(self) -> None:
         root = Path("/work/project")
@@ -80,6 +87,10 @@ class LeanctxMemoryTests(unittest.TestCase):
             "/private/data/leanctx/lean-ctx",
         )
         self.assertEqual(
+            environment["LEAN_CTX_CACHE_DIR"],
+            "/private/data/leanctx/cache",
+        )
+        self.assertEqual(
             environment["LEAN_CTX_SHELL_ALLOWLIST_OVERRIDE"],
             "",
         )
@@ -90,7 +101,6 @@ class LeanctxMemoryTests(unittest.TestCase):
         for name in (
             "LEAN_CTX_CONFIG_DIR",
             "LEAN_CTX_STATE_DIR",
-            "LEAN_CTX_CACHE_DIR",
         ):
             self.assertTrue(environment[name].startswith(str(session)))
         self.assertNotEqual(

@@ -389,7 +389,7 @@ def leanctx_environment(
     data_home = run.run_dir.parents[2] / "leanctx"
     environment.update(
         {
-            "LEAN_CTX_CACHE_DIR": str(directory / "cache"),
+            "LEAN_CTX_CACHE_DIR": str(data_home / "cache"),
             "LEAN_CTX_CONFIG_DIR": str(config_dir or directory / "config"),
             "LEAN_CTX_DATA_DIR": str(data_home / "lean-ctx"),
             "LEAN_CTX_PROJECT_ROOT": str(run.project_root),
