@@ -50,13 +50,16 @@ from .orichum_config import (
 )
 from .orichum_sessions import (
     LogicalSession,
+    LogicalSessionCleanup,
     LogicalSessionError,
     PhysicalRunCleanup,
     RouteBinding,
+    clear_logical_sessions,
     cleanup_physical_runs,
     create_logical_session,
     list_logical_sessions,
     load_logical_session,
+    remove_logical_session,
     resolve_logical_session,
     resolve_session_plan,
 )
@@ -507,6 +510,33 @@ def _physical_cleanup_report(
     return (
         report
         + "Preview only. Re-run with --yes to remove these physical runs.\n"
+    )
+
+
+def _logical_cleanup_report(
+    sessions: Sequence[LogicalSessionCleanup], *, applied: bool
+) -> str:
+    if not sessions:
+        return "No logical sessions to clear.\n"
+    rows = [
+        (session.session_id, session.status.upper())
+        for session in sessions
+    ]
+    report = _render_table(("SESSION", "STATUS"), rows)
+    affected = sum(
+        session.status in {"eligible", "removed"} for session in sessions
+    )
+    if applied:
+        return (
+            report
+            + f"Removed {affected} logical session(s). "
+            "Claude Code history and LeanCTX knowledge were preserved.\n"
+        )
+    if affected == 0:
+        return report + "No inactive logical sessions can be removed.\n"
+    return (
+        report
+        + "Preview only. Re-run with --yes to remove these logical sessions.\n"
     )
 
 
@@ -2442,6 +2472,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="remove the previewed snapshots",
     )
+    sessions_remove = sessions_action.add_parser(
+        "remove",
+        help="preview or remove one inactive logical session",
+    )
+    sessions_remove.add_argument(
+        "session_id",
+        help="Orichum or Claude session ID",
+    )
+    sessions_remove.add_argument(
+        "--yes",
+        action="store_true",
+        help="remove the previewed logical session",
+    )
+    sessions_clear = sessions_action.add_parser(
+        "clear",
+        help="preview or remove all inactive logical sessions",
+    )
+    sessions_clear.add_argument(
+        "--yes",
+        action="store_true",
+        help="remove the previewed logical sessions",
+    )
     session = commands.add_parser(
         "session",
         help="inspect one logical session",
@@ -2636,6 +2688,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                         cleaned,
                         older_than_days=parsed.older_than,
                         applied=parsed.yes,
+                    ),
+                    end="",
+                )
+                return 0
+            if (
+                parsed.command == "sessions"
+                and parsed.sessions_command == "remove"
+            ):
+                removed = remove_logical_session(
+                    paths["state"],
+                    parsed.session_id,
+                    apply=parsed.yes,
+                )
+                print(
+                    _logical_cleanup_report(
+                        (removed,), applied=parsed.yes
+                    ),
+                    end="",
+                )
+                return 0
+            if (
+                parsed.command == "sessions"
+                and parsed.sessions_command == "clear"
+            ):
+                cleared = clear_logical_sessions(
+                    paths["state"],
+                    apply=parsed.yes,
+                )
+                print(
+                    _logical_cleanup_report(
+                        cleared, applied=parsed.yes
                     ),
                     end="",
                 )

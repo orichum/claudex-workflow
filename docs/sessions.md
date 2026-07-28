@@ -63,6 +63,35 @@ copies, and Claudex translation ports. CLIProxyAPI, the LeanCTX wire proxy, and
 the Orichum route proxy are shared, while each physical session owns its
 Claudex translator.
 
+## Remove logical sessions
+
+Preview removal of one inactive leaf session:
+
+```bash
+orichum sessions remove SESSION_ID
+```
+
+Apply the preview:
+
+```bash
+orichum sessions remove SESSION_ID --yes
+```
+
+`SESSION_ID` may be an Orichum logical ID or its Claude session UUID. A parent
+cannot be removed while it still has child sessions.
+
+To clear every inactive logical session, preview and then apply:
+
+```bash
+orichum sessions clear
+orichum sessions clear --yes
+```
+
+Clear preserves active sessions and any parents they still reference. Removing
+a logical record removes its frozen Orichum route and therefore its
+`orichum resume` entry. It does not delete Claude Code's underlying transcript,
+LeanCTX project knowledge, or physical launch snapshots.
+
 ## Clean old physical runs
 
 Logical sessions remain resumable, but each launch also creates a disposable

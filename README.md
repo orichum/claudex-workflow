@@ -1,5 +1,7 @@
 # Orichum
 
+**Pronounced:** *OR-ih-kum*, following *orichalcum*.
+
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 > Run Claude Code with the models, accounts, project tools, memory, and
@@ -189,6 +191,8 @@ orichum doctor
 | Inspect a session's live status | `orichum status SESSION_ID` |
 | Inspect a session's routes | `orichum session routes SESSION_ID` |
 | Resume a session | `orichum resume SESSION_ID` |
+| Remove one session from Orichum | `orichum sessions remove SESSION_ID` |
+| Clear inactive sessions from Orichum | `orichum sessions clear` |
 | Monitor context savings | `orichum leanctx stats`, `orichum leanctx watch`, or `orichum leanctx dashboard` |
 | Check the installation | `orichum doctor` |
 | Show the active home, config, cache, and state paths | `orichum config paths` |

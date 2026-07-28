@@ -14,6 +14,9 @@ All notable Orichum changes are recorded here.
   project context.
 - Project-bound `mcp-atlassian` processes expose Jira reads and writes only in
   sessions whose project declares Jira credentials.
+- `orichum sessions remove` and `orichum sessions clear` preview and remove
+  inactive logical-session records without deleting Claude Code transcripts or
+  LeanCTX project knowledge.
 
 ### Changed
 
