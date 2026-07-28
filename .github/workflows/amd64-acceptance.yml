@@ -89,9 +89,16 @@ jobs:
           test -x "$managed_python"
           test -x "$ORICHUM_DATA_HOME/bin/lean-ctx"
           source ./lib/workflow.sh
+          leanctx_ort_dylib_path="$(
+            verified_leanctx_ort_dylib_path \
+              "$ORICHUM_DATA_HOME/bin/lean-ctx" \
+              "$ORICHUM_DATA_HOME" "$RUNNER_TEMP"
+          )"
           probe_leanctx_capabilities \
             "$ORICHUM_DATA_HOME/bin/lean-ctx" "$managed_python" \
-            "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
+            "$leanctx_ort_dylib_path" \
+            "$ORICHUM_DATA_HOME/leanctx/cache"
           "$managed_python" -I -B -c '
           import platform, sys
           assert platform.python_implementation() == "CPython"
@@ -197,10 +204,17 @@ jobs:
         run: |
           set -euo pipefail
           source lib/workflow.sh
+          leanctx_ort_dylib_path="$(
+            verified_leanctx_ort_dylib_path \
+              "$ORICHUM_DATA_HOME/bin/lean-ctx" \
+              "$ORICHUM_DATA_HOME" "$RUNNER_TEMP"
+          )"
           probe_leanctx_capabilities \
             "$ORICHUM_DATA_HOME/bin/lean-ctx" \
             "$ORICHUM_DATA_HOME/bin/orichum-python" \
-            "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
+            "$leanctx_ort_dylib_path" \
+            "$ORICHUM_DATA_HOME/leanctx/cache"
 
       - name: Verify fast repeat and explicit upgrade
         shell: bash
@@ -266,10 +280,17 @@ jobs:
           grep -Fq 'Running Orichum doctor' \
             "$RUNNER_TEMP/orichum-upgrade.log"
           source lib/workflow.sh
+          leanctx_ort_dylib_path="$(
+            verified_leanctx_ort_dylib_path \
+              "$ORICHUM_DATA_HOME/bin/lean-ctx" \
+              "$ORICHUM_DATA_HOME" "$RUNNER_TEMP"
+          )"
           probe_leanctx_capabilities \
             "$ORICHUM_DATA_HOME/bin/lean-ctx" \
             "$ORICHUM_DATA_HOME/bin/orichum-python" \
-            "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
+            "$leanctx_ort_dylib_path" \
+            "$ORICHUM_DATA_HOME/leanctx/cache"
 
       - name: Verify uninstall lifecycle
         shell: bash

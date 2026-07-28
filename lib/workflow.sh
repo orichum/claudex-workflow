@@ -3142,12 +3142,123 @@ leanctx_release_suffix() {
   esac
 }
 
+provision_leanctx_embeddings() {
+  local leanctx_binary="$1"
+  local data_root="$2"
+  local temporary_parent="$3"
+  local managed_root config_dir state_dir
+  [[ "$leanctx_binary" == /* && -x "$leanctx_binary" ]] || {
+    workflow_die "LeanCTX embedding provisioning requires an executable binary"
+    return 1
+  }
+  [[ "$data_root" == /* && "$data_root" != / ]] || {
+    workflow_die "LeanCTX embedding provisioning requires an absolute data root"
+    return 1
+  }
+  [[ "$temporary_parent" == /* && -d "$temporary_parent" ]] || {
+    workflow_die "LeanCTX embedding provisioning requires a temporary parent"
+    return 1
+  }
+  managed_root="$data_root/leanctx"
+  config_dir="$(mktemp -d \
+    "$temporary_parent/leanctx-embeddings-config.XXXXXX")" || return 1
+  state_dir="$(mktemp -d \
+    "$temporary_parent/leanctx-embeddings-state.XXXXXX")" || return 1
+  chmod 0700 "$config_dir" "$state_dir"
+  install -d -m 0700 \
+    "$managed_root/cache" "$managed_root/lean-ctx"
+  LEAN_CTX_CACHE_DIR="$managed_root/cache" \
+  LEAN_CTX_CONFIG_DIR="$config_dir" \
+  LEAN_CTX_DATA_DIR="$managed_root/lean-ctx" \
+  LEAN_CTX_STATE_DIR="$state_dir" \
+  XDG_DATA_HOME="$managed_root" \
+    "$leanctx_binary" embeddings provision || {
+      workflow_die "LeanCTX ONNX Runtime provisioning command failed"
+      return 1
+    }
+}
+
+verified_leanctx_ort_dylib_path() {
+  local leanctx_binary="$1"
+  local data_root="$2"
+  local temporary_parent="$3"
+  local managed_root managed_data_root config_dir state_dir
+  local status runtime_path managed_data_real runtime_real runtime_mode
+  [[ "$leanctx_binary" == /* && -x "$leanctx_binary" ]] || {
+    workflow_die "LeanCTX runtime verification requires an executable binary"
+    return 1
+  }
+  [[ "$data_root" == /* && "$data_root" != / ]] || {
+    workflow_die "LeanCTX runtime verification requires an absolute data root"
+    return 1
+  }
+  [[ "$temporary_parent" == /* && -d "$temporary_parent" ]] || {
+    workflow_die "LeanCTX runtime verification requires a temporary parent"
+    return 1
+  }
+  managed_root="$data_root/leanctx"
+  managed_data_root="$managed_root/lean-ctx"
+  config_dir="$(mktemp -d \
+    "$temporary_parent/leanctx-status-config.XXXXXX")" || return 1
+  state_dir="$(mktemp -d \
+    "$temporary_parent/leanctx-status-state.XXXXXX")" || return 1
+  chmod 0700 "$config_dir" "$state_dir"
+  install -d -m 0700 "$managed_root/cache" "$managed_data_root"
+  status="$(
+    LEAN_CTX_CACHE_DIR="$managed_root/cache" \
+    LEAN_CTX_CONFIG_DIR="$config_dir" \
+    LEAN_CTX_DATA_DIR="$managed_data_root" \
+    LEAN_CTX_STATE_DIR="$state_dir" \
+    XDG_DATA_HOME="$managed_root" \
+      "$leanctx_binary" embeddings status
+  )" || {
+    workflow_die "LeanCTX ONNX Runtime status command failed"
+    return 1
+  }
+  runtime_path="$(
+    sed -n \
+      's/^managed ONNX Runtime [^:][^:]*: \(\/.*\)$/\1/p' \
+      <<<"$status" | head -1
+  )"
+  [[ "$runtime_path" == /* && -f "$runtime_path" && \
+     ! -L "$runtime_path" ]] || {
+    workflow_die "LeanCTX managed ONNX Runtime is missing or unsafe"
+    return 1
+  }
+  case "$runtime_path" in
+    "$managed_data_root"/*) ;;
+    *)
+      workflow_die "LeanCTX managed ONNX Runtime escaped its data root"
+      return 1
+      ;;
+  esac
+  managed_data_real="$(workflow_physical_path "$managed_data_root")" || \
+    return 1
+  runtime_real="$(workflow_physical_path "$runtime_path")" || return 1
+  case "$runtime_real" in
+    "$managed_data_real"/*) ;;
+    *)
+      workflow_die "LeanCTX managed ONNX Runtime escaped its data root"
+      return 1
+      ;;
+  esac
+  runtime_mode="$(path_mode "$runtime_path")" || return 1
+  [[ "$(path_uid "$runtime_path")" == "$(id -u)" ]] && \
+    (( (8#$runtime_mode & 0022) == 0 )) || {
+      workflow_die "LeanCTX managed ONNX Runtime is not private"
+      return 1
+    }
+  printf '%s\n' "$runtime_path"
+}
+
 probe_leanctx_capabilities() {
   local leanctx_binary="$1"
   local python_runtime="$2"
   local workflow_root="$3"
   local temporary_parent="$4"
-  local probe_root project_root config_dir state_dir cache_dir shared_dir
+  local ort_dylib_path="$5"
+  local shared_cache_dir="$6"
+  local probe_root project_root config_dir state_dir shared_dir
   [[ "$leanctx_binary" == /* && -x "$leanctx_binary" ]] || {
     workflow_die "LeanCTX capability probe requires an executable binary"
     return 1
@@ -3160,16 +3271,25 @@ probe_leanctx_capabilities() {
     workflow_die "LeanCTX MCP probe is unavailable"
     return 1
   }
+  [[ "$ort_dylib_path" == /* && -f "$ort_dylib_path" && \
+     ! -L "$ort_dylib_path" ]] || {
+    workflow_die "LeanCTX capability probe requires an ONNX Runtime"
+    return 1
+  }
+  [[ "$shared_cache_dir" == /* && "$shared_cache_dir" != / ]] || {
+    workflow_die "LeanCTX capability probe requires a shared cache"
+    return 1
+  }
   probe_root="$(mktemp -d "$temporary_parent/leanctx-capability.XXXXXX")" || \
     return 1
   chmod 0700 "$probe_root"
   project_root="$probe_root/project"
   config_dir="$probe_root/config"
   state_dir="$probe_root/state"
-  cache_dir="$probe_root/cache"
   shared_dir="$probe_root/shared"
   install -d -m 0700 \
-    "$project_root" "$config_dir" "$state_dir" "$cache_dir" \
+    "$project_root" "$config_dir" "$state_dir" \
+    "$shared_cache_dir" \
     "$shared_dir" "$shared_dir/lean-ctx"
   PYTHONDONTWRITEBYTECODE=1 "$python_runtime" -I -B - \
     "$workflow_root" "$config_dir/config.toml" "$project_root/probe.py" <<'PY'
@@ -3239,14 +3359,16 @@ PY
     --probe-call \
       '{"name":"ctx_overview","arguments":{"path":".","task":"Verify Orichum readiness"}}' \
     --probe-call \
-      '{"name":"ctx_knowledge","arguments":{"action":"recall","category":"project","limit":1,"mode":"semantic","query":"orichum readiness"}}' \
+      '{"name":"ctx_search","arguments":{"action":"reindex","path":"."}}' \
+    --probe-call \
+      '{"name":"ctx_search","arguments":{"action":"semantic","query":"function that returns the Orichum probe value","path":"."},"contains":"orichum_probe_target"}' \
     --probe-call \
       '{"name":"ctx_shell","arguments":{"command":"printf orichum-shell-ready","raw":true},"contains":"orichum-shell-ready"}' \
     -- env \
     LEAN_CTX_ALLOW_REROOT=false \
     LEAN_CTX_AUTONOMY=false \
     LEAN_CTX_BYPASS_HINTS=off \
-    LEAN_CTX_CACHE_DIR="$cache_dir" \
+    LEAN_CTX_CACHE_DIR="$shared_cache_dir" \
     LEAN_CTX_CONFIG_DIR="$config_dir" \
     LEAN_CTX_DATA_DIR="$shared_dir/lean-ctx" \
     LEAN_CTX_FULL_TOOLS=0 \
@@ -3254,6 +3376,7 @@ PY
     LEAN_CTX_MINIMAL=1 \
     LEAN_CTX_PROJECT_ROOT="$project_root" \
     LEAN_CTX_STATE_DIR="$state_dir" \
+    ORT_DYLIB_PATH="$ort_dylib_path" \
     XDG_DATA_HOME="$shared_dir" \
     "$leanctx_binary"
 }

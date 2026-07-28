@@ -44,8 +44,9 @@ after a change so a fresh physical MCP process loads the current credentials.
 
 - The MCP file belongs to one verified physical session.
 - LeanCTX is jailed to the resolved root.
-- LeanCTX project data is shared for cross-session graph and knowledge recall;
-  configuration, events, state, and cache are session-private.
+- LeanCTX project data and model cache are shared across sessions;
+  configuration, events, state, and temporary probe indexes remain
+  session-private.
 - The project Jira binding and GitHub identity are frozen into session policy.
 - Concurrent sessions may use different Jira credentials and repositories
   without changing global state.

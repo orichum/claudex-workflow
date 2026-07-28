@@ -168,11 +168,23 @@ fi
 
 leanctx_binary="$data_root/bin/lean-ctx"
 if managed_executable_is_safe "$leanctx_binary" && \
-   "$leanctx_binary" --version >/dev/null 2>&1 && \
-   probe_leanctx_capabilities \
-     "$leanctx_binary" "$orichum_python" "$WORKFLOW_ROOT" \
-     "$doctor_temp" >/dev/null 2>&1; then
-  ok "LeanCTX exposes the bounded headless MCP surface ($leanctx_binary)"
+   "$leanctx_binary" --version >/dev/null 2>&1; then
+  if leanctx_ort_dylib_path="$(
+    verified_leanctx_ort_dylib_path \
+      "$leanctx_binary" "$data_root" "$doctor_temp"
+  )"; then
+    ok "LeanCTX managed ONNX Runtime is available ($leanctx_ort_dylib_path)"
+    if probe_leanctx_capabilities \
+        "$leanctx_binary" "$orichum_python" "$WORKFLOW_ROOT" \
+        "$doctor_temp" "$leanctx_ort_dylib_path" \
+        "$data_root/leanctx/cache" >/dev/null 2>&1; then
+      ok "LeanCTX exposes the bounded headless MCP surface ($leanctx_binary)"
+    else
+      fail "LeanCTX is unavailable or exposes tools outside Orichum policy"
+    fi
+  else
+    fail "LeanCTX managed ONNX Runtime is unavailable or unsafe"
+  fi
 else
   fail "LeanCTX is unavailable or exposes tools outside Orichum policy"
 fi

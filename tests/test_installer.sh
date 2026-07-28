@@ -399,6 +399,43 @@ import os
 from pathlib import Path
 import sys
 
+data = Path(os.environ["LEAN_CTX_DATA_DIR"])
+config = Path(os.environ["LEAN_CTX_CONFIG_DIR"])
+state = Path(os.environ["LEAN_CTX_STATE_DIR"])
+cache = Path(os.environ["LEAN_CTX_CACHE_DIR"])
+xdg = Path(os.environ["XDG_DATA_HOME"])
+runtime = data / "addons/bin/onnxruntime/1.24.4/libonnxruntime.dylib"
+if (
+    not config.is_dir()
+    or not state.is_dir()
+    or not cache.is_dir()
+    or data != xdg / "lean-ctx"
+):
+    raise SystemExit(4)
+if sys.argv[1:] == ["embeddings", "provision"]:
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.touch(exist_ok=True)
+    log = os.environ.get("FAKE_LEANCTX_PROVISION_LOG")
+    if log:
+        with Path(log).open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"{data}\t{cache}\t{xdg}\n"
+            )
+    raise SystemExit(0)
+if sys.argv[1:] == ["embeddings", "status"]:
+    if (
+        os.environ.get("FAKE_LEANCTX_STATUS_MISSING") == "1"
+        or not runtime.is_file()
+    ):
+        print(
+            "managed ONNX Runtime: not installed "
+            "(run lean-ctx embeddings provision to fetch it)"
+        )
+    else:
+        override = os.environ.get("FAKE_LEANCTX_STATUS_PATH")
+        print(f"managed ONNX Runtime 1.24.4: {override or runtime}")
+    raise SystemExit(0)
+
 required = {
     "LEAN_CTX_HEADLESS": "1",
     "LEAN_CTX_AUTONOMY": "false",
@@ -406,18 +443,16 @@ required = {
 }
 if any(os.environ.get(key) != value for key, value in required.items()):
     raise SystemExit(3)
+ort_path = Path(os.environ.get("ORT_DYLIB_PATH", ""))
+if not ort_path.is_file():
+    raise SystemExit(5)
+expected_cache = os.environ.get("FAKE_LEANCTX_EXPECTED_CACHE")
+if expected_cache and cache != Path(expected_cache):
+    raise SystemExit(6)
 root = Path(os.environ["LEAN_CTX_PROJECT_ROOT"])
-data = Path(os.environ["LEAN_CTX_DATA_DIR"])
-config = Path(os.environ["LEAN_CTX_CONFIG_DIR"])
-state = Path(os.environ["LEAN_CTX_STATE_DIR"])
-cache = Path(os.environ["LEAN_CTX_CACHE_DIR"])
-xdg = Path(os.environ["XDG_DATA_HOME"])
 if (
     not root.is_dir()
     or not (config / "config.toml").is_file()
-    or not state.is_dir()
-    or not cache.is_dir()
-    or data != xdg / "lean-ctx"
 ):
     raise SystemExit(4)
 tools = [
@@ -439,6 +474,7 @@ if extra:
 omitted = os.environ.get("FAKE_LEANCTX_OMIT")
 if omitted:
     tools.remove(omitted)
+semantic_ready = False
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -469,6 +505,23 @@ for line in sys.stdin:
             text = "probe.py::orichum_probe_target"
         elif name == "ctx_impact":
             text = "No files depend on probe.py. [ctx_impact: 8 tok]"
+        elif name == "ctx_search" and arguments == {
+            "action": "reindex",
+            "path": ".",
+        }:
+            semantic_ready = True
+            text = "Reindexed project: 1 files, 1 chunks"
+        elif name == "ctx_search" and arguments == {
+            "action": "semantic",
+            "query": "function that returns the Orichum probe value",
+            "path": ".",
+        }:
+            if not semantic_ready:
+                text = "semantic index is still building"
+            elif os.environ.get("FAKE_LEANCTX_SEMANTIC_MISS") == "1":
+                text = "no semantic matches"
+            else:
+                text = "probe.py::orichum_probe_target"
         elif name == "ctx_shell":
             text = "orichum-shell-ready"
         else:
@@ -487,25 +540,103 @@ for line in sys.stdin:
     )
 PY
 chmod 0755 "$leanctx_probe"
-FAKE_LEANCTX_CALL_LOG="$fixture/leanctx-calls" probe_leanctx_capabilities \
-  "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture"
-rg -Fxq 'ctx_shell' "$fixture/leanctx-calls"
-if FAKE_LEANCTX_EXTRA=ctx_call probe_leanctx_capabilities \
+managed_leanctx_root="$fixture/managed-leanctx"
+leanctx_provision_log="$fixture/leanctx-provision.log"
+FAKE_LEANCTX_PROVISION_LOG="$leanctx_provision_log" \
+  provision_leanctx_embeddings \
+    "$leanctx_probe" "$managed_leanctx_root" "$fixture"
+expected_ort_runtime="$managed_leanctx_root/leanctx/lean-ctx/addons/bin/onnxruntime/1.24.4/libonnxruntime.dylib"
+[[ -f "$expected_ort_runtime" ]]
+rg -Fxq \
+  "$managed_leanctx_root/leanctx/lean-ctx"$'\t'"$managed_leanctx_root/leanctx/cache"$'\t'"$managed_leanctx_root/leanctx" \
+  "$leanctx_provision_log"
+FAKE_LEANCTX_PROVISION_LOG="$leanctx_provision_log" \
+  provision_leanctx_embeddings \
+    "$leanctx_probe" "$managed_leanctx_root" "$fixture"
+[[ "$(wc -l <"$leanctx_provision_log" | tr -d ' ')" == 2 ]]
+[[ "$(find \
+  "$managed_leanctx_root/leanctx/lean-ctx/addons/bin/onnxruntime" \
+  -type f | wc -l | tr -d ' ')" == 1 ]]
+[[ "$(verified_leanctx_ort_dylib_path \
+  "$leanctx_probe" "$managed_leanctx_root" "$fixture")" == \
+  "$expected_ort_runtime" ]]
+if FAKE_LEANCTX_STATUS_MISSING=1 \
+    verified_leanctx_ort_dylib_path \
+      "$leanctx_probe" "$managed_leanctx_root" "$fixture" \
+      >"$fixture/leanctx-status-missing.stdout" \
+      2>"$fixture/leanctx-status-missing.stderr"; then
+  printf 'missing managed ONNX Runtime was accepted\n' >&2
+  exit 1
+fi
+if FAKE_LEANCTX_STATUS_PATH=relative/libonnxruntime.dylib \
+    verified_leanctx_ort_dylib_path \
+      "$leanctx_probe" "$managed_leanctx_root" "$fixture" \
+      >"$fixture/leanctx-status-relative.stdout" \
+      2>"$fixture/leanctx-status-relative.stderr"; then
+  printf 'relative managed ONNX Runtime path was accepted\n' >&2
+  exit 1
+fi
+install -d -m 0700 "$fixture/outside-runtime"
+printf 'fake runtime\n' >"$fixture/outside-runtime/libonnxruntime.dylib"
+if FAKE_LEANCTX_STATUS_PATH="$fixture/outside-runtime/libonnxruntime.dylib" \
+    verified_leanctx_ort_dylib_path \
+      "$leanctx_probe" "$managed_leanctx_root" "$fixture" \
+      >"$fixture/leanctx-status-outside.stdout" \
+      2>"$fixture/leanctx-status-outside.stderr"; then
+  printf 'outside managed ONNX Runtime path was accepted\n' >&2
+  exit 1
+fi
+ln -s "$expected_ort_runtime" \
+  "$managed_leanctx_root/leanctx/lean-ctx/runtime-link"
+if FAKE_LEANCTX_STATUS_PATH="$managed_leanctx_root/leanctx/lean-ctx/runtime-link" \
+    verified_leanctx_ort_dylib_path \
+      "$leanctx_probe" "$managed_leanctx_root" "$fixture" \
+      >"$fixture/leanctx-status-link.stdout" \
+      2>"$fixture/leanctx-status-link.stderr"; then
+  printf 'symlinked managed ONNX Runtime path was accepted\n' >&2
+  exit 1
+fi
+FAKE_LEANCTX_CALL_LOG="$fixture/leanctx-calls" \
+FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
+  probe_leanctx_capabilities \
     "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    "$expected_ort_runtime" "$managed_leanctx_root/leanctx/cache"
+rg -Fxq 'ctx_shell' "$fixture/leanctx-calls"
+rg -Fxq 'ctx_search' "$fixture/leanctx-calls"
+if FAKE_LEANCTX_EXTRA=ctx_call \
+    FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
+    probe_leanctx_capabilities \
+    "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    "$expected_ort_runtime" "$managed_leanctx_root/leanctx/cache" \
     >"$fixture/leanctx-extra.stdout" 2>"$fixture/leanctx-extra.stderr"; then
   printf 'LeanCTX capability probe accepted ctx_call\n' >&2
   exit 1
 fi
 rg -Fq 'unexpected MCP tool is available: ctx_call' \
   "$fixture/leanctx-extra.stderr"
-if FAKE_LEANCTX_OMIT=ctx_patch probe_leanctx_capabilities \
+if FAKE_LEANCTX_OMIT=ctx_patch \
+    FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
+    probe_leanctx_capabilities \
     "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    "$expected_ort_runtime" "$managed_leanctx_root/leanctx/cache" \
     >"$fixture/leanctx-missing.stdout" 2>"$fixture/leanctx-missing.stderr"; then
   printf 'LeanCTX capability probe accepted missing ctx_patch\n' >&2
   exit 1
 fi
 rg -Fq 'required MCP tool is unavailable: ctx_patch' \
   "$fixture/leanctx-missing.stderr"
+if FAKE_LEANCTX_SEMANTIC_MISS=1 \
+    FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
+    probe_leanctx_capabilities \
+    "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    "$expected_ort_runtime" "$managed_leanctx_root/leanctx/cache" \
+    >"$fixture/leanctx-semantic-miss.stdout" \
+    2>"$fixture/leanctx-semantic-miss.stderr"; then
+  printf 'LeanCTX capability probe accepted a missing semantic result\n' >&2
+  exit 1
+fi
+rg -Fq 'MCP tool call omitted expected output: ctx_search' \
+  "$fixture/leanctx-semantic-miss.stderr"
 
 
 fake_uv_bin="$fixture/fake-uv-bin"

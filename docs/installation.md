@@ -34,12 +34,19 @@ The first run performs the complete installation. It:
 3. validates the focused configuration and controller plugin;
 4. installs the newest available CPython 3.14 patch privately;
 5. installs or upgrades CLIProxyAPI, Claudex, LeanCTX, and `mcp-atlassian`;
-6. probes required CLIProxyAPI behavior, the exact bounded MCP surfaces, and
-   LeanCTX's isolated proxy configuration;
-7. installs or reconciles the shared loopback services;
-8. preserves valid configuration and authentication;
-9. runs `orichum doctor` and reports the final locations and ports once a
+6. provisions LeanCTX's official CPU ONNX Runtime in Orichum's shared private
+   data directory;
+7. probes required CLIProxyAPI behavior, the exact bounded MCP surfaces,
+   LeanCTX dense semantic search, and LeanCTX's isolated proxy configuration;
+8. installs or reconciles the shared loopback services;
+9. preserves valid configuration and authentication;
+10. runs `orichum doctor` and reports the final locations and ports once a
    provider route is available.
+
+ONNX Runtime provisioning is eager and idempotent, so a verified runtime is
+available before the first project session and repeat installations reuse it.
+The MiniLM embedding model remains lazy: LeanCTX downloads it automatically on
+the first semantic search and reuses it from Orichum's shared LeanCTX cache.
 
 Without a logged-in provider, installation completes in
 `pending-provider-login` state and prints the login command instead of failing
