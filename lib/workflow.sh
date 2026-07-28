@@ -899,7 +899,8 @@ if b"<plist" in raw[:500]:
                     and environment.get("ORICHUM_WORKFLOW_ROOT") == workflow_root
                     and environment.get("ORICHUM_PYTHON")
                     == f"{data_root}/bin/orichum-python"
-                    and environment.get("ORICHUM_DATA_HOME") == data_root
+                    and environment.get("ORICHUM_DATA_HOME")
+                    in (None, data_root)
                 )
             )
         )
@@ -1020,12 +1021,19 @@ if kind == "claudex-proxy":
             )
             or (
                 not legacy
-                and environment_lines == [
-                expected_environment,
-                expected_workflow_environment,
-                expected_python_environment,
-                expected_data_environment,
-                ]
+                and environment_lines in (
+                    [
+                        expected_environment,
+                        expected_workflow_environment,
+                        expected_python_environment,
+                    ],
+                    [
+                        expected_environment,
+                        expected_workflow_environment,
+                        expected_python_environment,
+                        expected_data_environment,
+                    ],
+                )
             )
         )
         and environment.get("HOME") == os.environ.get("HOME")
@@ -1040,7 +1048,8 @@ if kind == "claudex-proxy":
                 and environment.get("ORICHUM_WORKFLOW_ROOT") == workflow_root
                 and environment.get("ORICHUM_PYTHON")
                 == f"{data_root}/bin/orichum-python"
-                and environment.get("ORICHUM_DATA_HOME") == data_root
+                and environment.get("ORICHUM_DATA_HOME")
+                in (None, data_root)
             )
         )
     )
