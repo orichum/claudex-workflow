@@ -24,8 +24,8 @@ Every specialist reuses the session's project-jailed LeanCTX MCP:
 - explorers, verifiers, critics, and architects receive only bounded read,
   search, tree, expansion, graph, impact, and callgraph tools;
 - the implementation worker also receives anchored patching, `ctx_shell` for
-  noisy observation, native edits, and native `Bash` for mutations or
-  interactive/streaming processes;
+  every finite command, native edits, and deferred Bash for interactive,
+  streaming, long-running, rejected, or unsupported commands;
 - project overview and durable knowledge remain controller-owned, avoiding
   repeated orientation calls and concurrent memory writes;
 - raw native read/search tools are not exposed to specialists, so repository

@@ -64,20 +64,20 @@ same repository therefore reuse the same graph and knowledge store.
 ## Exactness and fallback
 
 Compressed context is for understanding. Supported text edits use an anchored
-`ctx_read` followed by `ctx_patch`. Use `ctx_shell` for noisy observation such
-as Git status/diff/log, tests, linters, builds, Terraform plans, and Docker or
-Kubernetes inspection. Use `ctx_shell(raw=true)` for one exact diagnostic
-follow-up when compressed output is insufficient.
+`ctx_read` followed by `ctx_patch`. Use `ctx_shell` for every finite,
+non-interactive shell command, independent of the CLI or whether it reads or
+changes state. Use `ctx_shell(raw=true)` when exact output is required,
+including decisive validation after state changes.
 
-State-changing Git operations, package installation or upgrades, service
-lifecycle, deployments, infrastructure apply, authentication, and interactive
-or streaming commands use native `Bash`. Orichum does not run the same command
-through both paths by default.
+Native `Bash` is deferred and loaded only for interactive, streaming, or
+long-running processes; redirects or file writes rejected by LeanCTX; or one
+explicit fallback after `ctx_shell` cannot execute a command. Orichum does not
+run the same command through both paths by default.
 
 Native `Read`, `Edit`, and `Write` remain available for unsupported formats,
 binary files, exact verification, or a LeanCTX failure in the controller.
 Specialists use the stricter LeanCTX surface; the implementation worker retains
-native edits and Bash but not a second raw repository-reading path.
+native edits and on-demand Bash but not a second raw repository-reading path.
 
 Orichum disables LeanCTX's autonomous gateway, global shell hooks, daemon,
 provider connectors, request proxy, and universal `ctx_call` surface.

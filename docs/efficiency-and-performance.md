@@ -42,26 +42,24 @@ patch.
 
 ## Tool-schema efficiency
 
-Orichum keeps native `Bash` and nine task-execution LeanCTX tools resident in
-eligible controller requests:
+Orichum keeps nine task-execution LeanCTX tools resident in eligible controller
+requests:
 
-- native `Bash`;
 - LeanCTX read, search, tree, expansion, graph, impact, callgraph, patch, and
   shell tools.
 
-Both shell tools are intentional, but they do different jobs. `ctx_shell`
-compresses potentially noisy inspection output such as diffs, tests, builds,
-plans, and container or cluster diagnostics. Native `Bash` is the explicit
-lane for commits and pushes, package or service changes, deployments,
-authentication, and interactive or streaming processes. The controller policy
-prevents speculative tool selection and duplicate execution.
+`ctx_shell` is the visible default for every finite, non-interactive command,
+including unknown or custom CLIs. Native `Bash` is deferred and loaded only for
+interactive, streaming, or long-running processes; LeanCTX-rejected shell
+behavior; or one explicit fallback. This removes speculative shell selection
+without maintaining a command inventory.
 
 Overview and knowledge remain available but are deferred until the controller
-needs task orientation or durable history. Other native and project-specific
-tools are also marked for deferred loading, and Claude receives the tool-search
-primitive. MCP_DOCKER schemas are loaded only when needed. Keeping the small
-execution surface resident makes code routing deterministic without paying for
-memory schemas on every turn.
+needs task orientation or durable history. Native Bash and other native and
+project-specific tools are marked for deferred loading, and Claude receives
+the tool-search primitive. MCP_DOCKER schemas are loaded only when needed.
+Keeping the small execution surface resident makes code routing deterministic
+without paying for unused schemas on every turn.
 
 This request transform is enabled only for model protocols that Orichum has
 verified with Claude Code's tool-search contract. Unknown Kimi, Gemini, or

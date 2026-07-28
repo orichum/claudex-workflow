@@ -19,7 +19,6 @@ VERIFIED_MODELS = frozenset(
 )
 RESIDENT_NAMES = frozenset(
     {
-        "Bash",
         "mcp__leanctx__ctx_read",
         "mcp__leanctx__ctx_search",
         "mcp__leanctx__ctx_tree",

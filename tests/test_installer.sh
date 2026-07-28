@@ -370,19 +370,19 @@ if controller_plugin_fingerprint \
 fi
 
 rg -Fq \
-  'Use `ctx_shell` for observational commands whose output may be noisy' \
+  'Use `ctx_shell` for every finite, non-interactive shell command' \
   "$ROOT/config/controller-policy.md"
 rg -Fq \
-  'Use `ctx_shell(raw=true)` when exact diagnostic output is required' \
+  'Use `ctx_shell(raw=true)` when exact command output is required' \
   "$ROOT/config/controller-policy.md"
 rg -Fq \
   'Do not run the same command through both shell paths' \
   "$ROOT/config/controller-policy.md"
 rg -Fq \
-  'Git commit/push/branch' \
+  'Load native Bash only for interactive, streaming, or long-running' \
   "$ROOT/config/controller-policy.md"
 rg -Fq \
-  'status/diff/log' \
+  'Use `ctx_shell` for every finite, non-interactive shell' \
   "$ROOT/controller/plugin/agents/implementation-worker.md"
 
 leanctx_probe="$fixture/lean-ctx"

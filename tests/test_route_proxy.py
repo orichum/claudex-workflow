@@ -565,7 +565,7 @@ class RouteProxyTests(unittest.TestCase):
 
     def test_verified_request_defers_tools_before_forwarding(self) -> None:
         tools = [
-            client_tool("Bash"),
+            client_tool("mcp__leanctx__ctx_shell"),
             *[
                 client_tool(f"mcp__docker__tool_{index}")
                 for index in range(11)
@@ -588,7 +588,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": "oc-r-0000000000000001/future-model",
             "messages": [{"role": "user", "content": "test"}],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
@@ -603,7 +603,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": self.primary,
             "messages": [],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
@@ -622,7 +622,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": self.primary,
             "messages": [],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
@@ -651,7 +651,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": self.primary,
             "messages": [],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
@@ -668,7 +668,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": primary,
             "messages": [],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
@@ -693,7 +693,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": self.primary,
             "messages": [{"role": "user", "content": "test"}],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
@@ -718,7 +718,7 @@ class RouteProxyTests(unittest.TestCase):
             "model": self.primary,
             "messages": [],
             "tools": [
-                client_tool("Bash"),
+                client_tool("mcp__leanctx__ctx_shell"),
                 *[client_tool(f"tool_{index}") for index in range(11)],
             ],
         }
