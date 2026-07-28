@@ -64,6 +64,8 @@ Installer modes are separate from the `orichum` command:
 | `orichum status [ID]` | Show the selected session's current model, named account, route state, and quota windows |
 | `orichum sessions [--limit N \| --all]` | List recent logical sessions |
 | `orichum sessions cleanup [--older-than DAYS] [--yes]` | Preview or remove inactive physical launch snapshots |
+| `orichum sessions remove ID [--yes]` | Preview or remove one inactive leaf logical session |
+| `orichum sessions clear [--yes]` | Preview or remove all inactive logical sessions |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
 | `orichum resume ID` | Resume by Orichum logical ID or Claude session UUID |
 | `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |

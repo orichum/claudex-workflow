@@ -82,6 +82,12 @@ class PhysicalRunCleanup:
     status: str
 
 
+@dataclass(frozen=True)
+class LogicalSessionCleanup:
+    session_id: str
+    status: str
+
+
 def _require_private_directory(path: Path, label: str) -> Path:
     try:
         observed = os.lstat(path)
@@ -667,6 +673,198 @@ def list_logical_sessions(state_home: Path) -> tuple[LogicalSession, ...]:
     names.sort()
     sessions = tuple(load_logical_session(state_home, name) for name in names)
     return tuple(sorted(sessions, key=lambda item: (item.created_at, item.id)))
+
+
+def _active_logical_session_ids(state_home: Path) -> frozenset[str]:
+    state = _require_private_directory(Path(state_home), "Orichum state directory")
+    leases = state / "claudex-port-leases"
+    try:
+        os.lstat(leases)
+    except FileNotFoundError:
+        return frozenset()
+    except OSError as failure:
+        raise LogicalSessionError(
+            "Claudex proxy lease directory is unavailable"
+        ) from failure
+    leases = _require_private_directory(
+        leases, "Claudex proxy lease directory"
+    )
+    try:
+        entries = tuple(os.scandir(leases))
+    except OSError as failure:
+        raise LogicalSessionError(
+            "Claudex proxy leases could not be listed"
+        ) from failure
+    active: set[str] = set()
+    for entry in entries:
+        if (
+            not re.fullmatch(r"[0-9]{1,5}\.json", entry.name)
+            or not entry.is_file(follow_symlinks=False)
+        ):
+            raise LogicalSessionError(
+                "Claudex proxy lease directory contains an unexpected entry"
+            )
+        path = leases / entry.name
+        try:
+            observed = os.lstat(path)
+        except OSError as failure:
+            raise LogicalSessionError(
+                "Claudex proxy lease is unavailable"
+            ) from failure
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or observed.st_size > 4096
+        ):
+            raise LogicalSessionError("Claudex proxy lease is unsafe")
+        try:
+            content = path.read_bytes()
+        except OSError as failure:
+            raise LogicalSessionError(
+                "Claudex proxy lease is unavailable"
+            ) from failure
+        if len(content) != observed.st_size:
+            raise LogicalSessionError("Claudex proxy lease changed while reading")
+        try:
+            document = json.loads(content)
+        except (UnicodeError, json.JSONDecodeError) as failure:
+            raise LogicalSessionError("Claudex proxy lease is invalid") from failure
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"pid", "runId", "sessionId"}
+            or type(document["pid"]) is not int
+            or document["pid"] < 1
+            or not isinstance(document["runId"], str)
+            or not _RUN_ID.fullmatch(document["runId"])
+            or not isinstance(document["sessionId"], str)
+            or not _SESSION_ID.fullmatch(document["sessionId"])
+        ):
+            raise LogicalSessionError("Claudex proxy lease is invalid")
+        try:
+            os.kill(document["pid"], 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        except OSError as failure:
+            raise LogicalSessionError(
+                "Claudex proxy lease owner could not be checked"
+            ) from failure
+        active.add(document["sessionId"])
+    return frozenset(active)
+
+
+def _delete_logical_session(
+    state_home: Path, session: LogicalSession
+) -> None:
+    root = _session_root(state_home)
+    directory = _require_private_directory(
+        root / session.id, "logical session"
+    )
+    try:
+        entries = tuple(os.scandir(directory))
+    except OSError as failure:
+        raise LogicalSessionError(
+            "logical session could not be inspected"
+        ) from failure
+    if (
+        len(entries) != 1
+        or entries[0].name != "binding.json"
+        or not entries[0].is_file(follow_symlinks=False)
+    ):
+        raise LogicalSessionError("logical session contains an unexpected entry")
+    staging = _staging_root(state_home)
+    staged = staging / f"delete-{session.id}"
+    try:
+        os.rename(directory, staged)
+        (staged / "binding.json").unlink()
+        staged.rmdir()
+    except OSError as failure:
+        if staged.is_dir() and not directory.exists():
+            try:
+                os.rename(staged, directory)
+            except OSError:
+                pass
+        raise LogicalSessionError(
+            f"logical session {session.id} could not be removed"
+        ) from failure
+
+
+def remove_logical_session(
+    state_home: Path,
+    selector: str,
+    *,
+    apply: bool,
+) -> LogicalSessionCleanup:
+    """Preview or remove one inactive leaf logical session."""
+    sessions = list_logical_sessions(state_home)
+    target = resolve_logical_session(state_home, selector)
+    if target.id in _active_logical_session_ids(state_home):
+        raise LogicalSessionError("active logical session cannot be removed")
+    if any(session.parent_id == target.id for session in sessions):
+        raise LogicalSessionError(
+            "logical session has a child session; remove its children first"
+        )
+    if apply:
+        _delete_logical_session(state_home, target)
+        return LogicalSessionCleanup(target.id, "removed")
+    return LogicalSessionCleanup(target.id, "eligible")
+
+
+def clear_logical_sessions(
+    state_home: Path,
+    *,
+    apply: bool,
+) -> tuple[LogicalSessionCleanup, ...]:
+    """Preview or remove all inactive logical sessions."""
+    sessions = list_logical_sessions(state_home)
+    by_id = {session.id: session for session in sessions}
+    active = set(_active_logical_session_ids(state_home)) & set(by_id)
+    retained = set(active)
+    pending = list(active)
+    while pending:
+        parent_id = by_id[pending.pop()].parent_id
+        if parent_id is not None and parent_id in by_id and parent_id not in retained:
+            retained.add(parent_id)
+            pending.append(parent_id)
+    removable = [session for session in sessions if session.id not in retained]
+    if apply:
+        depth: dict[str, int] = {}
+
+        def session_depth(session: LogicalSession) -> int:
+            if session.id in depth:
+                return depth[session.id]
+            seen = {session.id}
+            parent_id = session.parent_id
+            value = 0
+            while parent_id is not None and parent_id in by_id:
+                if parent_id in seen:
+                    raise LogicalSessionError("logical session ancestry is cyclic")
+                seen.add(parent_id)
+                value += 1
+                parent_id = by_id[parent_id].parent_id
+            depth[session.id] = value
+            return value
+
+        for session in sorted(removable, key=session_depth, reverse=True):
+            _delete_logical_session(state_home, session)
+    return tuple(
+        LogicalSessionCleanup(
+            session.id,
+            (
+                "active-preserved"
+                if session.id in active
+                else "parent-preserved"
+                if session.id in retained
+                else "removed"
+                if apply
+                else "eligible"
+            ),
+        )
+        for session in sessions
+    )
 
 
 def _port_is_live(port: int) -> bool:

@@ -20,10 +20,12 @@ from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.orichum_sessions import (
     LogicalSessionError,
     RouteBinding,
+    clear_logical_sessions,
     cleanup_physical_runs,
     create_logical_session,
     list_logical_sessions,
     load_logical_session,
+    remove_logical_session,
     resolve_session_plan,
 )
 from integrations.common.route_selection import Route
@@ -99,6 +101,117 @@ class OrichumSessionTests(unittest.TestCase):
 
         self.assertEqual(result, ())
         self.assertTrue(active.is_dir())
+
+    def test_logical_session_removal_previews_then_removes_a_leaf(self) -> None:
+        parent = self.create(1)
+        child = create_logical_session(
+            self.state,
+            project_root=parent.project_root,
+            stack=parent.stack,
+            controller=parent.controller,
+            agents=parent.agents,
+            parent_id=parent.id,
+        )
+
+        preview = remove_logical_session(
+            self.state, child.id, apply=False
+        )
+
+        self.assertEqual((preview.session_id, preview.status), (child.id, "eligible"))
+        self.assertEqual(len(list_logical_sessions(self.state)), 2)
+
+        removed = remove_logical_session(
+            self.state, child.claude_session_id, apply=True
+        )
+
+        self.assertEqual((removed.session_id, removed.status), (child.id, "removed"))
+        self.assertEqual(list_logical_sessions(self.state), (parent,))
+
+    def test_logical_session_removal_rejects_active_and_parent_sessions(
+        self,
+    ) -> None:
+        parent = self.create(1)
+        child = create_logical_session(
+            self.state,
+            project_root=parent.project_root,
+            stack=parent.stack,
+            controller=parent.controller,
+            agents=parent.agents,
+            parent_id=parent.id,
+        )
+
+        with self.assertRaisesRegex(LogicalSessionError, "child session"):
+            remove_logical_session(self.state, parent.id, apply=True)
+
+        leases = self.state / "claudex-port-leases"
+        leases.mkdir(mode=0o700)
+        lease = leases / "13457.json"
+        lease.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "runId": "run.active",
+                    "sessionId": child.id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        lease.chmod(0o600)
+
+        with self.assertRaisesRegex(LogicalSessionError, "active"):
+            remove_logical_session(self.state, child.id, apply=True)
+
+    def test_logical_session_clear_preserves_active_session_and_parent(
+        self,
+    ) -> None:
+        parent = self.create(1)
+        child = create_logical_session(
+            self.state,
+            project_root=parent.project_root,
+            stack=parent.stack,
+            controller=parent.controller,
+            agents=parent.agents,
+            parent_id=parent.id,
+        )
+        removable = self.create(20)
+        leases = self.state / "claudex-port-leases"
+        leases.mkdir(mode=0o700)
+        lease = leases / "13457.json"
+        lease.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "runId": "run.active",
+                    "sessionId": child.id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        lease.chmod(0o600)
+
+        preview = clear_logical_sessions(self.state, apply=False)
+
+        self.assertEqual(
+            {item.session_id: item.status for item in preview},
+            {
+                parent.id: "parent-preserved",
+                child.id: "active-preserved",
+                removable.id: "eligible",
+            },
+        )
+        applied = clear_logical_sessions(self.state, apply=True)
+        self.assertEqual(
+            {item.session_id: item.status for item in applied},
+            {
+                parent.id: "parent-preserved",
+                child.id: "active-preserved",
+                removable.id: "removed",
+            },
+        )
+        self.assertEqual(
+            {session.id for session in list_logical_sessions(self.state)},
+            {parent.id, child.id},
+        )
 
     def binding(
         self,

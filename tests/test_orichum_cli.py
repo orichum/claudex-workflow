@@ -1363,6 +1363,50 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("--yes", stdout)
         self.assertTrue(stale.is_dir())
 
+    def test_sessions_remove_and_clear_expose_preview_and_apply(self) -> None:
+        parser = orichum_cli.build_parser()
+        session_id = "oc-s-0000000000000001"
+
+        remove = parser.parse_args(["sessions", "remove", session_id])
+        clear = parser.parse_args(["sessions", "clear", "--yes"])
+
+        self.assertEqual(remove.session_id, session_id)
+        self.assertFalse(remove.yes)
+        self.assertTrue(clear.yes)
+
+        with mock.patch.object(
+            orichum_cli,
+            "remove_logical_session",
+            return_value=SimpleNamespace(
+                session_id=session_id,
+                status="eligible",
+            ),
+        ) as remove_session:
+            status, stdout, stderr = self.run_cli(
+                "sessions", "remove", session_id
+            )
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("Preview only", stdout)
+        self.assertIn("--yes", stdout)
+        self.assertEqual(remove_session.call_args.kwargs["apply"], False)
+
+        with mock.patch.object(
+            orichum_cli,
+            "clear_logical_sessions",
+            return_value=(
+                SimpleNamespace(session_id=session_id, status="removed"),
+            ),
+        ) as clear_sessions:
+            status, stdout, stderr = self.run_cli(
+                "sessions", "clear", "--yes"
+            )
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("Removed 1 logical session", stdout)
+        self.assertIn("Claude Code history", stdout)
+        self.assertEqual(clear_sessions.call_args.kwargs["apply"], True)
+
     def test_leanctx_parser_exposes_bounded_monitoring_commands(self) -> None:
         parser = orichum_cli.build_parser()
 
