@@ -150,7 +150,10 @@ if [[ "$route_status_code" == 404 ]] && \
    ' "$route_status_file" >/dev/null 2>&1; then
   route_status_private=true
 fi
-if [[ "$route_status_private" == true ]]; then
+if [[ "$provider_login_pending" == true && \
+      ( -z "$route_status_code" || "$route_status_code" == 000 ) ]]; then
+  ok 'route telemetry is pending provider login'
+elif [[ "$route_status_private" == true ]]; then
   ok 'route telemetry endpoint is private and redacted'
 else
   fail 'route telemetry endpoint is unavailable or exposed route data'
