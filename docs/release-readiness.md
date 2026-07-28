@@ -6,12 +6,10 @@ separates observed live evidence from deterministic and isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.3` candidate passes local macOS ARM64, isolated Ubuntu
-systemd-user, and deterministic regression coverage. Its native macOS ARM64
-and Linux AMD64 release gates must be rerun after the release metadata is
-merged. WSL2 with systemd shares the Linux service implementation and has
-deterministic contract coverage; it has not been presented here as a native
-WSL acceptance run.
+The `0.1.0-rc.3` candidate passes native macOS ARM64, native Linux AMD64,
+isolated Ubuntu systemd-user, and deterministic regression coverage. WSL2 with
+systemd shares the Linux service implementation and has deterministic contract
+coverage; it has not been presented here as a native WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -37,15 +35,15 @@ validation, and rollover behavior remain covered deterministically.
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
 | Local regression | Complete Python discovery plus installer, transaction, plugin, and smoke boundaries passed against the current source |
 
-## Latest published native baseline
+## 0.1.0-rc.3 native release gates
 
-The latest published native release gates passed against the `0.1.0-rc.2`
-runtime behavior commit `d26c9ef`:
+The native release gates passed against the `0.1.0-rc.3` runtime behavior
+commit `07ab093`:
 
 | Gate | Result |
 |---|---|
-| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30336895554) | Pass |
-| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30336893397) | Pass |
+| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30385364442) | Pass |
+| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30385361264) | Pass |
 
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
