@@ -206,6 +206,8 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
 - **Live source context:** LeanCTX gives the controller compact reads, search,
   trees, lossless expansion, and approved text patches. Specialists reuse the
   same jailed context engine instead of falling back to raw repository reads.
+  A shared LeanCTX wire proxy also trims growing conversation history before
+  each request reaches the provider.
   See [LeanCTX](docs/leanctx.md).
 - **Plugins:** declare and synchronize optional Claude Code plugins through
   Orichum. See [Plugins](docs/plugins.md).
@@ -223,6 +225,7 @@ flowchart LR
     O --> S["Isolated Claude Code session"]
     M["Selected account and model"] -. "frozen route" .-> S
     S --> L["LeanCTX context and knowledge"]
+    S --> W["Shared LeanCTX wire optimization"]
     S -. "only when the project declares a profile" .-> D["MCP_DOCKER"]
 ```
 

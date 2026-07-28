@@ -58,7 +58,7 @@ service ownership, health, and one provider-backed controller request.
 | Capability | Evidence | Result |
 |---|---|---|
 | Install and upgrade | Ran `./install.sh` against the existing managed installation; services were reused and the automatic doctor completed | Pass |
-| Runtime health | Private Python 3.14.x, CLIProxyAPI, route proxy, Claudex, Claude Code, and LeanCTX passed local component readiness checks | Pass |
+| Runtime health | Private Python 3.14.x, CLIProxyAPI, shared LeanCTX proxy, route proxy, Claudex, Claude Code, and LeanCTX MCP passed local component readiness checks | Pass |
 | OpenAI controller | GPT 5.6 Sol completed new and resumed logical sessions through Orichum | Pass |
 | Anthropic agents | Sonnet 5 critic and Opus 4.8 architect completed bounded delegated work | Pass |
 | Antigravity transport | Claude Opus 4.6 Thinking and Gemini 3 Flash returned live acceptance markers through the named Antigravity route | Pass |
@@ -68,10 +68,11 @@ service ownership, health, and one provider-backed controller request.
 | GitHub identity | Isolated `GH_CONFIG_DIR` instances resolved `athevar-xebia` and `arvind9981` without changing the user's active account | Pass |
 | MCP_DOCKER | Both `xebia` and `realtime` profiles completed MCP initialize and tools/list handshakes | Pass |
 | LeanCTX | Exact eleven-tool jailed MCP exposed only the bounded source, graph, overview, and knowledge surface | Pass |
+| LeanCTX wire path | A real structured tool-result request completed through the installed shared proxy and reduced 3,919 bytes to 2,909 bytes; ordinary fresh prose remained unchanged | Pass |
 | LeanCTX specialists | Explorer, verifier, critic, architect, and implementation worker each completed a live bounded read through the shared session MCP | Pass |
 | LeanCTX memory route | The controller dynamically loaded deferred overview and knowledge tools, completed task orientation, and performed read-only project recall | Pass |
 | Status line | Displayed Orichum, project, stack, active GPT account, route state, context, and quota values | Pass |
-| Service lifecycle | Shared resident services remained healthy; no per-session Claudex translators remained after sessions exited | Pass |
+| Service lifecycle | One shared LeanCTX proxy served two concurrent sessions; shared services remained healthy and no per-session Claudex translators remained after exit | Pass |
 
 The live provider tests were bounded and did not write to external Jira,
 Atlassian, GitHub, or other project services.

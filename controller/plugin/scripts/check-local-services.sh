@@ -6,7 +6,7 @@ WORKFLOW_ROOT="${CLAUDEX_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 if ! IFS=$'\t' read -r \
-    CLIPROXY_PORT _ ROUTE_PROXY_PORT \
+    CLIPROXY_PORT _ ROUTE_PROXY_PORT LEANCTX_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   jq -cn '{systemMessage:"Orichum health warning: service port configuration is invalid."}'
   exit 0
@@ -30,6 +30,8 @@ claudex_response=""
 claudex_error=""
 session_response=""
 session_error=""
+leanctx_response=""
+leanctx_error=""
 
 # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
@@ -50,6 +52,12 @@ cleanup() {
   fi
   if [[ -n "$session_error" ]]; then
     rm -f -- "$session_error" || :
+  fi
+  if [[ -n "$leanctx_response" ]]; then
+    rm -f -- "$leanctx_response" || :
+  fi
+  if [[ -n "$leanctx_error" ]]; then
+    rm -f -- "$leanctx_error" || :
   fi
   if [[ -n "$tmp_dir" ]]; then
     rmdir "$tmp_dir" 2>/dev/null || :
@@ -76,6 +84,8 @@ claudex_response="$tmp_dir/claudex.response"
 claudex_error="$tmp_dir/claudex.error"
 session_response="$tmp_dir/session.response"
 session_error="$tmp_dir/session.error"
+leanctx_response="$tmp_dir/leanctx.response"
+leanctx_error="$tmp_dir/leanctx.error"
 if ! (umask 077
   : >"$models_response"
   : >"$models_error"
@@ -83,10 +93,13 @@ if ! (umask 077
   : >"$claudex_error"
   : >"$session_response"
   : >"$session_error"
+  : >"$leanctx_response"
+  : >"$leanctx_error"
   chmod 0600 \
     "$models_response" "$models_error" \
     "$claudex_response" "$claudex_error" \
-    "$session_response" "$session_error"
+    "$session_response" "$session_error" \
+    "$leanctx_response" "$leanctx_error"
 ) 2>/dev/null; then
   emit_warning "Orichum health warning: local service health check could not secure response files."
   exit 0
@@ -104,10 +117,15 @@ curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
   "http://127.0.0.1:$SESSION_CLAUDEX_PORT/health" \
   >"$session_response" 2>"$session_error" &
 session_pid=$!
+curl --fail --silent --show-error --connect-timeout 1 --max-time 4 \
+  "http://127.0.0.1:$LEANCTX_PROXY_PORT/health" \
+  >"$leanctx_response" 2>"$leanctx_error" &
+leanctx_pid=$!
 
 models_status=0
 claudex_status=0
 session_status=0
+leanctx_status=0
 if wait "$models_pid"; then
   :
 else
@@ -123,11 +141,16 @@ if wait "$session_pid"; then
 else
   session_status=$?
 fi
+if wait "$leanctx_pid"; then
+  :
+else
+  leanctx_status=$?
+fi
 
 warning=""
 if [[ "$models_status" -ne 0 || "$claudex_status" -ne 0 || \
-      "$session_status" -ne 0 ]]; then
-  warning="Orichum health warning: a bounded local Claudex, CLIProxyAPI, or Orichum proxy request failed."
+      "$session_status" -ne 0 || "$leanctx_status" -ne 0 ]]; then
+  warning="Orichum health warning: a bounded local Claudex, CLIProxyAPI, LeanCTX, or Orichum proxy request failed."
 else
   effective_models_file="${CLAUDEX_EFFECTIVE_MODELS_FILE:-}"
   effective_controller=""

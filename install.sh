@@ -431,7 +431,7 @@ python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || \
 for helper in \
     orichum-context orichum-doctor orichum-login \
     orichum-plugin orichum-route-proxy orichum-runtime-ready \
-    orichum-verify-cliproxy; do
+    orichum-verify-cliproxy orichum-verify-leanctx-proxy; do
   [[ -x "$WORKFLOW_ROOT/bin/$helper" ]] || \
     workflow_die "required Orichum helper is missing or not executable: $helper"
 done
@@ -621,8 +621,8 @@ attempt_verified_fast_install() (
      "$controller_plugin_decision" == reused ]] || return 1
   local python_entrypoint python_identity python_version python_runtime
   local python_artifact cliproxy_artifact claudex_artifact leanctx_artifact
-  local cliproxy_service route_service
-  local cliproxy_port claudex_port route_port
+  local cliproxy_service leanctx_service route_service
+  local cliproxy_port claudex_port route_port leanctx_port
   local route_runtime routing_input routing_artifact
   local management_key_file management_key
   local binary_identity_file
@@ -693,11 +693,14 @@ attempt_verified_fast_install() (
   fi
   IFS=$'\t' read -r route_service _ _ \
     < <(claudex_proxy_service_identity "$platform") || return 1
-  IFS=$'\t' read -r cliproxy_port claudex_port route_port \
+  IFS=$'\t' read -r leanctx_service _ _ \
+    < <(leanctx_proxy_service_identity "$platform") || return 1
+  IFS=$'\t' read -r cliproxy_port claudex_port route_port leanctx_port \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT") || return 1
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$claudex_port" || return 1
   valid_service_port "$route_port" || return 1
+  valid_service_port "$leanctx_port" || return 1
 
   [[ -L "$USER_BIN_DIR/orichum" && \
      "$(readlink "$USER_BIN_DIR/orichum")" == \
@@ -725,7 +728,7 @@ attempt_verified_fast_install() (
     verified_routing_input_fingerprint \
       "$installer_temp/fast-routing-input" \
       "$cliproxy_artifact" "$claudex_artifact" "$route_runtime" \
-      "$cliproxy_port" "$claudex_port" "$route_port" \
+      "$cliproxy_port" "$claudex_port" "$route_port" "$leanctx_port" \
       "$INSTALLED_CONFIG_ROOT/accounts.json" \
       "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
       "$INSTALLED_CONFIG_ROOT/plugins.json" \
@@ -741,12 +744,13 @@ attempt_verified_fast_install() (
       "$WORKFLOW_ROOT/config/controller-policy.md" \
       "$WORKFLOW_DATA_ROOT/claude-config/settings.json" \
       "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
-      "$cliproxy_service" "$route_service"
+      "$WORKFLOW_DATA_ROOT/leanctx/proxy/config/config.toml" \
+      "$cliproxy_service" "$leanctx_service" "$route_service"
   )" || return 1
   routing_artifact="$(
     verified_routing_runtime_artifact \
       "$WORKFLOW_DATA_ROOT" "$INSTALLED_CONFIG_ROOT" \
-      "$cliproxy_service" "$route_service" \
+      "$cliproxy_service" "$leanctx_service" "$route_service" \
       "$installer_temp/fast-routing-artifact"
   )" || return 1
 
@@ -829,7 +833,8 @@ attempt_verified_fast_install() (
     "$cliproxy_service" "$cliproxy_port" reused \
     "$route_service" "$claudex_port" "$route_port" reused \
     "$python_entrypoint" "$python_version" "$python_runtime" reused \
-    "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT"
+    "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" \
+    "$leanctx_service" "$leanctx_port" reused
   printf '\nFast readiness checks passed.\n'
 )
 
@@ -869,7 +874,10 @@ install -d -m 0700 \
   "$WORKFLOW_DATA_ROOT/state/sessions" \
   "$WORKFLOW_DATA_ROOT/logs" \
   "$WORKFLOW_DATA_ROOT/leanctx" \
-  "$WORKFLOW_DATA_ROOT/leanctx/lean-ctx"
+  "$WORKFLOW_DATA_ROOT/leanctx/lean-ctx" \
+  "$WORKFLOW_DATA_ROOT/leanctx/proxy/config" \
+  "$WORKFLOW_DATA_ROOT/leanctx/proxy/state" \
+  "$WORKFLOW_DATA_ROOT/leanctx/proxy/cache"
 chmod 0700 "$WORKFLOW_DATA_ROOT/bin"
 
 python_entrypoint="$(orichum_python_entrypoint "$WORKFLOW_DATA_ROOT")"
@@ -1191,11 +1199,13 @@ if [[ "$leanctx_decision" != reused ]]; then
     workflow_die "LeanCTX failed the bounded headless MCP capability probe"
 fi
 desired_cliproxy_config="$installer_temp/cliproxy.yaml"
+desired_leanctx_proxy_config="$installer_temp/leanctx-proxy.toml"
 
 if [[ "$platform" == darwin ]]; then
   service_file="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
   desired_service_file="$installer_temp/$SERVICE_LABEL.plist"
   service_mode=0644
+  leanctx_proxy_service_mode=0644
   claudex_proxy_service_mode=0644
   cliproxy_service_label="$SERVICE_LABEL"
   cliproxy_service_unit=-
@@ -1203,9 +1213,16 @@ else
   service_file="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-cliproxy.service"
   desired_service_file="$installer_temp/orichum-cliproxy.service"
   service_mode=0600
+  leanctx_proxy_service_mode=0600
   claudex_proxy_service_mode=0600
   cliproxy_service_label=-
   cliproxy_service_unit=orichum-cliproxy.service
+fi
+if ! IFS=$'\t' read -r \
+    leanctx_proxy_service_file leanctx_proxy_service_label \
+    leanctx_proxy_service_unit \
+    < <(leanctx_proxy_service_identity "$platform"); then
+  workflow_die "LeanCTX proxy service identity could not be resolved"
 fi
 if ! IFS=$'\t' read -r \
     claudex_proxy_service_file claudex_proxy_service_label \
@@ -1214,12 +1231,15 @@ if ! IFS=$'\t' read -r \
   workflow_die "Orichum route proxy service identity could not be resolved"
 fi
 if [[ "$platform" == darwin ]]; then
+  leanctx_proxy_desired_service_file="$installer_temp/io.orichum.leanctx-proxy.plist"
   claudex_proxy_desired_service_file="$installer_temp/io.orichum.route-proxy.plist"
 else
+  leanctx_proxy_desired_service_file="$installer_temp/orichum-leanctx-proxy.service"
   claudex_proxy_desired_service_file="$installer_temp/orichum-route-proxy.service"
 fi
 install -d -m 0755 \
   "$(dirname "$service_file")" \
+  "$(dirname "$leanctx_proxy_service_file")" \
   "$(dirname "$claudex_proxy_service_file")"
 
 cliproxy_service_was_present=false
@@ -1236,6 +1256,18 @@ if [[ -e "$service_file" || -L "$service_file" ]]; then
     workflow_die "refusing to overwrite unknown service file: $service_file"
   fi
   cliproxy_service_owned=true
+fi
+leanctx_proxy_service_was_present=false
+leanctx_proxy_service_owned=false
+if [[ -e "$leanctx_proxy_service_file" || \
+      -L "$leanctx_proxy_service_file" ]]; then
+  leanctx_proxy_service_was_present=true
+  if ! leanctx_proxy_service_is_owned \
+      "$leanctx_proxy_service_file" "$WORKFLOW_DATA_ROOT"; then
+    workflow_die \
+      "refusing to overwrite unknown service file: $leanctx_proxy_service_file"
+  fi
+  leanctx_proxy_service_owned=true
 fi
 claudex_proxy_service_was_present=false
 claudex_proxy_service_owned=false
@@ -1269,6 +1301,20 @@ if [[ -e "$claudex_proxy_service_file" || \
   fi
   claudex_proxy_service_owned=true
 fi
+leanctx_proxy_manager_target_state="$(managed_service_target_state \
+  "$platform" "$leanctx_proxy_service_label" \
+  "$leanctx_proxy_service_unit")" || workflow_die \
+  "LeanCTX proxy manager target could not be inspected safely"
+if [[ "$leanctx_proxy_manager_target_state" == loaded ]]; then
+  leanctx_proxy_loaded_definition="$(managed_service_definition_path \
+    "$platform" "$leanctx_proxy_service_label" \
+    "$leanctx_proxy_service_unit" 2>/dev/null || true)"
+  if [[ "$leanctx_proxy_service_owned" != true ]] || \
+     [[ "$leanctx_proxy_loaded_definition" != \
+        "$leanctx_proxy_service_file" ]]; then
+    workflow_die "refusing to replace loaded unknown LeanCTX proxy target"
+  fi
+fi
 claudex_proxy_manager_target_state="$(managed_service_target_state \
   "$platform" "$claudex_proxy_service_label" \
   "$claudex_proxy_service_unit")" || workflow_die \
@@ -1287,29 +1333,61 @@ fi
 
 if ! IFS=$'\t' read -r \
     CLIPROXY_PORT PERSISTED_CLAUDEX_PROXY_PORT PERSISTED_ROUTE_PROXY_PORT \
+    PERSISTED_LEANCTX_PROXY_PORT \
     < <(read_service_ports "$WORKFLOW_DATA_ROOT"); then
   workflow_die "service port configuration is invalid"
 fi
 PRIOR_CLIPROXY_PORT="$CLIPROXY_PORT"
 PRIOR_ROUTE_PROXY_PORT="$PERSISTED_ROUTE_PROXY_PORT"
+PRIOR_LEANCTX_PROXY_PORT="$PERSISTED_LEANCTX_PROXY_PORT"
 CLIPROXY_PORT="${ORICHUM_CLIPROXY_PORT:-$CLIPROXY_PORT}"
 CLAUDEX_PROXY_PORT="${ORICHUM_CLAUDEX_PROXY_PORT:-$PERSISTED_CLAUDEX_PROXY_PORT}"
 ROUTE_PROXY_LISTEN_PORT="${ORICHUM_ROUTE_PROXY_PORT:-$PERSISTED_ROUTE_PROXY_PORT}"
+LEANCTX_PROXY_PORT="${ORICHUM_LEANCTX_PROXY_PORT:-$PERSISTED_LEANCTX_PROXY_PORT}"
 valid_service_port "$CLIPROXY_PORT" || workflow_die "invalid CLIProxyAPI port"
 valid_service_port "$CLAUDEX_PROXY_PORT" || \
   workflow_die "invalid Claudex proxy port"
 valid_service_port "$ROUTE_PROXY_LISTEN_PORT" || \
   workflow_die "invalid Orichum route proxy port"
-[[ "$CLIPROXY_PORT" != "$CLAUDEX_PROXY_PORT" && \
-   "$CLIPROXY_PORT" != "$ROUTE_PROXY_LISTEN_PORT" && \
-   "$CLAUDEX_PROXY_PORT" != "$ROUTE_PROXY_LISTEN_PORT" ]] || \
-  workflow_die \
-    "CLIProxyAPI, Claudex, and route proxy ports must differ"
+valid_service_port "$LEANCTX_PROXY_PORT" || \
+  workflow_die "invalid LeanCTX proxy port"
+[[ "$(printf '%s\n' \
+    "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" \
+    "$ROUTE_PROXY_LISTEN_PORT" "$LEANCTX_PROXY_PORT" | \
+    sort -u | wc -l | tr -d ' ')" == 4 ]] || \
+  workflow_die "Orichum service ports must differ"
 
 cliproxy_endpoint_ready_at() {
   curl -fsS --connect-timeout 1 --max-time 2 \
     "http://127.0.0.1:$1/v1/models" 2>/dev/null | \
     cliproxy_models_response_is_ready /dev/stdin
+}
+
+leanctx_proxy_endpoint_ready_at() {
+  curl -fsS --connect-timeout 1 --max-time 2 \
+    "http://127.0.0.1:$1/health" 2>/dev/null | \
+    jq -e '.status == "ok" or .status == "healthy"' >/dev/null 2>&1
+}
+
+leanctx_proxy_runtime_is_owned() {
+  local port="$1"
+  local service_pid
+  service_pid="$(managed_service_main_pid \
+    "$platform" "$leanctx_proxy_service_label" \
+    "$leanctx_proxy_service_unit")" || return 1
+  pid_owns_loopback_listener "$service_pid" "$port" || return 1
+  leanctx_proxy_endpoint_ready_at "$port"
+}
+
+wait_for_leanctx_proxy() {
+  local port="${1:-$LEANCTX_PROXY_PORT}"
+  for _ in {1..30}; do
+    if leanctx_proxy_runtime_is_owned "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 claudex_proxy_endpoint_ready_at() {
@@ -1422,6 +1500,10 @@ managed_listener_is_owned() {
 managed_target_matches_definition_or_absent \
   "$service_file" "$cliproxy_service_label" "$cliproxy_service_unit" || \
   workflow_die "refusing to replace loaded unknown CLIProxyAPI target"
+managed_target_matches_definition_or_absent \
+  "$leanctx_proxy_service_file" "$leanctx_proxy_service_label" \
+  "$leanctx_proxy_service_unit" || \
+  workflow_die "refusing to replace loaded unknown LeanCTX proxy target"
 cliproxy_listener_owned=false
 if [[ "$CLIPROXY_PORT" == "$PRIOR_CLIPROXY_PORT" ]] && \
    [[ "$cliproxy_service_owned" == true ]] && \
@@ -1429,6 +1511,15 @@ if [[ "$CLIPROXY_PORT" == "$PRIOR_CLIPROXY_PORT" ]] && \
      "$service_file" "$cliproxy_service_label" "$cliproxy_service_unit" \
      "$CLIPROXY_PORT"; then
   cliproxy_listener_owned=true
+fi
+leanctx_proxy_listener_owned=false
+if [[ "$LEANCTX_PROXY_PORT" == "$PRIOR_LEANCTX_PROXY_PORT" ]] && \
+   [[ "$leanctx_proxy_service_owned" == true ]] && \
+   managed_listener_is_owned \
+     "$leanctx_proxy_service_file" "$leanctx_proxy_service_label" \
+     "$leanctx_proxy_service_unit" "$LEANCTX_PROXY_PORT" && \
+   leanctx_proxy_endpoint_ready_at "$LEANCTX_PROXY_PORT"; then
+  leanctx_proxy_listener_owned=true
 fi
 prior_claudex_config="$(model_config_file \
   "$WORKFLOW_DATA_ROOT" claudex.toml)"
@@ -1474,14 +1565,20 @@ fi
 CLIPROXY_PORT="$(select_service_port \
   CLIProxyAPI ORICHUM_CLIPROXY_PORT "$CLIPROXY_PORT" \
   "$cliproxy_listener_owned" "$interactive_install")" || exit 1
+LEANCTX_PROXY_PORT="$(select_service_port \
+  'LeanCTX proxy' ORICHUM_LEANCTX_PROXY_PORT "$LEANCTX_PROXY_PORT" \
+  "$leanctx_proxy_listener_owned" "$interactive_install" \
+  "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" \
+  "$ROUTE_PROXY_LISTEN_PORT")" || exit 1
 ROUTE_PROXY_LISTEN_PORT="$(select_service_port \
   'Orichum route proxy' ORICHUM_ROUTE_PROXY_PORT "$ROUTE_PROXY_LISTEN_PORT" \
   "$claudex_proxy_port_owned" "$interactive_install" \
-  "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT")" || exit 1
+  "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$LEANCTX_PROXY_PORT")" || exit 1
 ports_changed=false
 if [[ "$CLIPROXY_PORT" != "$PRIOR_CLIPROXY_PORT" ]] || \
    [[ "$CLAUDEX_PROXY_PORT" != "$PERSISTED_CLAUDEX_PROXY_PORT" ]] || \
-   [[ "$ROUTE_PROXY_LISTEN_PORT" != "$PRIOR_ROUTE_PROXY_PORT" ]]; then
+   [[ "$ROUTE_PROXY_LISTEN_PORT" != "$PRIOR_ROUTE_PROXY_PORT" ]] || \
+   [[ "$LEANCTX_PROXY_PORT" != "$PRIOR_LEANCTX_PROXY_PORT" ]]; then
   ports_changed=true
 fi
 service_ports_path="$(service_ports_file "$WORKFLOW_DATA_ROOT")"
@@ -1500,6 +1597,69 @@ render_cliproxy_config \
   "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/auth" "$CLIPROXY_PORT" \
   "$configured_management_secret"
 chmod 0600 "$desired_cliproxy_config"
+(
+  cd "$WORKFLOW_ROOT"
+  workflow_python -I -B - \
+    "$WORKFLOW_ROOT" "$CLIPROXY_PORT" "$LEANCTX_PROXY_PORT" \
+    >"$desired_leanctx_proxy_config" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from integrations.common.leanctx_contract import proxy_config_bytes
+
+sys.stdout.buffer.write(
+    proxy_config_bytes(int(sys.argv[2]), int(sys.argv[3]))
+)
+PY
+) || workflow_die "LeanCTX proxy configuration could not be rendered"
+chmod 0600 "$desired_leanctx_proxy_config"
+
+probe_leanctx_proxy() (
+  local probe_root="$installer_temp/leanctx-proxy-probe"
+  local probe_port probe_pid= probe_ready=false
+  install -d -m 0700 \
+    "$probe_root/config" "$probe_root/state" \
+    "$probe_root/cache" "$probe_root/data"
+  install -m 0600 "$desired_leanctx_proxy_config" \
+    "$probe_root/config/config.toml"
+  probe_port="$(next_available_port \
+    "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" \
+    "$ROUTE_PROXY_LISTEN_PORT" "$LEANCTX_PROXY_PORT")" || return 1
+  cleanup_leanctx_proxy_probe() {
+    if [[ -n "$probe_pid" ]] && kill -0 "$probe_pid" 2>/dev/null; then
+      kill "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_leanctx_proxy_probe EXIT
+  LEAN_CTX_CONFIG_DIR="$probe_root/config" \
+  LEAN_CTX_STATE_DIR="$probe_root/state" \
+  LEAN_CTX_CACHE_DIR="$probe_root/cache" \
+  LEAN_CTX_DATA_DIR="$probe_root/data/lean-ctx" \
+  XDG_DATA_HOME="$probe_root/data" \
+    "$leanctx_candidate" config validate >/dev/null || return 1
+  LEAN_CTX_CONFIG_DIR="$probe_root/config" \
+  LEAN_CTX_STATE_DIR="$probe_root/state" \
+  LEAN_CTX_CACHE_DIR="$probe_root/cache" \
+  LEAN_CTX_DATA_DIR="$probe_root/data/lean-ctx" \
+  LEAN_CTX_HEADLESS=1 LEAN_CTX_MINIMAL=1 \
+  XDG_DATA_HOME="$probe_root/data" \
+    "$leanctx_candidate" proxy start "--port=$probe_port" \
+    >"$probe_root/proxy.log" 2>&1 &
+  probe_pid=$!
+  for _ in {1..30}; do
+    kill -0 "$probe_pid" 2>/dev/null || break
+    if leanctx_proxy_endpoint_ready_at "$probe_port"; then
+      probe_ready=true
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$probe_ready" == true ]]
+)
+
+probe_leanctx_proxy || \
+  workflow_die "LeanCTX failed isolated proxy configuration and health checks"
 
 probe_cliproxy_management() (
   local probe_root probe_port probe_pid= probe_binary
@@ -1606,24 +1766,36 @@ route_proxy_runtime_digest="$(
 if [[ "$platform" == darwin ]]; then
   render_launch_agent "$desired_service_file" "$WORKFLOW_DATA_ROOT"
   plutil -lint "$desired_service_file" >/dev/null
+  render_leanctx_proxy_launch_agent \
+    "$leanctx_proxy_desired_service_file" "$WORKFLOW_DATA_ROOT" \
+    "$LEANCTX_PROXY_PORT"
+  plutil -lint "$leanctx_proxy_desired_service_file" >/dev/null
   render_claudex_proxy_launch_agent \
     "$claudex_proxy_desired_service_file" "$WORKFLOW_DATA_ROOT" \
     "$WORKFLOW_ROOT" \
-    "$ROUTE_PROXY_LISTEN_PORT" "$CLIPROXY_PORT" \
+    "$ROUTE_PROXY_LISTEN_PORT" "$LEANCTX_PROXY_PORT" "$CLIPROXY_PORT" \
     "$route_proxy_runtime_digest"
   plutil -lint "$claudex_proxy_desired_service_file" >/dev/null
 else
   render_systemd_user_unit "$desired_service_file" "$WORKFLOW_DATA_ROOT"
+  render_leanctx_proxy_systemd_user_unit \
+    "$leanctx_proxy_desired_service_file" "$WORKFLOW_DATA_ROOT" \
+    "$LEANCTX_PROXY_PORT"
   render_claudex_proxy_systemd_user_unit \
     "$claudex_proxy_desired_service_file" "$WORKFLOW_DATA_ROOT" \
     "$WORKFLOW_ROOT" \
-    "$ROUTE_PROXY_LISTEN_PORT" "$CLIPROXY_PORT" \
+    "$ROUTE_PROXY_LISTEN_PORT" "$LEANCTX_PROXY_PORT" "$CLIPROXY_PORT" \
     "$route_proxy_runtime_digest"
 fi
 
 cliproxy_config_changed="$(file_change_state \
   "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/cliproxy.yaml")"
 cliproxy_service_changed="$(file_change_state "$desired_service_file" "$service_file")"
+leanctx_proxy_config_path="$WORKFLOW_DATA_ROOT/leanctx/proxy/config/config.toml"
+leanctx_proxy_config_changed="$(file_change_state \
+  "$desired_leanctx_proxy_config" "$leanctx_proxy_config_path")"
+leanctx_proxy_service_changed="$(file_change_state \
+  "$leanctx_proxy_desired_service_file" "$leanctx_proxy_service_file")"
 claudex_proxy_service_changed="$(file_change_state \
   "$claudex_proxy_desired_service_file" "$claudex_proxy_service_file")"
 if [[ "$cliproxy_decision" != reused || \
@@ -1636,6 +1808,13 @@ fi
 claudex_proxy_port_changed=false
 if [[ "$ROUTE_PROXY_LISTEN_PORT" != "$PRIOR_ROUTE_PROXY_PORT" ]]; then
   claudex_proxy_port_changed=true
+fi
+leanctx_proxy_restart_required=false
+if [[ "$leanctx_binary_changed" == true ]] || \
+   [[ "$leanctx_proxy_config_changed" == changed ]] || \
+   [[ "$leanctx_proxy_service_changed" == changed ]] || \
+   [[ "$leanctx_proxy_listener_owned" != true ]]; then
+  leanctx_proxy_restart_required=true
 fi
 
 cliproxy_is_ready() {
@@ -1677,6 +1856,10 @@ snapshot_path "$WORKFLOW_DATA_ROOT/bin/claudex" "$snapshot_dir" claudex-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$snapshot_dir" leanctx-binary
 snapshot_path "$WORKFLOW_DATA_ROOT/cliproxy.yaml" "$snapshot_dir" cliproxy-config
 snapshot_path "$service_file" "$snapshot_dir" cliproxy-service
+snapshot_path "$leanctx_proxy_config_path" \
+  "$snapshot_dir" leanctx-proxy-config
+snapshot_path "$leanctx_proxy_service_file" \
+  "$snapshot_dir" leanctx-proxy-service
 snapshot_path "$claudex_proxy_service_file" \
   "$snapshot_dir" claudex-proxy-service
 snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
@@ -1689,10 +1872,15 @@ claudex_proxy_runtime_mutated=false
 endpoint_transaction_active=true
 orichum_launcher_mutated=false
 leanctx_transaction_active=false
+leanctx_proxy_transaction_active=false
+leanctx_proxy_runtime_mutated=false
 install_state_transaction_active=false
 claude_settings_transaction_active=false
 if [[ "$leanctx_binary_changed" == true ]]; then
   leanctx_transaction_active=true
+fi
+if [[ "$leanctx_proxy_restart_required" == true ]]; then
+  leanctx_proxy_transaction_active=true
 fi
 
 restore_claudex_proxy_service() {
@@ -1774,6 +1962,16 @@ rollback_install_transaction() {
     fi
   fi
 
+  if [[ "${leanctx_proxy_runtime_mutated:-false}" == true ]]; then
+    if [[ "$platform" == darwin ]]; then
+      launchctl bootout "gui/$(id -u)" "$leanctx_proxy_service_file" \
+        >/dev/null 2>&1 || true
+    else
+      systemctl --user stop "$leanctx_proxy_service_unit" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
+
   if [[ "${config_transaction_active:-false}" == true ]]; then
     rollback_installed_control_plane \
       "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
@@ -1845,6 +2043,12 @@ PY
     snapshot_path_matches "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
       "$snapshot_dir" leanctx-binary || rollback_ready=false
   fi
+  if [[ "${leanctx_proxy_transaction_active:-false}" == true ]]; then
+    restore_snapshot "$leanctx_proxy_config_path" \
+      "$snapshot_dir" leanctx-proxy-config || rollback_ready=false
+    restore_snapshot "$leanctx_proxy_service_file" \
+      "$snapshot_dir" leanctx-proxy-service || rollback_ready=false
+  fi
 
   if [[ "$cliproxy_transaction_active" == true ]]; then
     if [[ "$platform" == darwin ]]; then
@@ -1876,6 +2080,27 @@ PY
       wait_for_cliproxy "$PRIOR_CLIPROXY_PORT" || rollback_ready=false
     elif [[ "$platform" == systemd ]]; then
       systemctl --user disable orichum-cliproxy.service >/dev/null 2>&1 || true
+      systemctl --user daemon-reload >/dev/null 2>&1 || rollback_ready=false
+    fi
+  fi
+
+  if [[ "${leanctx_proxy_transaction_active:-false}" == true ]]; then
+    if [[ -f "$snapshot_dir/leanctx-proxy-service.present" ]]; then
+      if [[ "$platform" == darwin ]]; then
+        launchctl bootstrap "gui/$(id -u)" "$leanctx_proxy_service_file" \
+          >/dev/null 2>&1 || rollback_ready=false
+      else
+        systemctl --user daemon-reload >/dev/null 2>&1 || rollback_ready=false
+        systemctl --user enable "$leanctx_proxy_service_unit" \
+          >/dev/null 2>&1 || rollback_ready=false
+        systemctl --user restart "$leanctx_proxy_service_unit" \
+          >/dev/null 2>&1 || rollback_ready=false
+      fi
+      wait_for_leanctx_proxy "$PRIOR_LEANCTX_PROXY_PORT" || \
+        rollback_ready=false
+    elif [[ "$platform" == systemd ]]; then
+      systemctl --user disable "$leanctx_proxy_service_unit" \
+        >/dev/null 2>&1 || true
       systemctl --user daemon-reload >/dev/null 2>&1 || rollback_ready=false
     fi
   fi
@@ -1972,6 +2197,7 @@ routing_input_sha="$(
     "$cliproxy_desired_artifact" "$claudex_desired_artifact" \
     "$route_proxy_runtime_digest" \
     "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
+    "$LEANCTX_PROXY_PORT" \
     "$candidate_config_root/accounts.json" \
     "$candidate_config_root/model-stacks.json" \
     "$candidate_config_root/plugins.json" \
@@ -1987,13 +2213,16 @@ routing_input_sha="$(
     "$WORKFLOW_ROOT/config/controller-policy.md" \
     "$WORKFLOW_ROOT/controller/settings.json" \
     "$desired_cliproxy_config" \
-    "$desired_service_file" "$claudex_proxy_desired_service_file"
+    "$desired_leanctx_proxy_config" \
+    "$desired_service_file" "$leanctx_proxy_desired_service_file" \
+    "$claudex_proxy_desired_service_file"
 )" || workflow_die "routing input fingerprint failed"
 
 routing_runtime_artifact() {
   verified_routing_runtime_artifact \
     "$WORKFLOW_DATA_ROOT" "$INSTALLED_CONFIG_ROOT" \
-    "$service_file" "$claudex_proxy_service_file" \
+    "$service_file" "$leanctx_proxy_service_file" \
+    "$claudex_proxy_service_file" \
     "$installer_temp/routing-artifact"
 }
 routing_current_artifact="$empty_artifact_sha"
@@ -2015,7 +2244,7 @@ preflight_claudex_proxy() (
   local response_file="$installer_temp/claudex-proxy-preflight-models.json"
   preflight_port="$(next_available_port \
     "$ROUTE_PROXY_LISTEN_PORT" "$CLAUDEX_PROXY_PORT" \
-    "$CLIPROXY_PORT")" || \
+    "$CLIPROXY_PORT" "$LEANCTX_PROXY_PORT")" || \
     return 1
   cleanup_claudex_preflight() {
     if [[ -n "$preflight_pid" ]] && \
@@ -2030,7 +2259,8 @@ preflight_claudex_proxy() (
   trap 'exit 143' TERM
   "$WORKFLOW_DATA_ROOT/bin/orichum-route-proxy" \
     --port "$preflight_port" \
-    --upstream-port "$CLIPROXY_PORT" \
+    --upstream-port "$LEANCTX_PROXY_PORT" \
+    --catalog-port "$CLIPROXY_PORT" \
     --state-home "$WORKFLOW_DATA_ROOT/state" \
     --data-home "$WORKFLOW_DATA_ROOT" \
     >"$installer_temp/route-proxy-preflight.log" 2>&1 &
@@ -2121,7 +2351,8 @@ require_activation_port_available() {
 }
 
 write_service_ports "$WORKFLOW_DATA_ROOT" \
-  "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" || \
+  "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
+  "$LEANCTX_PROXY_PORT" || \
   workflow_die "service port configuration could not be saved"
 
 if [[ "$cliproxy_binary_changed" == true ]] || \
@@ -2143,6 +2374,17 @@ if [[ "$leanctx_binary_changed" == true ]]; then
   activate_staged_file "$(jq -r '.staged_path' <<<"$leanctx_state")" \
     "$WORKFLOW_DATA_ROOT/bin/lean-ctx" 0755
 fi
+if [[ "$leanctx_proxy_config_changed" == changed ]]; then
+  activate_staged_file "$desired_leanctx_proxy_config" \
+    "$leanctx_proxy_config_path" 0600
+fi
+if [[ "$leanctx_proxy_service_changed" == changed ]]; then
+  activate_staged_file "$leanctx_proxy_desired_service_file" \
+    "$leanctx_proxy_service_file" "$leanctx_proxy_service_mode"
+fi
+leanctx_proxy_service_is_owned \
+  "$leanctx_proxy_service_file" "$WORKFLOW_DATA_ROOT" || \
+  workflow_die "installed LeanCTX proxy service definition is not owned"
 if [[ "$cliproxy_config_changed" == changed ]]; then
   activate_staged_file "$desired_cliproxy_config" "$WORKFLOW_DATA_ROOT/cliproxy.yaml" 0600
 fi
@@ -2167,6 +2409,29 @@ if [[ "$cliproxy_restart_required" == true ]]; then
   fi
   wait_for_cliproxy || workflow_die \
     "CLIProxyAPI failed readiness checks; previous service will be restored"
+fi
+
+if [[ "$leanctx_proxy_restart_required" == true ]]; then
+  printf 'WARNING: restarting the shared LeanCTX proxy may interrupt one in-flight request across active sessions.\n' >&2
+  leanctx_proxy_runtime_mutated=true
+  if [[ "$platform" == darwin ]]; then
+    launchctl bootout "gui/$(id -u)" "$leanctx_proxy_service_file" \
+      >/dev/null 2>&1 || true
+  else
+    systemctl --user stop "$leanctx_proxy_service_unit" \
+      >/dev/null 2>&1 || true
+    systemctl --user daemon-reload
+    systemctl --user enable "$leanctx_proxy_service_unit"
+  fi
+  require_activation_port_available \
+    'LeanCTX proxy' "$LEANCTX_PROXY_PORT"
+  if [[ "$platform" == darwin ]]; then
+    launchctl bootstrap "gui/$(id -u)" "$leanctx_proxy_service_file"
+  else
+    systemctl --user start "$leanctx_proxy_service_unit"
+  fi
+  wait_for_leanctx_proxy || workflow_die \
+    "LeanCTX proxy failed readiness checks; previous service will be restored"
 fi
 
 for launcher in orichum; do
@@ -2200,6 +2465,8 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
        [[ "$cliproxy_service_changed" == unchanged ]] && \
        [[ "$cliproxy_listener_owned" == true ]] && \
        [[ "$cliproxy_ready_before" == true ]] && \
+       [[ "$leanctx_proxy_restart_required" == false ]] && \
+       [[ "$leanctx_proxy_listener_owned" == true ]] && \
        [[ "$claudex_binary_changed" == false ]] && \
        [[ "$claudex_proxy_service_changed" == unchanged ]] && \
        [[ "$claudex_proxy_listener_owned" == true ]]; then
@@ -2359,6 +2626,7 @@ routing_input_sha="$(
     "$(sha256_file "$WORKFLOW_DATA_ROOT/bin/claudex")" \
     "$route_proxy_runtime_digest" \
     "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
+    "$LEANCTX_PROXY_PORT" \
     "$INSTALLED_CONFIG_ROOT/accounts.json" \
     "$INSTALLED_CONFIG_ROOT/model-stacks.json" \
     "$INSTALLED_CONFIG_ROOT/plugins.json" \
@@ -2374,7 +2642,9 @@ routing_input_sha="$(
     "$WORKFLOW_ROOT/config/controller-policy.md" \
     "$WORKFLOW_DATA_ROOT/claude-config/settings.json" \
     "$WORKFLOW_DATA_ROOT/cliproxy.yaml" \
-    "$service_file" "$committed_route_service_file"
+    "$leanctx_proxy_config_path" \
+    "$service_file" "$leanctx_proxy_service_file" \
+    "$committed_route_service_file"
 )" || workflow_die "committed routing input fingerprint failed"
 if [[ "$controller_plugin_decision" != reused ]]; then
   ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT" \
@@ -2519,7 +2789,19 @@ print_install_summary \
   "$claudex_proxy_action" \
   "$ORICHUM_PYTHON" "$orichum_python_version" \
   "$orichum_python_candidate" "$orichum_python_action" \
-  "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT"
+  "$WORKFLOW_DATA_ROOT/bin/lean-ctx" "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" \
+  "$leanctx_proxy_service_file" "$LEANCTX_PROXY_PORT" \
+  "$(
+    if [[ "$leanctx_proxy_restart_required" == true ]]; then
+      if [[ "$leanctx_proxy_service_was_present" == true ]]; then
+        printf reconciled
+      else
+        printf installed
+      fi
+    else
+      printf reused
+    fi
+  )"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
     "$SOURCE_ROOT"

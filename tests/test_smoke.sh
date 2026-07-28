@@ -15,12 +15,14 @@ trap 'rm -rf -- "$fixture"' EXIT
 
 ports_root="$fixture/ports"
 install -d -m 0700 "$ports_root"
-write_service_ports "$ports_root" 8317 13456 13457
-IFS=$'\t' read -r cliproxy_port claudex_proxy_port route_proxy_port \
+write_service_ports "$ports_root" 8317 13456 13457 13458
+IFS=$'\t' read -r \
+  cliproxy_port claudex_proxy_port route_proxy_port leanctx_proxy_port \
   < <(read_service_ports "$ports_root")
 [[ "$cliproxy_port" == 8317 ]]
 [[ "$claudex_proxy_port" == 13456 ]]
 [[ "$route_proxy_port" == 13457 ]]
+[[ "$leanctx_proxy_port" == 13458 ]]
 
 render_claudex_config \
   "$fixture/claudex.toml" \
@@ -227,7 +229,7 @@ if rg -Fq 'macOS on Apple Silicon or x86-64' \
   exit 1
 fi
 [[ "$(rg -c -- '--max-time 4' \
-  "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 3 ]]
+  "$ROOT/controller/plugin/scripts/check-local-services.sh")" == 4 ]]
 rg -Fq \
   'Claudex template separates per-session and recovery proxy ports' \
   "$ROOT/doctor.sh"

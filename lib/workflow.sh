@@ -568,32 +568,54 @@ read_service_ports() {
   local ports_file
   ports_file="$(service_ports_file "$data_root")"
   if [[ ! -e "$ports_file" ]]; then
-    printf '8317\t13456\t13457\n'
+    printf '8317\t13456\t13457\t13458\n'
     return 0
   fi
   [[ -f "$ports_file" && ! -L "$ports_file" ]] || return 1
   jq -er '
     select(type == "object") |
-    select(keys == [
-      "claudexProxyPort",
-      "cliproxyPort",
-      "routeProxyPort"
-    ]) |
+    if keys == [
+        "claudexProxyPort",
+        "cliproxyPort",
+        "routeProxyPort"
+      ] then
+      . as $old |
+      first(
+        range(13458; 65536) as $candidate |
+        select(([
+          $old.cliproxyPort,
+          $old.claudexProxyPort,
+          $old.routeProxyPort
+        ] | index($candidate)) == null) |
+        $old + {leanctxProxyPort: $candidate}
+      )
+    elif keys == [
+        "claudexProxyPort",
+        "cliproxyPort",
+        "leanctxProxyPort",
+        "routeProxyPort"
+      ] then .
+    else empty
+    end |
     select(.cliproxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
     select(.claudexProxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
     select(.routeProxyPort | type == "number" and floor == . and
       . >= 1024 and . <= 65535) |
+    select(.leanctxProxyPort | type == "number" and floor == . and
+      . >= 1024 and . <= 65535) |
     select(([
       .cliproxyPort,
       .claudexProxyPort,
-      .routeProxyPort
-    ] | unique | length) == 3) |
+      .routeProxyPort,
+      .leanctxProxyPort
+    ] | unique | length) == 4) |
     [
       .cliproxyPort,
       .claudexProxyPort,
-      .routeProxyPort
+      .routeProxyPort,
+      .leanctxProxyPort
     ] | @tsv
   ' "$ports_file"
 }
@@ -603,13 +625,16 @@ write_service_ports() {
   local cliproxy_port="$2"
   local claudex_proxy_port="$3"
   local route_proxy_port="$4"
+  local leanctx_proxy_port="$5"
   local ports_file temporary
   valid_service_port "$cliproxy_port" || return 1
   valid_service_port "$claudex_proxy_port" || return 1
   valid_service_port "$route_proxy_port" || return 1
-  [[ "$cliproxy_port" != "$claudex_proxy_port" && \
-     "$cliproxy_port" != "$route_proxy_port" && \
-     "$claudex_proxy_port" != "$route_proxy_port" ]] || return 1
+  valid_service_port "$leanctx_proxy_port" || return 1
+  [[ "$(printf '%s\n' \
+      "$cliproxy_port" "$claudex_proxy_port" \
+      "$route_proxy_port" "$leanctx_proxy_port" | sort -u | wc -l | tr -d ' ')" \
+      == 4 ]] || return 1
   install -d -m 0700 "$data_root" || return 1
   ports_file="$(service_ports_file "$data_root")"
   [[ ! -L "$ports_file" ]] || return 1
@@ -617,9 +642,11 @@ write_service_ports() {
   if ! jq -n --argjson cliproxy "$cliproxy_port" \
       --argjson claudex_proxy "$claudex_proxy_port" \
       --argjson route_proxy "$route_proxy_port" \
+      --argjson leanctx_proxy "$leanctx_proxy_port" \
       '{
         claudexProxyPort: $claudex_proxy,
         cliproxyPort: $cliproxy,
+        leanctxProxyPort: $leanctx_proxy,
         routeProxyPort: $route_proxy
       }' >"$temporary" || \
      ! chmod 0600 "$temporary" || ! mv -f "$temporary" "$ports_file"; then
@@ -784,6 +811,9 @@ print_install_summary() {
   local leanctx_binary="${17}"
   local source_root="${18}"
   local home_root="${19}"
+  local leanctx_proxy_service_file="${20}"
+  local leanctx_proxy_port="${21}"
+  local leanctx_proxy_action="${22}"
 
   printf '%s\n' \
     '' \
@@ -805,6 +835,8 @@ print_install_summary() {
     'Services' \
     "  CLIProxyAPI: $cliproxy_action at 127.0.0.1:$cliproxy_port" \
     "    $cliproxy_service_file" \
+    "  LeanCTX:     $leanctx_proxy_action at 127.0.0.1:$leanctx_proxy_port" \
+    "    $leanctx_proxy_service_file" \
     "  Claudex:     per-session from 127.0.0.1:$claudex_proxy_port" \
     "  Route proxy: $claudex_proxy_action at 127.0.0.1:$route_proxy_port" \
     "    $claudex_proxy_service_file"
@@ -871,14 +903,37 @@ def claudex_proxy_arguments_owned(arguments):
                 data_root,
             ]
         )
-    if not isinstance(arguments, list) or len(arguments) != 13:
+    if not isinstance(arguments, list) or len(arguments) not in (13, 15):
         return False
     port = arguments[6]
     upstream = arguments[8]
+    catalog = arguments[10] if len(arguments) == 15 else upstream
+    tail = (
+        [
+            "--catalog-port",
+            catalog,
+            "--state-home",
+            f"{data_root}/state",
+            "--data-home",
+            data_root,
+        ]
+        if len(arguments) == 15
+        else [
+            "--state-home",
+            f"{data_root}/state",
+            "--data-home",
+            data_root,
+        ]
+    )
     return (
         valid_port(port)
         and valid_port(upstream)
-        and port != upstream
+        and valid_port(catalog)
+        and (
+            len({port, upstream, catalog}) == 3
+            if len(arguments) == 15
+            else port != upstream
+        )
         and arguments == [
             f"{data_root}/bin/orichum-python",
             "-I",
@@ -889,10 +944,7 @@ def claudex_proxy_arguments_owned(arguments):
             port,
             "--upstream-port",
             upstream,
-            "--state-home",
-            f"{data_root}/state",
-            "--data-home",
-            data_root,
+            *tail,
         ]
     )
 
@@ -909,6 +961,34 @@ if b"<plist" in raw[:500]:
                 "--config",
                 f"{data_root}/cliproxy.yaml",
             ]
+        )
+    elif kind == "leanctx-proxy":
+        environment = document.get("EnvironmentVariables")
+        port_argument = (
+            arguments[3]
+            if isinstance(arguments, list) and len(arguments) == 4
+            else ""
+        )
+        owned = (
+            document.get("Label") == "io.orichum.leanctx-proxy"
+            and arguments == [
+                f"{data_root}/bin/lean-ctx",
+                "proxy",
+                "start",
+                port_argument,
+            ]
+            and port_argument.startswith("--port=")
+            and valid_port(port_argument[len("--port="):])
+            and environment == {
+                "HOME": os.environ.get("HOME"),
+                "LEAN_CTX_CACHE_DIR": f"{data_root}/leanctx/proxy/cache",
+                "LEAN_CTX_CONFIG_DIR": f"{data_root}/leanctx/proxy/config",
+                "LEAN_CTX_DATA_DIR": f"{data_root}/leanctx/lean-ctx",
+                "LEAN_CTX_HEADLESS": "1",
+                "LEAN_CTX_MINIMAL": "1",
+                "LEAN_CTX_STATE_DIR": f"{data_root}/leanctx/proxy/state",
+                "XDG_DATA_HOME": f"{data_root}/leanctx",
+            }
         )
     elif kind == "claudex-proxy":
         environment = document.get("EnvironmentVariables")
@@ -989,11 +1069,46 @@ for line in lines:
             key, item = value.split("=", 1)
             environment[key] = item
 
+if kind == "leanctx-proxy":
+    port_argument = arguments[3] if len(arguments) == 4 else ""
+    owned = (
+        descriptions == ["Description=Orichum LeanCTX proxy"]
+        and arguments == [
+            f"{data_root}/bin/lean-ctx",
+            "proxy",
+            "start",
+            port_argument,
+        ]
+        and port_argument.startswith("--port=")
+        and valid_port(port_argument[len("--port="):])
+        and environment == {
+            "HOME": os.environ.get("HOME", ""),
+            "LEAN_CTX_CACHE_DIR": f"{data_root}/leanctx/proxy/cache",
+            "LEAN_CTX_CONFIG_DIR": f"{data_root}/leanctx/proxy/config",
+            "LEAN_CTX_DATA_DIR": f"{data_root}/leanctx/lean-ctx",
+            "LEAN_CTX_HEADLESS": "1",
+            "LEAN_CTX_MINIMAL": "1",
+            "LEAN_CTX_STATE_DIR": f"{data_root}/leanctx/proxy/state",
+            "XDG_DATA_HOME": f"{data_root}/leanctx",
+        }
+    )
+    raise SystemExit(0 if owned else 1)
+
 if kind == "claudex-proxy":
     legacy = len(arguments) == 9
-    port = arguments[2] if legacy else arguments[6] if len(arguments) == 13 else ""
+    port = (
+        arguments[2]
+        if legacy
+        else arguments[6]
+        if len(arguments) in (13, 15)
+        else ""
+    )
     upstream = (
-        arguments[4] if legacy else arguments[8] if len(arguments) == 13 else ""
+        arguments[4]
+        if legacy
+        else arguments[8]
+        if len(arguments) in (13, 15)
+        else ""
     )
     if legacy:
         expected_exec = " ".join([
@@ -1007,7 +1122,7 @@ if kind == "claudex-proxy":
             "--data-home",
             systemd_quote(data_root),
         ])
-    else:
+    elif len(arguments) == 13:
         expected_exec = " ".join([
             systemd_quote(f"{data_root}/bin/orichum-python"),
             "-I",
@@ -1018,6 +1133,25 @@ if kind == "claudex-proxy":
             port,
             "--upstream-port",
             upstream,
+            "--state-home",
+            systemd_quote(f"{data_root}/state"),
+            "--data-home",
+            systemd_quote(data_root),
+        ])
+    else:
+        catalog = arguments[10] if len(arguments) == 15 else ""
+        expected_exec = " ".join([
+            systemd_quote(f"{data_root}/bin/orichum-python"),
+            "-I",
+            "-B",
+            "-c",
+            systemd_quote(route_runner),
+            "--port",
+            port,
+            "--upstream-port",
+            upstream,
+            "--catalog-port",
+            catalog,
             "--state-home",
             systemd_quote(f"{data_root}/state"),
             "--data-home",
@@ -1093,8 +1227,29 @@ cliproxy_service_is_owned() {
   service_definition_is_owned "$1" "$2" cliproxy
 }
 
+leanctx_proxy_service_is_owned() {
+  service_definition_is_owned "$1" "$2" leanctx-proxy
+}
+
 claudex_proxy_service_is_owned() {
   service_definition_is_owned "$1" "$2" claudex-proxy either "${3:-}"
+}
+
+leanctx_proxy_service_identity() {
+  local platform="$1"
+  case "$platform" in
+    darwin)
+      printf '%s\t%s\t%s\n' \
+        "$HOME/Library/LaunchAgents/io.orichum.leanctx-proxy.plist" \
+        'io.orichum.leanctx-proxy' '-'
+      ;;
+    systemd)
+      printf '%s\t%s\t%s\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-leanctx-proxy.service" \
+        '-' 'orichum-leanctx-proxy.service'
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 claudex_proxy_service_identity() {
@@ -1944,6 +2099,7 @@ for relative in (
     "bin/orichum",
     "bin/orichum-route-proxy",
     "bin/orichum-statusline",
+    "bin/orichum-verify-leanctx-proxy",
     "controller/settings.json",
     "config/plugins.json",
 ):
@@ -1982,7 +2138,7 @@ PY
 }
 
 verified_routing_input_fingerprint() {
-  (($# >= 8)) || return 2
+  (($# >= 9)) || return 2
   local descriptor="$1"
   local cliproxy_artifact="$2"
   local claudex_artifact="$3"
@@ -1990,10 +2146,12 @@ verified_routing_input_fingerprint() {
   local cliproxy_port="$5"
   local claudex_port="$6"
   local route_port="$7"
-  shift 7
+  local leanctx_port="$8"
+  shift 8
   python3 -I -B - \
     "$descriptor" "$cliproxy_artifact" "$claudex_artifact" \
     "$route_runtime" "$cliproxy_port" "$claudex_port" "$route_port" \
+    "$leanctx_port" \
     "$@" <<'PY'
 import hashlib
 import os
@@ -2002,13 +2160,13 @@ import stat
 import sys
 
 descriptor = Path(sys.argv[1])
-values = sys.argv[2:8]
-paths = [Path(value) for value in sys.argv[8:]]
+values = sys.argv[2:9]
+paths = [Path(value) for value in sys.argv[9:]]
 uid = os.getuid()
 digest = hashlib.sha256()
 for label, value in zip(
     ("cliproxy", "claudex", "route-runtime", "cliproxy-port",
-     "claudex-port", "route-port"),
+     "claudex-port", "route-port", "leanctx-port"),
     values,
 ):
     digest.update(label.encode())
@@ -2040,12 +2198,13 @@ PY
 }
 
 verified_routing_runtime_artifact() {
-  (($# == 5)) || return 2
+  (($# == 6)) || return 2
   local data_root="$1"
   local config_root="$2"
   local cliproxy_service="$3"
-  local route_service="$4"
-  local descriptor="$5"
+  local leanctx_service="$4"
+  local route_service="$5"
+  local descriptor="$6"
   local active_claudex active_models active_effective
   active_claudex="$(model_config_file "$data_root" claudex.toml)" || return 1
   active_models="$(model_config_file "$data_root" models.json)" || return 1
@@ -2055,7 +2214,8 @@ verified_routing_runtime_artifact() {
   python3 -I -B - \
     "$descriptor" \
     "$data_root/cliproxy.yaml" \
-    "$cliproxy_service" "$route_service" \
+    "$data_root/leanctx/proxy/config/config.toml" \
+    "$cliproxy_service" "$leanctx_service" "$route_service" \
     "$active_claudex" "$active_models" "$active_effective" \
     "$data_root/claude-config/settings.json" \
     "$config_root/accounts.json" \
@@ -3426,19 +3586,120 @@ render_systemd_user_unit() {
     'WantedBy=default.target' >"$output_file"
 }
 
+render_leanctx_proxy_launch_agent() {
+  local output_file="$1"
+  local data_root="$2"
+  local port="${3:-13458}"
+  local escaped_binary escaped_port escaped_log escaped_home
+  local escaped_config escaped_state escaped_cache escaped_data
+  valid_service_port "$port" || return 1
+  escaped_binary="$(xml_escape "$data_root/bin/lean-ctx")"
+  escaped_port="$(xml_escape "--port=$port")"
+  escaped_log="$(xml_escape "$data_root/logs/leanctx-proxy.log")"
+  escaped_home="$(xml_escape "$HOME")"
+  escaped_config="$(xml_escape "$data_root/leanctx/proxy/config")"
+  escaped_state="$(xml_escape "$data_root/leanctx/proxy/state")"
+  escaped_cache="$(xml_escape "$data_root/leanctx/proxy/cache")"
+  escaped_data="$(xml_escape "$data_root/leanctx")"
+  printf '%s\n' \
+    '<?xml version="1.0" encoding="UTF-8"?>' \
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+    '<plist version="1.0">' \
+    '<dict>' \
+    '  <key>Label</key>' \
+    '  <string>io.orichum.leanctx-proxy</string>' \
+    '  <key>ProgramArguments</key>' \
+    '  <array>' \
+    "    <string>$escaped_binary</string>" \
+    '    <string>proxy</string>' \
+    '    <string>start</string>' \
+    "    <string>$escaped_port</string>" \
+    '  </array>' \
+    '  <key>RunAtLoad</key>' \
+    '  <true/>' \
+    '  <key>KeepAlive</key>' \
+    '  <true/>' \
+    '  <key>ProcessType</key>' \
+    '  <string>Background</string>' \
+    '  <key>Umask</key>' \
+    '  <integer>63</integer>' \
+    '  <key>StandardOutPath</key>' \
+    "  <string>$escaped_log</string>" \
+    '  <key>StandardErrorPath</key>' \
+    "  <string>$escaped_log</string>" \
+    '  <key>EnvironmentVariables</key>' \
+    '  <dict>' \
+    '    <key>HOME</key>' \
+    "    <string>$escaped_home</string>" \
+    '    <key>LEAN_CTX_CACHE_DIR</key>' \
+    "    <string>$escaped_cache</string>" \
+    '    <key>LEAN_CTX_CONFIG_DIR</key>' \
+    "    <string>$escaped_config</string>" \
+    '    <key>LEAN_CTX_DATA_DIR</key>' \
+    "    <string>$escaped_data/lean-ctx</string>" \
+    '    <key>LEAN_CTX_HEADLESS</key>' \
+    '    <string>1</string>' \
+    '    <key>LEAN_CTX_MINIMAL</key>' \
+    '    <string>1</string>' \
+    '    <key>LEAN_CTX_STATE_DIR</key>' \
+    "    <string>$escaped_state</string>" \
+    '    <key>XDG_DATA_HOME</key>' \
+    "    <string>$escaped_data</string>" \
+    '  </dict>' \
+    '</dict>' \
+    '</plist>' >"$output_file"
+}
+
+render_leanctx_proxy_systemd_user_unit() {
+  local output_file="$1"
+  local data_root="$2"
+  local port="${3:-13458}"
+  local executable
+  valid_service_port "$port" || return 1
+  executable="$(systemd_quote "$data_root/bin/lean-ctx")"
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=Orichum LeanCTX proxy' \
+    'Wants=orichum-cliproxy.service' \
+    'After=orichum-cliproxy.service' \
+    '' \
+    '[Service]' \
+    'Type=exec' \
+    "ExecStart=$executable proxy start --port=$port" \
+    'Restart=always' \
+    'RestartSec=3' \
+    "Environment=$(systemd_environment_quote "HOME=$HOME")" \
+    "Environment=$(systemd_environment_quote "LEAN_CTX_CACHE_DIR=$data_root/leanctx/proxy/cache")" \
+    "Environment=$(systemd_environment_quote "LEAN_CTX_CONFIG_DIR=$data_root/leanctx/proxy/config")" \
+    "Environment=$(systemd_environment_quote "LEAN_CTX_DATA_DIR=$data_root/leanctx/lean-ctx")" \
+    'Environment="LEAN_CTX_HEADLESS=1"' \
+    'Environment="LEAN_CTX_MINIMAL=1"' \
+    "Environment=$(systemd_environment_quote "LEAN_CTX_STATE_DIR=$data_root/leanctx/proxy/state")" \
+    "Environment=$(systemd_environment_quote "XDG_DATA_HOME=$data_root/leanctx")" \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
+    '' \
+    '[Install]' \
+    'WantedBy=default.target' >"$output_file"
+}
+
 render_claudex_proxy_launch_agent() {
   local output_file="$1"
   local data_root="$2"
   local workflow_root="$3"
   local port="${4:-13456}"
   local upstream_port="${5:-8317}"
-  local runtime_digest="${6:-}"
+  local catalog_port="${6:-8317}"
+  local runtime_digest="${7:-}"
   local route_runner
   local escaped_binary escaped_runner escaped_state escaped_data
   local escaped_log escaped_home escaped_workflow
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
-  [[ "$port" != "$upstream_port" ]] || return 1
+  valid_service_port "$catalog_port" || return 1
+  [[ "$port" != "$upstream_port" && \
+     "$port" != "$catalog_port" && \
+     "$upstream_port" != "$catalog_port" ]] || return 1
   [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
   route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
@@ -3468,6 +3729,8 @@ render_claudex_proxy_launch_agent() {
     "    <string>$port</string>" \
     '    <string>--upstream-port</string>' \
     "    <string>$upstream_port</string>" \
+    '    <string>--catalog-port</string>' \
+    "    <string>$catalog_port</string>" \
     '    <string>--state-home</string>' \
     "    <string>$escaped_state</string>" \
     '    <string>--data-home</string>' \
@@ -3506,12 +3769,16 @@ render_claudex_proxy_systemd_user_unit() {
   local workflow_root="$3"
   local port="${4:-13456}"
   local upstream_port="${5:-8317}"
-  local runtime_digest="${6:-}"
+  local catalog_port="${6:-8317}"
+  local runtime_digest="${7:-}"
   local route_runner executable runner state data home_environment
   local workflow_environment python_environment data_environment
   valid_service_port "$port" || return 1
   valid_service_port "$upstream_port" || return 1
-  [[ "$port" != "$upstream_port" ]] || return 1
+  valid_service_port "$catalog_port" || return 1
+  [[ "$port" != "$upstream_port" && \
+     "$port" != "$catalog_port" && \
+     "$upstream_port" != "$catalog_port" ]] || return 1
   [[ "$runtime_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   [[ "$workflow_root" == /* && -d "$workflow_root" ]] || return 1
   route_runner='import os,sys; sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); from integrations.common.route_proxy import main; raise SystemExit(main())'
@@ -3534,12 +3801,12 @@ render_claudex_proxy_systemd_user_unit() {
     "# Orichum route runtime SHA-256: $runtime_digest" \
     '[Unit]' \
     'Description=Orichum same-family recovery proxy' \
-    'Wants=orichum-cliproxy.service' \
-    'After=orichum-cliproxy.service' \
+    'Wants=orichum-leanctx-proxy.service' \
+    'After=orichum-leanctx-proxy.service' \
     '' \
     '[Service]' \
     'Type=exec' \
-    "ExecStart=$executable -I -B -c $runner --port $port --upstream-port $upstream_port --state-home $state --data-home $data" \
+    "ExecStart=$executable -I -B -c $runner --port $port --upstream-port $upstream_port --catalog-port $catalog_port --state-home $state --data-home $data" \
     'Restart=always' \
     'RestartSec=3' \
     "Environment=$home_environment" \

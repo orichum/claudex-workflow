@@ -59,6 +59,12 @@ class ProxyConfig:
     state_home: Path
     data_home: Path | None = None
     cooldown_seconds: int = 60
+    catalog_port: int | None = None
+
+    def selected_port(self, catalog: bool) -> int:
+        if catalog and self.catalog_port is not None:
+            return self.catalog_port
+        return self.upstream_port
 
 
 class RouteIndex:
@@ -291,11 +297,15 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         return
 
     def _upstream(
-        self, body: bytes
+        self,
+        body: bytes,
+        *,
+        catalog: bool = False,
     ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
         config: ProxyConfig = self.server.proxy_config
+        upstream_port = config.selected_port(catalog)
         connection = http.client.HTTPConnection(
-            "127.0.0.1", config.upstream_port, timeout=300
+            "127.0.0.1", upstream_port, timeout=300
         )
         headers = {
             key: value
@@ -308,7 +318,7 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         headers["Connection"] = "close"
         connected = None
         try:
-            connected = self._open_upstream_socket()
+            connected = self._open_upstream_socket(catalog=catalog)
             connection.sock = connected
             connected = None
             connection.request(
@@ -334,10 +344,11 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             return self._upstream(original)
         return connection, response
 
-    def _open_upstream_socket(self) -> socket.socket:
+    def _open_upstream_socket(self, *, catalog: bool = False) -> socket.socket:
         config: ProxyConfig = self.server.proxy_config
+        upstream_port = config.selected_port(catalog)
         connected = socket.create_connection(
-            ("127.0.0.1", config.upstream_port), timeout=3
+            ("127.0.0.1", upstream_port), timeout=3
         )
         try:
             connected.settimeout(300)
@@ -348,7 +359,11 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                 verifier = (
                     Path(__file__).resolve().parents[2]
                     / "bin"
-                    / "orichum-verify-cliproxy"
+                    / (
+                        "orichum-verify-cliproxy"
+                        if catalog
+                        else "orichum-verify-leanctx-proxy"
+                    )
                 )
 
                 def run_verifier(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -371,7 +386,7 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                     completed = run_verifier(
                         [
                             str(config.data_home),
-                            str(config.upstream_port),
+                            str(upstream_port),
                             str(current_client_port),
                         ]
                     )
@@ -393,7 +408,7 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                         [
                             "--connection",
                             str(service_pid),
-                            str(config.upstream_port),
+                            str(upstream_port),
                             str(current_client_port),
                         ]
                     )
@@ -402,7 +417,12 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                             "upstream connection is not Orichum-owned"
                         )
 
-                self.server.attestation_gate.verify(
+                gate = (
+                    self.server.catalog_attestation_gate
+                    if catalog
+                    else self.server.attestation_gate
+                )
+                gate.verify(
                     client_port, full_verify, verify_connection
                 )
             return connected
@@ -446,10 +466,16 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
     def _health(self) -> None:
         ready = False
         try:
-            connected = self._open_upstream_socket()
-            connected.close()
+            config: ProxyConfig = self.server.proxy_config
+            ports = {config.upstream_port, config.selected_port(True)}
+            for port in ports:
+                connected = socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=1,
+                )
+                connected.close()
             ready = True
-        except (RouteProxyError, TimeoutError, OSError):
+        except (TimeoutError, OSError):
             pass
         body = json.dumps(
             {
@@ -504,6 +530,13 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(CLIENT_READ_TIMEOUT_SECONDS)
         try:
             body = _read_request_body(self)
+            if (
+                self.command == "GET"
+                and urlsplit(_upstream_path(self.path)).path == "/v1/models"
+            ):
+                connection, response = self._upstream(body, catalog=True)
+                self._send_response(connection, response)
+                return
             primary = _request_model(body)
             supplied_session_id = self.headers.get("X-Orichum-Session-ID")
             session_id = (
@@ -615,6 +648,9 @@ class RouteProxyServer(ThreadingHTTPServer):
         self.attestation_gate = AttestationGate(
             ATTESTATION_TTL_SECONDS
         )
+        self.catalog_attestation_gate = AttestationGate(
+            ATTESTATION_TTL_SECONDS
+        )
         self.request_slots = threading.BoundedSemaphore(
             MAX_CONCURRENT_REQUESTS
         )
@@ -652,10 +688,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="orichum-route-proxy")
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--upstream-port", required=True, type=int)
+    parser.add_argument("--catalog-port", type=int)
     parser.add_argument("--state-home", required=True, type=Path)
     parser.add_argument("--data-home", required=True, type=Path)
     arguments = parser.parse_args()
-    for port in (arguments.port, arguments.upstream_port):
+    for port in (
+        arguments.port,
+        arguments.upstream_port,
+        arguments.catalog_port or arguments.upstream_port,
+    ):
         if port < 1024 or port > 65535:
             raise SystemExit("ports must be between 1024 and 65535")
     server = RouteProxyServer(
@@ -664,6 +705,7 @@ def main() -> int:
             arguments.upstream_port,
             arguments.state_home,
             arguments.data_home,
+            catalog_port=arguments.catalog_port,
         ),
     )
     try:

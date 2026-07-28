@@ -41,6 +41,34 @@ def config_bytes() -> bytes:
     return _CONFIG.encode("utf-8")
 
 
+def proxy_config_bytes(
+    upstream_port: int,
+    proxy_port: int = 13458,
+) -> bytes:
+    """Return Orichum's cache-safe shared LeanCTX proxy configuration."""
+    for value in (upstream_port, proxy_port):
+        if type(value) is not int or not 1024 <= value <= 65535:
+            raise ValueError("LeanCTX proxy ports must be between 1024 and 65535")
+    if upstream_port == proxy_port:
+        raise ValueError("LeanCTX proxy ports must be distinct")
+    return (
+        'minimal_overhead = true\n'
+        'proxy_enabled = true\n'
+        f'proxy_port = {proxy_port}\n'
+        'proxy_require_token = false\n'
+        'update_check_disabled = true\n'
+        '\n'
+        '[proxy]\n'
+        f'anthropic_upstream = "http://127.0.0.1:{upstream_port}"\n'
+        'cache_align_relocate = false\n'
+        'cache_breakpoint = false\n'
+        'counterfactual_metering = false\n'
+        'effort = "off"\n'
+        'history_mode = "cache-aware"\n'
+        'live_compress = true\n'
+    ).encode("utf-8")
+
+
 def mcp_server(
     binary: Path,
     project_root: Path,

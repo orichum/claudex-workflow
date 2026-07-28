@@ -4,6 +4,29 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- One shared, loopback-only LeanCTX wire proxy now compresses eligible model
+  history and tool results after Orichum selects the session route.
+- `orichum leanctx stats` now separates per-session MCP savings from shared
+  wire-proxy request savings.
+
+### Changed
+
+- Model catalogue discovery bypasses LeanCTX and continues directly to
+  CLIProxyAPI; inference traffic uses the shared optimizer.
+- Concurrent sessions share the resident LeanCTX proxy while retaining private
+  Claudex translators and project-jailed LeanCTX MCP state.
+
+### Fixed
+
+- Bound the LeanCTX proxy ownership verifier into the attested route-runtime
+  digest so an altered verifier cannot be accepted as the installed runtime.
+- Route health checks no longer perform slow ownership attestations on the
+  health endpoint; inference sockets remain fail-closed and attested.
+- Runtime creation suppresses Python bytecode so the immutable installed
+  release remains content-verifiable.
+
 ## 0.1.0-rc.2 - 2026-07-28
 
 ### Added

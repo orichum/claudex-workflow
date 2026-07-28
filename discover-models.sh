@@ -15,10 +15,10 @@ discover_models_main_core() {
   local data_root generation_root candidate_dir models_file effective_file
   local config_file active_generation routing_file config_root
   local resolver_status
-  local cliproxy_port claudex_proxy_port route_proxy_port
+  local cliproxy_port claudex_proxy_port route_proxy_port leanctx_proxy_port
   data_root="$(validated_workflow_data_dir "$WORKFLOW_ROOT")" || return 1
   if ! IFS=$'\t' read -r \
-      cliproxy_port claudex_proxy_port route_proxy_port \
+      cliproxy_port claudex_proxy_port route_proxy_port leanctx_proxy_port \
       < <(read_service_ports "$data_root"); then
     print_model_discovery_instruction
     return 1

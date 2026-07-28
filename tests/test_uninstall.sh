@@ -99,17 +99,23 @@ render_services() {
       render_launch_agent \
         "$HOME/Library/LaunchAgents/io.orichum.cliproxy.plist" \
         "$data_root"
+      render_leanctx_proxy_launch_agent \
+        "$HOME/Library/LaunchAgents/io.orichum.leanctx-proxy.plist" \
+        "$data_root" 13458
       render_claudex_proxy_launch_agent \
         "$HOME/Library/LaunchAgents/io.orichum.route-proxy.plist" \
-        "$data_root" "$ROOT" 13456 8317 "$digest"
+        "$data_root" "$ROOT" 13456 13458 8317 "$digest"
     else
       install -d "$HOME/.config/systemd/user"
       render_systemd_user_unit \
         "$HOME/.config/systemd/user/orichum-cliproxy.service" \
         "$data_root"
+      render_leanctx_proxy_systemd_user_unit \
+        "$HOME/.config/systemd/user/orichum-leanctx-proxy.service" \
+        "$data_root" 13458
       render_claudex_proxy_systemd_user_unit \
         "$HOME/.config/systemd/user/orichum-route-proxy.service" \
-        "$data_root" "$ROOT" 13456 8317 "$digest"
+        "$data_root" "$ROOT" 13456 13458 8317 "$digest"
     fi
   )
 }
@@ -145,12 +151,18 @@ seed_installation() {
       "$home/Library/LaunchAgents/io.orichum.cliproxy.plist" \
       >"$loaded_root/io.orichum.cliproxy"
     printf '%s\n' \
+      "$home/Library/LaunchAgents/io.orichum.leanctx-proxy.plist" \
+      >"$loaded_root/io.orichum.leanctx-proxy"
+    printf '%s\n' \
       "$home/Library/LaunchAgents/io.orichum.route-proxy.plist" \
       >"$loaded_root/io.orichum.route-proxy"
   else
     printf '%s\n' \
       "$home/.config/systemd/user/orichum-cliproxy.service" \
       >"$loaded_root/orichum-cliproxy.service"
+    printf '%s\n' \
+      "$home/.config/systemd/user/orichum-leanctx-proxy.service" \
+      >"$loaded_root/orichum-leanctx-proxy.service"
     printf '%s\n' \
       "$home/.config/systemd/user/orichum-route-proxy.service" \
       >"$loaded_root/orichum-route-proxy.service"
@@ -205,12 +217,14 @@ for preserved in \
 done
 [[ -f "$darwin_root/config/projects.json" ]]
 for removed in \
-    bin python tools logs cliproxy.yaml cliproxy-management.key; do
+    bin python tools logs leanctx/proxy \
+    cliproxy.yaml cliproxy-management.key; do
   [[ ! -e "$darwin_root/data/$removed" && \
      ! -L "$darwin_root/data/$removed" ]]
 done
 [[ ! -e "$darwin_root/user-bin/orichum" ]]
 [[ ! -e "$darwin_root/home/Library/LaunchAgents/io.orichum.cliproxy.plist" ]]
+[[ ! -e "$darwin_root/home/Library/LaunchAgents/io.orichum.leanctx-proxy.plist" ]]
 [[ ! -e "$darwin_root/home/Library/LaunchAgents/io.orichum.route-proxy.plist" ]]
 [[ -f "$darwin_root/standalone-tool" ]]
 grep -Fq 'bootout' "$darwin_root/service.log"
@@ -228,9 +242,11 @@ run_uninstall Linux "$systemd_root" --purge
 [[ ! -e "$systemd_root/config" ]]
 [[ ! -e "$systemd_root/user-bin/orichum" ]]
 [[ ! -e "$systemd_root/home/.config/systemd/user/orichum-cliproxy.service" ]]
+[[ ! -e "$systemd_root/home/.config/systemd/user/orichum-leanctx-proxy.service" ]]
 [[ ! -e "$systemd_root/home/.config/systemd/user/orichum-route-proxy.service" ]]
 [[ -f "$systemd_root/standalone-tool" ]]
 grep -Fq 'stop orichum-cliproxy.service' "$systemd_root/service.log"
+grep -Fq 'stop orichum-leanctx-proxy.service' "$systemd_root/service.log"
 grep -Fq 'disable orichum-route-proxy.service' "$systemd_root/service.log"
 grep -Fq 'daemon-reload' "$systemd_root/service.log"
 

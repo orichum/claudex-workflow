@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -19,6 +20,27 @@ from integrations.common.session_config import _session_mcp_payload
 
 
 class LeanctxMemoryTests(unittest.TestCase):
+    def test_proxy_contract_is_cache_safe_and_routes_to_cliproxy(self) -> None:
+        config = tomllib.loads(
+            leanctx_contract.proxy_config_bytes(18317).decode("utf-8")
+        )
+
+        self.assertTrue(config["proxy_enabled"])
+        self.assertFalse(config["proxy_require_token"])
+        self.assertEqual(config["proxy_port"], 13458)
+        self.assertEqual(
+            config["proxy"]["anthropic_upstream"],
+            "http://127.0.0.1:18317",
+        )
+        self.assertEqual(config["proxy"]["history_mode"], "cache-aware")
+        self.assertTrue(config["proxy"]["live_compress"])
+        self.assertEqual(config["proxy"]["effort"], "off")
+        self.assertFalse(config["proxy"]["cache_breakpoint"])
+        self.assertFalse(config["proxy"]["cache_align_relocate"])
+        self.assertFalse(config["proxy"]["counterfactual_metering"])
+        self.assertNotIn("proxy_loopback_open", config)
+        self.assertNotIn("role_aggressiveness", config["proxy"])
+
     def test_contract_exposes_compact_project_memory(self) -> None:
         self.assertEqual(
             leanctx_contract.AUTO_APPROVED_TOOLS,

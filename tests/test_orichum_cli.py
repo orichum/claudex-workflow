@@ -16,7 +16,11 @@ from unittest import mock
 
 from integrations.common import orichum_cli
 from integrations.common import stack_bindings
-from integrations.common.leanctx_monitor import LeanctxRun, LeanctxStats
+from integrations.common.leanctx_monitor import (
+    LeanctxProxyStats,
+    LeanctxRun,
+    LeanctxStats,
+)
 from integrations.common.stack_bindings import (
     StackBindingError,
     StackBindings,
@@ -425,7 +429,7 @@ class OrichumCliTests(unittest.TestCase):
                 self.assertEqual((status, stdout, stderr), (0, "", ""))
                 run.assert_called_once_with(executable, expected)
 
-    def test_runtime_service_ports_accepts_only_three_distinct_ports(
+    def test_runtime_service_ports_accepts_only_four_distinct_ports(
         self,
     ) -> None:
         data_home = self.root / "data"
@@ -436,6 +440,7 @@ class OrichumCliTests(unittest.TestCase):
                 {
                     "claudexProxyPort": 13456,
                     "cliproxyPort": 8317,
+                    "leanctxProxyPort": 13458,
                     "routeProxyPort": 13457,
                 }
             ),
@@ -448,6 +453,7 @@ class OrichumCliTests(unittest.TestCase):
             {
                 "claudexProxyPort": 13456,
                 "cliproxyPort": 8317,
+                "leanctxProxyPort": 13458,
                 "routeProxyPort": 13457,
             },
         )
@@ -1203,14 +1209,15 @@ class OrichumCliTests(unittest.TestCase):
                 return_value={
                     "cliproxyPort": 8317,
                     "claudexProxyPort": 13457,
+                    "leanctxProxyPort": 13458,
                     "routeProxyPort": 13456,
                 },
             ),
             mock.patch.object(
                 orichum_cli,
                 "_reserve_session_claudex_port",
-                return_value=13458,
-            ),
+                return_value=13459,
+            ) as reserve,
             mock.patch.object(
                 orichum_cli,
                 "_materialize_session_claudex_config",
@@ -1261,6 +1268,10 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn(
             "mcp__leanctx__ctx_shell",
             command[allowed_index + 1].split(","),
+        )
+        self.assertEqual(
+            reserve.call_args.args[-1],
+            frozenset({8317, 13456, 13458}),
         )
         policy_index = command.index("--append-system-prompt-file")
         launch_policy = Path(command[policy_index + 1])
@@ -1580,10 +1591,28 @@ class OrichumCliTests(unittest.TestCase):
                     88.85,
                 ),
             ) as read,
+            mock.patch.object(
+                orichum_cli,
+                "_runtime_service_ports",
+                return_value={"leanctxProxyPort": 13458},
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "read_proxy_stats",
+                return_value=LeanctxProxyStats(
+                    requests_total=7,
+                    requests_compressed=5,
+                    bytes_original=48000,
+                    bytes_compressed=24000,
+                    saved_tokens=6000,
+                    savings_percent=50.0,
+                ),
+            ) as read_proxy,
         ):
             status, stdout, stderr = self.run_cli("leanctx", "stats")
 
         self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("Session MCP", stdout)
         self.assertIn("run.current", stdout)
         self.assertIn("SOURCE", stdout)
         self.assertIn("RETURNED", stdout)
@@ -1591,7 +1620,20 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("14,261", stdout)
         self.assertIn("12,671", stdout)
         self.assertIn("88.9%", stdout)
+        self.assertIn("Shared wire proxy", stdout)
+        self.assertIn("REQUESTS", stdout)
+        self.assertIn("COMPRESSED", stdout)
+        self.assertIn("EST. TOKENS", stdout)
+        self.assertIn("48,000", stdout)
+        self.assertIn("24,000", stdout)
+        self.assertIn("6,000", stdout)
+        self.assertIn("50.0%", stdout)
         read.assert_called_once_with(binary, selected)
+        read_proxy.assert_called_once_with(
+            binary,
+            self.root / "data",
+            13458,
+        )
 
     def test_leanctx_stats_does_not_invent_reduction_without_source_tokens(
         self,
@@ -1607,6 +1649,7 @@ class OrichumCliTests(unittest.TestCase):
         rendered = orichum_cli._leanctx_stats(
             run,
             LeanctxStats(2, 0, 0, 0, 0.0),
+            LeanctxProxyStats(0, 0, 0, 0, 0, 0.0),
         )
 
         row = next(

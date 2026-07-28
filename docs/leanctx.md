@@ -1,9 +1,16 @@
 # LeanCTX
 
-LeanCTX is Orichum's only code-context, code-intelligence, and durable
-project-knowledge layer. It provides compact reads, search, trees, expansion,
-repository graphs, impact analysis, callgraphs, task orientation, cross-session
-knowledge, anchored text patches, and compressed observational shell output.
+LeanCTX is Orichum's context optimizer on two complementary paths:
+
+- a project-jailed MCP for compact reads, search, graphs, durable knowledge,
+  anchored patches, and compressed shell output;
+- one shared loopback proxy that reduces the accumulated request sent to the
+  selected model on every turn.
+
+The MCP prevents large tool results from entering the conversation. The proxy
+handles context already present in the system prompt, history, and tool
+results. Both use the same managed LeanCTX binary, but session MCP state stays
+private while the wire proxy is shared across sessions.
 
 ## Fixed session contract
 
@@ -80,7 +87,10 @@ Specialists use the stricter LeanCTX surface; the implementation worker retains
 native edits and on-demand Bash but not a second raw repository-reading path.
 
 Orichum disables LeanCTX's autonomous gateway, global shell hooks, daemon,
-provider connectors, request proxy, and universal `ctx_call` surface.
+provider connectors, endpoint rewiring, and universal `ctx_call` surface. It
+starts the request proxy itself with a small, validated Orichum-owned
+configuration. Provider routing and credentials remain owned by the Orichum
+route proxy and CLIProxyAPI.
 
 ## Monitor savings
 
@@ -92,14 +102,19 @@ orichum leanctx watch
 orichum leanctx dashboard
 ```
 
-`stats` prints a snapshot, `watch` opens the terminal observatory, and
-`dashboard` starts the authenticated local web observatory in the foreground.
-Stop it with Ctrl+C.
+`stats` prints two measurements:
 
-The `SOURCE`, `RETURNED`, `SAVED`, and `REDUCTION` columns describe LeanCTX tool
-payloads recorded by the selected physical run only. They are not aggregate
-project totals, whole-session provider-token, or billing metrics. A dash means
-the called tools did not emit source-compression counters.
+- **Session MCP** shows source tokens processed and returned by the selected
+  physical run.
+- **Shared wire proxy** shows cumulative requests, bytes, and estimated tokens
+  removed across all Orichum sessions since that shared proxy started.
+
+`watch` opens the selected run's terminal observatory, and `dashboard` starts
+its authenticated local web observatory in the foreground. They use that run's
+private events together with LeanCTX's shared project ledger, so their aggregate
+savings can exceed the selected run's `stats` row. Stop either with Ctrl+C.
+They show MCP activity; use `stats` for the shared wire counters. A dash means
+the relevant path has not observed measurable input yet.
 
 Select a physical run when needed:
 
@@ -123,5 +138,6 @@ orichum doctor
 ```
 
 Doctor performs a real MCP handshake with the managed binary and verifies the
-eleven-tool contract against an isolated temporary fixture. It does not index
-your project or launch a model session.
+eleven-tool contract against an isolated temporary fixture. It also verifies
+the owned shared proxy, its loopback listener, and the complete route through
+CLIProxyAPI. It does not index your project or launch a model session.

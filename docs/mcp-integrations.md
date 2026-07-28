@@ -8,6 +8,9 @@ Only services relevant to the resolved project are included.
 | LeanCTX | Managed binary and project root are valid | Compact source context, graphs, task overview, durable knowledge, patches, and observational shell output |
 | MCP_DOCKER | Project context declares a Docker profile | Project-specific Jira and other live-service tools |
 
+The LeanCTX MCP is session-scoped. It is separate from Orichum's shared
+LeanCTX wire proxy, which optimizes model requests and does not expose tools.
+
 ## MCP_DOCKER profiles
 
 The parent-directory context selects the profile:

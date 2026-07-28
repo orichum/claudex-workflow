@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -49,6 +51,16 @@ class LeanctxStats:
     total_commands: int
     input_tokens: int
     output_tokens: int
+    saved_tokens: int
+    savings_percent: float
+
+
+@dataclass(frozen=True)
+class LeanctxProxyStats:
+    requests_total: int
+    requests_compressed: int
+    bytes_original: int
+    bytes_compressed: int
     saved_tokens: int
     savings_percent: float
 
@@ -406,6 +418,121 @@ def read_stats(
         output_tokens=output_tokens,
         saved_tokens=saved,
         savings_percent=percent,
+    )
+
+
+def proxy_environment(
+    data_root: Path,
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the isolated environment of Orichum's shared LeanCTX proxy."""
+    environment = dict(os.environ if base is None else base)
+    directory = data_root / "leanctx" / "proxy"
+    environment.update(
+        {
+            "LEAN_CTX_CACHE_DIR": str(directory / "cache"),
+            "LEAN_CTX_CONFIG_DIR": str(directory / "config"),
+            "LEAN_CTX_DATA_DIR": str(data_root / "leanctx" / "lean-ctx"),
+            "LEAN_CTX_HEADLESS": "1",
+            "LEAN_CTX_MINIMAL": "1",
+            "LEAN_CTX_STATE_DIR": str(directory / "state"),
+            "XDG_DATA_HOME": str(data_root / "leanctx"),
+        }
+    )
+    return environment
+
+
+def read_proxy_stats(
+    binary: Path,
+    data_root: Path,
+    port: int,
+) -> LeanctxProxyStats:
+    """Read authenticated wire-level statistics from the shared proxy."""
+    if type(port) is not int or not 1024 <= port <= 65535:
+        raise LeanctxMonitorError("LeanCTX proxy port is invalid")
+    try:
+        token_result = subprocess.run(
+            [str(binary), "proxy", "token"],
+            env=proxy_environment(data_root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=3,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise LeanctxMonitorError(
+            "LeanCTX proxy statistics are unavailable; run 'orichum doctor'"
+        ) from error
+    token = token_result.stdout.strip()
+    if (
+        token_result.returncode != 0
+        or not 32 <= len(token) <= 256
+        or re.fullmatch(r"[A-Za-z0-9._~-]+", token) is None
+    ):
+        raise LeanctxMonitorError(
+            "LeanCTX proxy statistics are unavailable; run 'orichum doctor'"
+        )
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request(
+            "GET",
+            "/status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response = connection.getresponse()
+        payload = response.read(1024 * 1024 + 1)
+    except (OSError, http.client.HTTPException) as error:
+        raise LeanctxMonitorError(
+            "LeanCTX proxy statistics are unavailable; run 'orichum doctor'"
+        ) from error
+    finally:
+        connection.close()
+    if response.status != 200 or len(payload) > 1024 * 1024:
+        raise LeanctxMonitorError(
+            "LeanCTX proxy statistics are unavailable; run 'orichum doctor'"
+        )
+    try:
+        document = json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+        raise LeanctxMonitorError("LeanCTX proxy statistics are invalid") from error
+    if not isinstance(document, dict):
+        raise LeanctxMonitorError("LeanCTX proxy statistics are invalid")
+    integer_fields = (
+        "requests_total",
+        "requests_compressed",
+        "bytes_original",
+        "bytes_compressed",
+        "tokens_saved",
+    )
+    values: dict[str, int] = {}
+    for field in integer_fields:
+        value = document.get(field)
+        if type(value) is not int or value < 0:
+            raise LeanctxMonitorError("LeanCTX proxy statistics are invalid")
+        values[field] = value
+    percent = document.get("compression_ratio_pct")
+    if isinstance(percent, str):
+        if re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", percent) is None:
+            raise LeanctxMonitorError("LeanCTX proxy statistics are invalid")
+        savings_percent = float(percent)
+    elif type(percent) in (int, float) and not isinstance(percent, bool):
+        savings_percent = float(percent)
+    else:
+        raise LeanctxMonitorError("LeanCTX proxy statistics are invalid")
+    if (
+        not math.isfinite(savings_percent)
+        or not 0.0 <= savings_percent <= 100.0
+    ):
+        raise LeanctxMonitorError("LeanCTX proxy statistics are invalid")
+    return LeanctxProxyStats(
+        requests_total=values["requests_total"],
+        requests_compressed=values["requests_compressed"],
+        bytes_original=values["bytes_original"],
+        bytes_compressed=values["bytes_compressed"],
+        saved_tokens=values["tokens_saved"],
+        savings_percent=savings_percent,
     )
 
 

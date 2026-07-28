@@ -87,14 +87,25 @@ flowchart LR
     CC["Claude Code"] --> X["Per-session Claudex translator"]
     X --> R["Shared Orichum route proxy"]
     B["Immutable route binding"] -.-> R
-    R --> P["Shared CLIProxyAPI"]
+    R --> L["Shared LeanCTX wire proxy"]
+    L --> P["Shared CLIProxyAPI"]
+    R -. "model catalogue only" .-> P
     P --> A["Selected named account"]
     A --> M["Provider model"]
 ```
 
 The route proxy selects the session's frozen primary route or one compatible
-fallback. On verified request protocols, Orichum keeps the deterministic
-LeanCTX surface resident and defers unrelated optional schemas.
+fallback before LeanCTX compresses the model request. The shared LeanCTX proxy
+then optimizes the growing system prompt, conversation history, and tool
+results while preserving live prompt-cache prefixes. Model-catalogue discovery
+bypasses LeanCTX because its local `/v1/models` endpoint is not an upstream
+catalogue; all inference traffic follows the solid path above.
+
+The route proxy also keeps the deterministic LeanCTX MCP surface resident on
+verified request protocols and defers unrelated optional schemas. The MCP and
+wire proxy are two complementary planes: one reduces tool output before it
+enters the conversation, while the other reduces the accumulated request sent
+on later turns.
 
 ## Deterministic tool routing
 
@@ -121,6 +132,8 @@ mutations retain Claude Code's normal approval behavior.
 ## Boundaries
 
 - Network services listen on loopback only.
+- CLIProxyAPI, LeanCTX, and the Orichum route proxy are shared services; each
+  active session has only its own Claudex translator and immutable state.
 - Session files and account registries are private and digest-bound.
 - LeanCTX shared data contains repo-aware graph and knowledge state; session
   configuration, events, and cache remain isolated.
