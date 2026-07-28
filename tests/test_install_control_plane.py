@@ -101,6 +101,135 @@ class InstallControlPlaneTests(unittest.TestCase):
             self._lock_fd(journal),
         )
 
+    def test_claude_settings_rollback_preserves_concurrent_replacement(self) -> None:
+        settings_root = self.root / "claude-config"
+        settings_root.mkdir(mode=0o700)
+        destination = settings_root / "settings.json"
+        expected = self.root / "managed-settings.json"
+        snapshot = self.root / "prior-settings.json"
+        destination.write_bytes(b'{"managed":true}\n')
+        expected.write_bytes(destination.read_bytes())
+        snapshot.write_bytes(b'{"before":true}\n')
+        for path in (destination, expected, snapshot):
+            path.chmod(0o600)
+
+        real_link = os.link
+
+        def publish_after_concurrent_replacement(
+            source,
+            target,
+            *,
+            src_dir_fd=None,
+            dst_dir_fd=None,
+            follow_symlinks=True,
+        ):
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=dst_dir_fd,
+            )
+            try:
+                os.write(descriptor, b'{"concurrent":true}\n')
+            finally:
+                os.close(descriptor)
+            return real_link(
+                source,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+
+        with mock.patch.object(
+            control_plane.os,
+            "link",
+            side_effect=publish_after_concurrent_replacement,
+        ):
+            with self.assertRaisesRegex(
+                InstallControlPlaneError,
+                "changed during rollback",
+            ):
+                control_plane.rollback_claude_settings(
+                    destination,
+                    expected,
+                    snapshot,
+                )
+
+        self.assertEqual(
+            destination.read_bytes(),
+            b'{"concurrent":true}\n',
+        )
+
+    def test_claude_settings_rollback_rejects_non_regular_destination(self) -> None:
+        settings_root = self.root / "claude-config"
+        settings_root.mkdir(mode=0o700)
+        destination = settings_root / "settings.json"
+        destination.mkdir(mode=0o700)
+        expected = self.root / "managed-settings.json"
+        snapshot = self.root / "prior-settings.json"
+        expected.write_bytes(b'{"managed":true}\n')
+        snapshot.write_bytes(b'{"before":true}\n')
+        for path in (expected, snapshot):
+            path.chmod(0o600)
+
+        with self.assertRaisesRegex(
+            InstallControlPlaneError,
+            "unsafe",
+        ):
+            control_plane.rollback_claude_settings(
+                destination,
+                expected,
+                snapshot,
+            )
+
+        self.assertTrue(destination.is_dir())
+
+    def test_claude_settings_rollback_rejects_replaced_parent(self) -> None:
+        settings_root = self.root / "claude-config"
+        settings_root.mkdir(mode=0o700)
+        destination = settings_root / "settings.json"
+        expected = self.root / "managed-settings.json"
+        snapshot = self.root / "prior-settings.json"
+        for path, payload in (
+            (destination, b'{"managed":true}\n'),
+            (expected, b'{"managed":true}\n'),
+            (snapshot, b'{"before":true}\n'),
+        ):
+            path.write_bytes(payload)
+            path.chmod(0o600)
+        original_root = self.root / "claude-config-original"
+        real_open = os.open
+
+        def replace_parent_before_open(path, flags, *args, **kwargs):
+            if Path(path) == settings_root:
+                settings_root.rename(original_root)
+                settings_root.mkdir(mode=0o700)
+                replacement = settings_root / "settings.json"
+                replacement.write_bytes(b'{"managed":true}\n')
+                replacement.chmod(0o600)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(
+            control_plane.os,
+            "open",
+            side_effect=replace_parent_before_open,
+        ):
+            with self.assertRaisesRegex(
+                InstallControlPlaneError,
+                "changed",
+            ):
+                control_plane.rollback_claude_settings(
+                    destination,
+                    expected,
+                    snapshot,
+                )
+
+        self.assertEqual(
+            (settings_root / "settings.json").read_bytes(),
+            b'{"managed":true}\n',
+        )
+
     def _assert_original_state(self) -> None:
         self.assertEqual(
             (self.installed / "model-stacks.json").read_bytes(),

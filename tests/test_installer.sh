@@ -21,6 +21,25 @@ exec 9<"$fixture/install.lock"
 WORKFLOW_LOCK_FD=9
 lifecycle_lock_path="$fixture/install.lock"
 
+path_home="$fixture/path-home"
+install -d -m 0700 "$path_home"
+(
+  export HOME="$path_home"
+  unset ORICHUM_HOME ORICHUM_DATA_HOME ORICHUM_CONFIG_HOME ORICHUM_CACHE_HOME
+  [[ "$(orichum_home_dir)" == "$path_home/.orichum" ]]
+  [[ "$(workflow_data_dir)" == "$path_home/.orichum" ]]
+  [[ "$(workflow_config_dir)" == "$path_home/.orichum/config" ]]
+  [[ "$(workflow_cache_dir)" == "$path_home/.orichum/cache" ]]
+)
+(
+  export HOME="$path_home"
+  export ORICHUM_HOME="$fixture/custom-home"
+  unset ORICHUM_DATA_HOME ORICHUM_CONFIG_HOME ORICHUM_CACHE_HOME
+  [[ "$(workflow_data_dir)" == "$fixture/custom-home" ]]
+  [[ "$(workflow_config_dir)" == "$fixture/custom-home/config" ]]
+  [[ "$(workflow_cache_dir)" == "$fixture/custom-home/cache" ]]
+)
+
 [[ "$(parse_install_mode)" == fast ]]
 [[ "$(parse_install_mode --upgrade)" == upgrade ]]
 [[ "$(parse_install_mode --uninstall)" == uninstall ]]
@@ -207,6 +226,17 @@ fast_routing_input="$(
 )"
 [[ "$precommit_routing_input" != "$committed_routing_input" ]]
 [[ "$committed_routing_input" == "$fast_routing_input" ]]
+missing_routing_error="$routing_fixture/missing-routing.stderr"
+if verified_routing_input_fingerprint \
+    "$routing_fixture/input-missing.descriptor" \
+    "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
+    "$(printf route | sha256_text)" \
+    8317 13457 13456 "$routing_fixture/absent.service" \
+    2>"$missing_routing_error"; then
+  printf 'missing routing input unexpectedly fingerprinted\n' >&2
+  exit 1
+fi
+[[ ! -s "$missing_routing_error" ]]
 
 python_data="$fixture/python-data"
 python_root="$python_data/python"
@@ -949,6 +979,7 @@ Path(sys.argv[2]).write_text(source[start:end], encoding="utf-8")
 PY
 # shellcheck source=/dev/null
 source "$rollback_library"
+rollback_consolidated_runtime_and_home() { return 0; }
 
 v1_config="$fixture/v1-config"
 v1_candidate="$fixture/v1-candidate"

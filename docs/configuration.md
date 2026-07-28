@@ -38,10 +38,13 @@ orichum models resolve
 orichum context validate
 ```
 
-Use `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and `ORICHUM_CACHE_HOME` to
-relocate the three roots. Each value must be an absolute path. Logical sessions
-always remain below the selected data root so the CLI and resident route
-service resolve the same state.
+All normal mutable files live below `~/.orichum`. Set `ORICHUM_HOME` to one
+absolute private path before installation when the complete layout must live
+elsewhere. `ORICHUM_CONFIG_HOME`, `ORICHUM_DATA_HOME`, and
+`ORICHUM_CACHE_HOME` are advanced, fine-grained overrides; using them splits
+the otherwise consolidated layout. Logical sessions always remain below the
+selected data root so the CLI and resident route service resolve the same
+state.
 
 Prefer `orichum stack configure`, `orichum provider account`, `orichum context`,
 and `orichum plugin` commands over direct JSON editing. They validate and save

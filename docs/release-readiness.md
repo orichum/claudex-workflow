@@ -1,13 +1,17 @@
 # Release readiness
 
-This report records the Orichum `0.1.0-rc.2` acceptance pass run on 2026-07-28.
-It separates live evidence from deterministic and isolated acceptance coverage.
+This report records the latest committed native release gates and the
+consolidated-home acceptance run against the current source on 2026-07-28. It
+separates observed live evidence from deterministic and isolated coverage.
 
 ## Verdict
 
-Orichum is release-candidate ready for macOS ARM64 and Linux AMD64. WSL2 with
-systemd shares the Linux service implementation and has deterministic contract
-coverage; it has not been presented here as a native WSL acceptance run.
+The current source passes local macOS ARM64 and isolated Ubuntu systemd-user
+acceptance. Its native macOS ARM64 and Linux AMD64 GitHub release gates must be
+rerun after this branch is committed and pushed; this report does not present
+an uncommitted working tree as published CI evidence. WSL2 with systemd shares
+the Linux service implementation and has deterministic contract coverage; it
+has not been presented here as a native WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -21,21 +25,37 @@ Two intentionally excluded cases are not release blockers:
 Both were excluded at the user's request. Account selection, priority,
 validation, and rollover behavior remain covered deterministically.
 
-The current native release gates passed against behavior commit `4c95e6b`:
+## Current consolidated-home acceptance
+
+| Boundary | Observed result |
+|---|---|
+| macOS ARM64 live install | Upgrade, automatic doctor, and a provider-backed prompt completed; the prompt returned `ORICHUM_FINAL_OK` |
+| macOS fast reconcile | A repeat install completed in 7 seconds, retained the same service processes, and kept one physical runtime release |
+| Runtime isolation | The launcher and owned services resolved to the verified physical release while mutable state remained under `~/.orichum` |
+| Linux/systemd | Fresh and repeat installs completed in an Ubuntu 24.04 systemd-user container; the repeat completed in 7 seconds with one runtime release and no traceback |
+| Provider-free install | CLIProxyAPI remained active, the route proxy remained intentionally inactive, and the installer reported the bounded `pending-provider-login` state |
+| Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
+| Local regression | Complete Python discovery plus installer, transaction, plugin, and smoke boundaries passed against the current source |
+
+## Latest committed native baseline
+
+The latest published native release gates passed against behavior commit
+`4c95e6b`:
 
 | Gate | Result |
 |---|---|
 | [macOS ARM64 acceptance](https://github.com/orichum/claudex-workflow/actions/runs/30307314541) | Pass |
 | [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/claudex-workflow/actions/runs/30307312049) | Pass |
 
-The release-version and documentation update after that commit does not change
-runtime behavior.
-
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
 independent licenses retained by integrated upstream tools.
 
-## Live acceptance
+## Provider-backed feature acceptance
+
+The following feature-level checks were run against the committed release
+baseline. The current consolidated-home run above revalidated installation,
+service ownership, health, and one provider-backed controller request.
 
 | Capability | Evidence | Result |
 |---|---|---|

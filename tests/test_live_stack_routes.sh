@@ -259,6 +259,13 @@ for identifier, name, provider, prefix, priority in (
         "oc-r-0000000000000004",
         50,
     ),
+    (
+        "oc-a-0000000000000005",
+        "Primary Antigravity",
+        "antigravity",
+        "oc-r-0000000000000005",
+        100,
+    ),
 ):
     accounts.append(
         {
@@ -278,7 +285,11 @@ for identifier, name, provider, prefix, priority in (
     credential.write_text(
         json.dumps(
             {
-                "type": "codex" if provider == "openai" else "claude",
+                "type": {
+                    "openai": "codex",
+                    "anthropic": "claude",
+                    "antigravity": "antigravity",
+                }[provider],
                 "account_id": identifier,
                 "prefix": prefix,
                 "priority": priority,
@@ -329,12 +340,15 @@ prefixes = (
     "oc-r-0000000000000002",
     "oc-r-0000000000000003",
     "oc-r-0000000000000004",
+    "oc-r-0000000000000005",
 )
 upstreams = (
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "claude-sonnet-5",
+    "claude-opus-5",
     "claude-opus-4-8",
+    "claude-opus-4-6-thinking",
 )
 
 
@@ -357,6 +371,10 @@ class Handler(BaseHTTPRequestHandler):
                     or (
                         prefix.endswith(("3", "4"))
                         and upstream.startswith("claude-")
+                    )
+                    or (
+                        prefix.endswith("5")
+                        and upstream == "claude-opus-4-6-thinking"
                     )
                 ],
             }
@@ -594,16 +612,16 @@ jq -e '
   .controller.fallbackAccount == "oc-a-0000000000000002" and
   .controller.fallbackUpstream ==
     "oc-r-0000000000000002/gpt-5.6-sol" and
-  ."architecture-advisor".model == "claude-opus-4-8" and
+  ."architecture-advisor".model == "claude-opus-5" and
   ."architecture-advisor".provider == "anthropic" and
   ."architecture-advisor".account == "oc-a-0000000000000003" and
   ."architecture-advisor".upstream ==
-    "oc-r-0000000000000003/claude-opus-4-8" and
+    "oc-r-0000000000000003/claude-opus-5" and
   ."architecture-advisor".fallbackProvider == "anthropic" and
   ."architecture-advisor".fallbackAccount ==
     "oc-a-0000000000000004" and
   ."architecture-advisor".fallbackUpstream ==
-    "oc-r-0000000000000004/claude-opus-4-8"
+    "oc-r-0000000000000004/claude-opus-5"
 ' "$fixture/routes.json" >/dev/null
 
 printf 'PASS: interactive stack configuration records exact live routes\n'

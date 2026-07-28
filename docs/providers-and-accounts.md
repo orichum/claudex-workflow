@@ -28,7 +28,7 @@ orichum provider login claude
 orichum provider login antigravity
 orichum provider login kimi
 orichum config paths
-ls ~/.local/share/orichum/auth
+ls ~/.orichum/auth
 ```
 
 Register the credential by filename, not by copying its contents:

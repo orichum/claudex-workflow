@@ -46,9 +46,22 @@ window remains `—`.
 The route snapshot is scoped to the current Orichum session. Concurrent
 sessions cannot replace one another's displayed account.
 
+## Inspect from the shell
+
+Use a logical session ID from `orichum sessions`:
+
+```bash
+orichum status oc-s-0123456789abcdef
+```
+
+Inside an Orichum-launched session, `orichum status` uses the current session
+ID automatically. The command reuses the same renderer and verified route
+state as the status line; context is shown as `—` because Claude Code supplies
+that value only while drawing its interface.
+
 ## Scope and privacy
 
-The status command runs locally and does not consume model tokens. It reads
+The status renderer runs locally and does not consume model tokens. It reads
 public session metadata, named-account labels, loopback route state, Claude
 Code's standard-input metrics, and the active account's private OAuth
 credential when a provider quota refresh is due. The credential is opened
@@ -59,6 +72,9 @@ files contain only percentages, account ID, and fetch time and use mode
 
 Orichum installs the setting only in its isolated Claude configuration.
 Launching `claude` normally does not enable or modify this status line.
+Interactive Orichum launches also set a bounded terminal title with the
+project and logical model. Claude Code's own terminal-title updates remain
+disabled, so the title stays associated with Orichum.
 
 If local state is temporarily unavailable, the display degrades to:
 
@@ -77,7 +93,7 @@ If the status line does not appear:
 3. Check that the installed Claude settings contain `statusLine`:
 
    ```bash
-   jq '.statusLine' ~/.local/share/orichum/claude-config/settings.json
+   jq '.statusLine' ~/.orichum/claude-config/settings.json
    ```
 
 4. Restart the session after accepting Claude Code's workspace-trust prompt.

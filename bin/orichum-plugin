@@ -11,7 +11,7 @@ WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 
-PLUGIN_MANIFEST="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}/plugins.json"
+PLUGIN_MANIFEST="$(workflow_config_dir)/plugins.json"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
 ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
 export ORICHUM_PYTHON
@@ -28,6 +28,11 @@ Usage:
   orichum plugin remove PLUGIN@MARKETPLACE
 USAGE
 }
+
+if [[ $# -eq 2 && "$2" =~ ^(-h|--help|help)$ ]]; then
+  usage
+  exit 0
+fi
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2

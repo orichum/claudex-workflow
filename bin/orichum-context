@@ -15,7 +15,7 @@ ORICHUM_PYTHON="$(resolve_orichum_python "$WORKFLOW_DATA_ROOT")"
 export ORICHUM_PYTHON
 ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
 export ORICHUM_PYTHON_VALIDATED
-CONFIG_ROOT="${ORICHUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/orichum}"
+CONFIG_ROOT="$(workflow_config_dir)"
 cd "$WORKFLOW_ROOT"
 exec "$ORICHUM_PYTHON" -B -m integrations.common.project_context context \
   --config "$CONFIG_ROOT/projects.json" \

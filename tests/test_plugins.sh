@@ -108,6 +108,12 @@ run_plugin() {
     "$checkout/bin/orichum-plugin" "$@"
 }
 
+help_output="$(run_plugin add --help)"
+grep -Fq \
+  'orichum plugin add PLUGIN@MARKETPLACE [--source MARKETPLACE_SOURCE]' \
+  <<<"$help_output"
+[[ ! -s "$fixture/fake-state/calls.log" ]]
+
 [[ "$(jq -c . "$checkout/config/plugins.json")" == \
   '{"schemaVersion":1,"marketplaces":[],"plugins":[]}' ]]
 

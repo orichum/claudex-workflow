@@ -33,6 +33,11 @@ for script in "$ROOT"/bin/orichum* "$ROOT/install.sh" "$ROOT/doctor.sh"; do
   [[ -x "$script" ]]
   bash -n "$script"
 done
+for status_health_contract in \
+    'Orichum status line is installed and isolated' \
+    'route telemetry endpoint is private and redacted'; do
+  rg -Fq "$status_health_contract" "$ROOT/doctor.sh"
+done
 rg -Fq \
   'Usage: ./install.sh [--upgrade | --uninstall [--purge]]' \
   "$ROOT/install.sh"

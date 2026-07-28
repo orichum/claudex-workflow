@@ -1,5 +1,26 @@
 # Architecture
 
+## Installed control plane
+
+```mermaid
+flowchart LR
+    R["Git checkout<br/>source and upgrades"] --> I["Transactional installer"]
+    I --> B["Allowlisted runtime release<br/>~/.orichum/runtime/releases/DIGEST"]
+    I --> C["Atomic current pointer"]
+    C -. "resolves to" .-> B
+    B --> L["~/.local/bin/orichum"]
+    B --> S["Owned loopback services"]
+    H["~/.orichum<br/>config, auth, sessions, LeanCTX, logs"] --> L
+    H --> S
+```
+
+The repository is an installation source, not the live runtime. The installer
+copies only the declared runtime payload into a content-addressed real
+directory, verifies its manifest, and switches the current pointer atomically.
+The launcher and resident services bind to that physical release. User-edited
+configuration, credentials, session state, and LeanCTX knowledge stay outside
+the release under the same `ORICHUM_HOME`, so an upgrade never replaces them.
+
 ## Session creation
 
 ```mermaid

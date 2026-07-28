@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-transaction.XXXXXX")"
+fixture="$(cd -P "$fixture" && pwd)"
 trap 'rm -rf -- "$fixture"' EXIT
 
 python3 - "$ROOT/install.sh" <<'PY'
@@ -107,6 +108,51 @@ printf 'partial install\n' >"$absent"
 restore_snapshot "$absent" "$snapshot" absent
 snapshot_path_matches "$absent" "$snapshot" absent
 [[ ! -e "$absent" && ! -L "$absent" ]]
+
+rollback_source="$(
+  sed -n '/^rollback_install_transaction() {/,/^}/p' "$ROOT/install.sh"
+)"
+eval "$rollback_source"
+rollback_consolidated_runtime_and_home() { return 0; }
+settings_root="$fixture/claude-config"
+settings_path="$settings_root/settings.json"
+snapshot_dir="$fixture/settings-snapshot"
+install -d -m 0700 "$settings_root" "$snapshot_dir"
+printf '{"before":true}\n' >"$settings_path"
+chmod 0644 "$settings_path"
+snapshot_path "$settings_path" "$snapshot_dir" claude-settings
+printf '{"managed":true}\n' >"$snapshot_dir/claude-settings-installed.data"
+chmod 0600 "$snapshot_dir/claude-settings-installed.data"
+cp "$snapshot_dir/claude-settings-installed.data" "$settings_path"
+chmod 0600 "$settings_path"
+
+WORKFLOW_ROOT="$ROOT"
+claude_settings_path="$settings_path"
+claude_settings_transaction_active=true
+claudex_proxy_runtime_mutated=false
+config_transaction_active=false
+python_transaction_active=false
+leanctx_transaction_active=false
+cliproxy_transaction_active=false
+endpoint_transaction_active=false
+claudex_proxy_transaction_active=false
+endpoint_lock_owned=false
+orichum_launcher_mutated=false
+install_state_transaction_active=false
+rollback_install_transaction
+cmp -s "$settings_path" "$snapshot_dir/claude-settings.data"
+[[ "$(path_mode "$settings_path")" == 644 ]]
+
+cp "$snapshot_dir/claude-settings-installed.data" "$settings_path"
+chmod 0600 "$settings_path"
+printf '{"concurrent":true}\n' >"$settings_path"
+if rollback_install_transaction 2>"$fixture/settings-drift.stderr"; then
+  printf 'settings rollback overwrote or accepted concurrent drift\n' >&2
+  exit 1
+fi
+rg -Fq 'Claude settings changed during rollback' \
+  "$fixture/settings-drift.stderr"
+[[ "$(<"$settings_path")" == '{"concurrent":true}' ]]
 
 install_state_dir="$fixture/install-state"
 install_state_snapshot="$fixture/install-state-snapshot"
@@ -239,6 +285,9 @@ restore_route = rollback.index("restore_claudex_proxy_service")
 restore_install_state = rollback.index(
     'restore_snapshot "$install_state_path"'
 )
+restore_consolidated_home = rollback.index(
+    "rollback_consolidated_runtime_and_home"
+)
 if not (
     stop_route
     < restore_installed_config
@@ -247,8 +296,43 @@ if not (
     < restore_endpoint
     < restore_route
     < restore_install_state
+    < restore_consolidated_home
 ):
     raise SystemExit("combined service rollback dependency order is unsafe")
+python_rollback_start = source.index("rollback_python_activation()")
+python_rollback_end = source.index(
+    "\n}\nrollback_python_and_consolidated()", python_rollback_start
+)
+if "rollback_consolidated_runtime_and_home" in source[
+    python_rollback_start:python_rollback_end
+]:
+    raise SystemExit(
+        "Python rollback moves the consolidated home before service recovery"
+    )
+prior_stop_start = source.index("claudex_proxy_prior_runtime_safe_to_stop()")
+prior_stop_end = source.index("\n}", prior_stop_start)
+prior_stop = source[prior_stop_start:prior_stop_end]
+if (
+    "prior_route_data_root" not in prior_stop
+    or "prior_route_workflow_root" not in prior_stop
+):
+    raise SystemExit(
+        "route migration stop guard ignores the verified prior service roots"
+    )
+service_preflight_start = source.index(
+    "claudex_proxy_service_was_present=false"
+)
+service_preflight_end = source.index(
+    "claudex_proxy_manager_target_state=", service_preflight_start
+)
+service_preflight = source[service_preflight_start:service_preflight_end]
+if (
+    '[[ "$runtime_previous" != "-" ]]' not in service_preflight
+    or '"$runtime_previous"' not in service_preflight
+):
+    raise SystemExit(
+        "route upgrade preflight ignores the previously verified runtime"
+    )
 install_state_rollback = rollback[
     rollback.index('if [[ "${install_state_transaction_active:-false}"'):
 ]

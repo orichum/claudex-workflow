@@ -4,6 +4,31 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- Orichum now installs an allowlisted, content-addressed runtime under
+  `~/.orichum/runtime/releases` and activates it through an atomic current
+  pointer.
+- Existing XDG-based Orichum state is migrated transactionally into the
+  consolidated home and restored if installation fails.
+
+### Changed
+
+- Configuration, credentials, sessions, logs, caches, and LeanCTX knowledge
+  now live under one configurable `ORICHUM_HOME`, which defaults to
+  `~/.orichum`.
+- Launchers and owned services bind to a verified physical runtime release;
+  the Git checkout is used only as an installation and upgrade source.
+- Architecture, installation, configuration, troubleshooting, and CLI
+  documentation now describe the consolidated runtime and state layout.
+
+### Fixed
+
+- Provider-free installs no longer emit a routing-fingerprint traceback while
+  waiting for the first account login.
+- Nested context and plugin help is delegated to the helper that owns the
+  command, so it displays the real options instead of generic passthrough help.
+
 ## 0.1.0-rc.2 - 2026-07-28
 
 ### Fixed
