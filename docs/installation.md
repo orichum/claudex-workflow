@@ -22,7 +22,7 @@ an isolated, uv-managed CPython 3.14.x.
 ## Install
 
 ```bash
-git clone https://github.com/orichum/claudex-workflow.git orichum
+git clone https://github.com/orichum/orichum.git
 cd orichum
 ./install.sh
 ```

@@ -37,7 +37,7 @@ Orichum supports macOS, Linux with a systemd user manager, and WSL2 with
 systemd enabled.
 
 ```bash
-git clone https://github.com/orichum/claudex-workflow.git orichum
+git clone https://github.com/orichum/orichum.git
 cd orichum
 ./install.sh
 ```
