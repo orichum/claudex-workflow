@@ -118,18 +118,39 @@ Overview and knowledge completed successfully but currently emit zero source
 and reduction counters, so Orichum reports them as commands without inventing a
 savings percentage.
 
+### Shared wire-proxy acceptance
+
+The 2026-07-28 installed-chain test first sent a normal one-turn request. It
+passed through unchanged, as expected: Orichum does not enable free-prose or
+system-prompt rewriting, and LeanCTX preserves a fresh cache prefix.
+
+A second request carried a synthetic, non-sensitive Bash result through the
+real route proxy, shared LeanCTX proxy, CLIProxyAPI, and GPT model:
+
+| Request | Source bytes | Forwarded bytes | Saved bytes | Estimated tokens saved | Reduction |
+|---|---:|---:|---:|---:|---:|
+| Structured tool-result fallback | 3,919 | 2,909 | 1,010 | 252 | 25.8% |
+
+The model returned the expected response. Two concurrent Orichum sessions then
+completed through the same resident LeanCTX process. These values demonstrate
+the fallback behavior that the wire proxy adds; they are not a promise that
+every request will compress. `orichum leanctx stats` is the live source of
+truth for the installed machine.
+
 ## Local resource use
 
 At idle after all sessions exited:
 
 | Shared service | CPU | Resident memory |
 |---|---:|---:|
-| CLIProxyAPI | 0.0% | 68,144 KiB |
-| Orichum route proxy | 0.0% | 23,968 KiB |
-| Total shared resident footprint | 0.0% | 92,112 KiB (about 90 MiB) |
+| CLIProxyAPI | 0.0% | 21,120 KiB |
+| LeanCTX wire proxy | 0.0% | 19,296 KiB |
+| Orichum route proxy | 0.0% | 12,960 KiB |
+| Total shared resident footprint | 0.0% | 53,376 KiB (about 52 MiB) |
 
-No per-session Claudex translator or LeanCTX MCP process remained after the
-corresponding session ended. One-shot live session
+Exactly one shared LeanCTX proxy and no per-session Claudex translator remained
+after two concurrent one-shot sessions exited. LeanCTX MCP processes also end
+with their physical session. One-shot live session
 process trees peaked at roughly 355–380 MiB RSS in the sampled runs.
 
 The final in-place install/upgrade took 65.03 seconds on an Apple Silicon
@@ -144,8 +165,9 @@ The efficient daily-driver path is:
 3. use anchored reads only for edits;
 4. use LeanCTX graph tools for relationships and impact;
 5. use LeanCTX overview and knowledge for bounded durable context;
-6. delegate only when independent specialist work justifies its latency and
+6. let the shared wire proxy compress eligible accumulated fallback context;
+7. delegate only when independent specialist work justifies its latency and
    token cost.
 
-This preserves the strong controller and full worker output while avoiding
-duplicate memory, graph, proxy, and optimizer layers.
+This preserves the strong controller and full worker output while using one
+context engine on both the tool and wire paths.

@@ -18,6 +18,7 @@ from integrations.common.leanctx_monitor import (
     LeanctxRun,
     discover_runs,
     leanctx_environment,
+    read_proxy_stats,
     read_stats,
     select_run,
 )
@@ -526,6 +527,63 @@ class LeanctxMonitorTests(unittest.TestCase):
         stats = read_stats(self.binary, run)
 
         self.assertEqual(stats, leanctx_monitor.LeanctxStats(0, 0, 0, 0, 0.0))
+
+    def test_reads_authenticated_shared_proxy_statistics(self) -> None:
+        status = {
+            "bytes_compressed": 24000,
+            "bytes_original": 48000,
+            "compression_ratio_pct": "50.0",
+            "requests_compressed": 3,
+            "requests_total": 4,
+            "tokens_saved": 6000,
+        }
+        response = mock.Mock(
+            status=200,
+            read=mock.Mock(return_value=json.dumps(status).encode("utf-8")),
+        )
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with (
+            mock.patch(
+                "integrations.common.leanctx_monitor.subprocess.run",
+                return_value=mock.Mock(
+                    returncode=0,
+                    stdout="a" * 64 + "\n",
+                ),
+            ) as run,
+            mock.patch(
+                "integrations.common.leanctx_monitor.http.client.HTTPConnection",
+                return_value=connection,
+            ) as connect,
+        ):
+            observed = read_proxy_stats(
+                self.binary,
+                self.data_root,
+                13458,
+            )
+
+        self.assertEqual(
+            observed,
+            leanctx_monitor.LeanctxProxyStats(
+                requests_total=4,
+                requests_compressed=3,
+                bytes_original=48000,
+                bytes_compressed=24000,
+                saved_tokens=6000,
+                savings_percent=50.0,
+            ),
+        )
+        connect.assert_called_once_with("127.0.0.1", 13458, timeout=2)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/status",
+            headers={"Authorization": f"Bearer {'a' * 64}"},
+        )
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(self.binary), "proxy", "token"],
+        )
 
     def test_managed_binary_uses_only_the_orichum_data_directory(self) -> None:
         self.assertEqual(

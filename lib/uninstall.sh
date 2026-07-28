@@ -124,6 +124,11 @@ orichum_uninstall_service_identity() {
         "$HOME/Library/LaunchAgents/io.orichum.route-proxy.plist" \
         io.orichum.route-proxy -
       ;;
+    darwin:leanctx)
+      printf '%s\t%s\t%s\n' \
+        "$HOME/Library/LaunchAgents/io.orichum.leanctx-proxy.plist" \
+        io.orichum.leanctx-proxy -
+      ;;
     systemd:cliproxy)
       printf '%s\t%s\t%s\n' \
         "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-cliproxy.service" \
@@ -133,6 +138,11 @@ orichum_uninstall_service_identity() {
       printf '%s\t%s\t%s\n' \
         "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-route-proxy.service" \
         - orichum-route-proxy.service
+      ;;
+    systemd:leanctx)
+      printf '%s\t%s\t%s\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/orichum-leanctx-proxy.service" \
+        - orichum-leanctx-proxy.service
       ;;
     *) return 1 ;;
   esac
@@ -156,6 +166,9 @@ orichum_uninstall_preflight_service() {
       route)
         claudex_proxy_service_is_owned \
           "$service_file" "$data_root" "$workflow_root"
+        ;;
+      leanctx)
+        leanctx_proxy_service_is_owned "$service_file" "$data_root"
         ;;
       *) return 1 ;;
     esac || {
@@ -240,6 +253,7 @@ orichum_uninstall() {
   local user_bin_dir="${USER_BIN_DIR:-$HOME/.local/bin}"
   local home_root data_root config_root cache_root platform runtime_root
   local cliproxy_file cliproxy_label cliproxy_unit cliproxy_state
+  local leanctx_file leanctx_label leanctx_unit leanctx_state
   local route_file route_label route_unit route_state
   local launcher="$user_bin_dir/orichum"
   local systemd_reload=false
@@ -279,6 +293,8 @@ orichum_uninstall() {
     < <(orichum_uninstall_service_identity "$platform" cliproxy)
   IFS=$'\t' read -r route_file route_label route_unit \
     < <(orichum_uninstall_service_identity "$platform" route)
+  IFS=$'\t' read -r leanctx_file leanctx_label leanctx_unit \
+    < <(orichum_uninstall_service_identity "$platform" leanctx)
   runtime_root="$workflow_root"
   if [[ -L "$home_root/runtime/current" ]]; then
     runtime_root="$(
@@ -302,6 +318,9 @@ orichum_uninstall() {
   route_state="$(orichum_uninstall_preflight_service \
     "$platform" route "$route_file" "$route_label" \
     "$route_unit" "$data_root" "$runtime_root")" || return 1
+  leanctx_state="$(orichum_uninstall_preflight_service \
+    "$platform" leanctx "$leanctx_file" "$leanctx_label" \
+    "$leanctx_unit" "$data_root" "$runtime_root")" || return 1
   orichum_uninstall_preflight_runtime "$data_root" || {
     workflow_die "refusing unsafe Orichum runtime layout"
     return 1
@@ -320,6 +339,9 @@ orichum_uninstall() {
 
   orichum_uninstall_remove_service \
     "$platform" "$route_file" "$route_label" "$route_unit" "$route_state"
+  orichum_uninstall_remove_service \
+    "$platform" "$leanctx_file" "$leanctx_label" \
+    "$leanctx_unit" "$leanctx_state"
   orichum_uninstall_remove_service \
     "$platform" "$cliproxy_file" "$cliproxy_label" \
     "$cliproxy_unit" "$cliproxy_state"
@@ -352,6 +374,7 @@ orichum_uninstall() {
     "$home_root/runtime"
     "$data_root/cliproxy.yaml"
     "$data_root/cliproxy-management.key"
+    "$data_root/leanctx/proxy"
   )
   rm -rf -- "${runtime_paths[@]}"
   printf '%s\n' \

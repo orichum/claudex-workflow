@@ -17,11 +17,12 @@ export ORICHUM_PYTHON
 ORICHUM_PYTHON_VALIDATED="$ORICHUM_PYTHON"
 export ORICHUM_PYTHON_VALIDATED
 IFS=$'\t' read -r \
-  cliproxy_port claudex_port route_port \
+  cliproxy_port claudex_port route_port leanctx_port \
   < <(read_service_ports "$data_root")
 valid_service_port "$claudex_port"
 [[ "$claudex_port" != "$cliproxy_port" && \
-   "$claudex_port" != "$route_port" ]]
+   "$claudex_port" != "$route_port" && \
+   "$claudex_port" != "$leanctx_port" ]]
 
 case "$(uname -s)" in
   Darwin)
@@ -29,6 +30,9 @@ case "$(uname -s)" in
     clip_file="$HOME/Library/LaunchAgents/io.orichum.cliproxy.plist"
     clip_label=io.orichum.cliproxy
     clip_unit=-
+    leanctx_file="$HOME/Library/LaunchAgents/io.orichum.leanctx-proxy.plist"
+    leanctx_label=io.orichum.leanctx-proxy
+    leanctx_unit=-
     route_file="$HOME/Library/LaunchAgents/io.orichum.route-proxy.plist"
     route_label=io.orichum.route-proxy
     route_unit=-
@@ -39,6 +43,9 @@ case "$(uname -s)" in
     clip_file="$unit_root/orichum-cliproxy.service"
     clip_label=-
     clip_unit=orichum-cliproxy.service
+    leanctx_file="$unit_root/orichum-leanctx-proxy.service"
+    leanctx_label=-
+    leanctx_unit=orichum-leanctx-proxy.service
     route_file="$unit_root/orichum-route-proxy.service"
     route_label=-
     route_unit=orichum-route-proxy.service
@@ -94,10 +101,15 @@ verify_service \
   "$clip_file" cliproxy "$clip_label" "$clip_unit" "$cliproxy_port" &
 clip_verify_pid=$!
 verify_service \
+  "$leanctx_file" leanctx-proxy "$leanctx_label" "$leanctx_unit" \
+  "$leanctx_port" &
+leanctx_verify_pid=$!
+verify_service \
   "$route_file" claudex-proxy "$route_label" "$route_unit" "$route_port" &
 route_verify_pid=$!
 service_verification_ready=true
-for verify_pid in "$clip_verify_pid" "$route_verify_pid"; do
+for verify_pid in \
+    "$clip_verify_pid" "$leanctx_verify_pid" "$route_verify_pid"; do
   if ! wait "$verify_pid"; then
     service_verification_ready=false
   fi
@@ -108,6 +120,9 @@ temporary="$(mktemp "${TMPDIR:-/tmp}/orichum-models.XXXXXX")"
 curl -fsS --connect-timeout 1 --max-time 3 \
   "http://127.0.0.1:$cliproxy_port/v1/models" >"$temporary"
 cliproxy_models_response_is_ready "$temporary"
+curl -fsS --connect-timeout 1 --max-time 3 \
+  "http://127.0.0.1:$leanctx_port/health" | \
+  jq -e '.status == "ok"' >/dev/null
 curl -fsS --connect-timeout 1 --max-time 3 \
   "http://127.0.0.1:$route_port/health" | jq -e '
     .service == "orichum-route-proxy" and .ready == true

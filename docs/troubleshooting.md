@@ -50,6 +50,7 @@ Linux and WSL logs:
 
 ```bash
 journalctl --user -u orichum-cliproxy.service
+journalctl --user -u orichum-leanctx-proxy.service
 journalctl --user -u orichum-route-proxy.service
 ```
 
@@ -108,6 +109,12 @@ If `--all` shows `ATTACHED no`, reinstall and start a new physical session;
 existing session MCP files are immutable. If the run is attached but has no
 events, the model has not called a LeanCTX tool. Graph and impact indexes are
 built lazily, so an unused session correctly reports zero activity.
+
+`orichum leanctx watch` and `dashboard` display the selected session MCP, so
+they can remain quiet while native tools or external MCPs are in use. Run
+`orichum leanctx stats` to see both that session's MCP counters and the shared
+wire-proxy counters. If the shared request count does not increase after a new
+model turn, run `orichum doctor` and inspect the LeanCTX and route-proxy logs.
 
 If a graph or impact call fails, verify that Orichum was launched from the
 intended repository or configured parent. Start a new session from the narrower

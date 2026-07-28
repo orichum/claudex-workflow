@@ -123,9 +123,13 @@ routing_config="$routing_fixture/config"
 routing_generation="$routing_data/model-config/generation.test"
 routing_descriptor="$routing_fixture/runtime.descriptor"
 install -d -m 0700 \
-  "$routing_data/claude-config" "$routing_generation" "$routing_config"
+  "$routing_data/claude-config" "$routing_generation" "$routing_config" \
+  "$routing_data/leanctx/proxy/config"
 printf '%s\n' cliproxy.yaml >"$routing_data/cliproxy.yaml"
-for routing_file in cliproxy.service route-proxy.service; do
+printf '%s\n' leanctx-proxy.toml \
+  >"$routing_data/leanctx/proxy/config/config.toml"
+for routing_file in \
+    cliproxy.service leanctx-proxy.service route-proxy.service; do
   printf '%s\n' "$routing_file" >"$routing_fixture/$routing_file"
 done
 for routing_file in \
@@ -143,6 +147,7 @@ routing_artifact="$(
   verified_routing_runtime_artifact \
     "$routing_data" "$routing_config" \
     "$routing_fixture/cliproxy.service" \
+    "$routing_fixture/leanctx-proxy.service" \
     "$routing_fixture/route-proxy.service" \
     "$routing_descriptor"
 )"
@@ -152,6 +157,7 @@ changed_routing_artifact="$(
   verified_routing_runtime_artifact \
     "$routing_data" "$routing_config" \
     "$routing_fixture/cliproxy.service" \
+    "$routing_fixture/leanctx-proxy.service" \
     "$routing_fixture/route-proxy.service" \
     "$routing_descriptor"
 )"
@@ -163,7 +169,7 @@ routing_input="$(
     "$routing_fixture/input.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 \
+    8317 13457 13456 13458 \
     "$routing_config/projects.json" "$routing_source" \
     "$routing_data/cliproxy.yaml"
 )"
@@ -172,7 +178,7 @@ same_routing_input="$(
     "$routing_fixture/input-copy.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 \
+    8317 13457 13456 13458 \
     "$routing_config/projects.json" "$routing_source" \
     "$routing_data/cliproxy.yaml"
 )"
@@ -182,7 +188,7 @@ changed_routing_input="$(
     "$routing_fixture/input-changed.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf changed-route | sha256_text)" \
-    8317 13457 13456 \
+    8317 13457 13456 13458 \
     "$routing_config/projects.json" "$routing_source" \
     "$routing_data/cliproxy.yaml"
 )"
@@ -193,7 +199,7 @@ source_changed_routing_input="$(
     "$routing_fixture/input-source-changed.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 \
+    8317 13457 13456 13458 \
     "$routing_config/projects.json" "$routing_source" \
     "$routing_data/cliproxy.yaml"
 )"
@@ -208,21 +214,21 @@ precommit_routing_input="$(
     "$routing_fixture/input-precommit.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 "$candidate_models"
+    8317 13457 13456 13458 "$candidate_models"
 )"
 committed_routing_input="$(
   verified_routing_input_fingerprint \
     "$routing_fixture/input-committed.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 "$committed_models"
+    8317 13457 13456 13458 "$committed_models"
 )"
 fast_routing_input="$(
   verified_routing_input_fingerprint \
     "$routing_fixture/input-fast.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 "$committed_models"
+    8317 13457 13456 13458 "$committed_models"
 )"
 [[ "$precommit_routing_input" != "$committed_routing_input" ]]
 [[ "$committed_routing_input" == "$fast_routing_input" ]]
@@ -231,7 +237,7 @@ if verified_routing_input_fingerprint \
     "$routing_fixture/input-missing.descriptor" \
     "$(printf clip | sha256_text)" "$(printf claudex | sha256_text)" \
     "$(printf route | sha256_text)" \
-    8317 13457 13456 "$routing_fixture/absent.service" \
+    8317 13457 13456 13458 "$routing_fixture/absent.service" \
     2>"$missing_routing_error"; then
   printf 'missing routing input unexpectedly fingerprinted\n' >&2
   exit 1
@@ -1293,7 +1299,8 @@ for script in \
     install.sh lib/workflow.sh bin/orichum bin/orichum-context \
     bin/orichum-doctor bin/orichum-login \
     bin/orichum-plugin bin/orichum-route-proxy \
-    bin/orichum-runtime-ready bin/orichum-verify-cliproxy; do
+    bin/orichum-runtime-ready bin/orichum-verify-cliproxy \
+    bin/orichum-verify-leanctx-proxy; do
   bash -n "$ROOT/$script"
 done
 if rg -Fq 'anthropic_proxy.py' "$ROOT/install.sh"; then
@@ -1311,6 +1318,7 @@ install -d -m 0700 \
 cp "$ROOT/VERSION" "$runtime_root/VERSION"
 cp "$ROOT/bin/orichum" "$ROOT/bin/orichum-route-proxy" \
   "$ROOT/bin/orichum-statusline" \
+  "$ROOT/bin/orichum-verify-leanctx-proxy" \
   "$runtime_root/bin/"
 cp "$ROOT/lib/workflow.sh" "$runtime_root/lib/workflow.sh"
 cp "$ROOT/integrations/common/"*.py "$runtime_root/integrations/common/"
@@ -1354,21 +1362,35 @@ fourth_runtime_digest="$(
   printf 'status-line changes do not change runtime identity\n' >&2
   exit 1
 }
+printf '\n' >>"$runtime_root/bin/orichum-verify-leanctx-proxy"
+fifth_runtime_digest="$(
+  verified_route_runtime_digest \
+    "$runtime_root" "$runtime_python" "$runtime_python_version" \
+    "$fixture/runtime-fifth"
+)"
+[[ "$fourth_runtime_digest" != "$fifth_runtime_digest" ]] || {
+  printf 'LeanCTX verifier changes do not change runtime identity\n' >&2
+  exit 1
+}
 
 ports_root="$fixture/ports"
-write_service_ports "$ports_root" 18317 13456 13457
+write_service_ports "$ports_root" 18317 13456 13457 13458
 [[ "$(read_service_ports "$ports_root")" == \
-   $'18317\t13456\t13457' ]]
+   $'18317\t13456\t13457\t13458' ]]
 [[ "$(jq -r 'keys | @tsv' "$(service_ports_file "$ports_root")")" == \
-   $'claudexProxyPort\tcliproxyPort\trouteProxyPort' ]]
+   $'claudexProxyPort\tcliproxyPort\tleanctxProxyPort\trouteProxyPort' ]]
 [[ "$(path_mode "$(service_ports_file "$ports_root")")" == 600 ]]
+printf '{"claudexProxyPort":13456,"cliproxyPort":18317,"routeProxyPort":13457}\n' \
+  >"$(service_ports_file "$ports_root")"
+[[ "$(read_service_ports "$ports_root")" == \
+   $'18317\t13456\t13457\t13458' ]]
 printf '{"cliproxyPort":18318,"routeProxyPort":13458}\n' \
   >"$(service_ports_file "$ports_root")"
 if read_service_ports "$ports_root" >/dev/null 2>&1; then
   printf 'incomplete service port state was accepted\n' >&2
   exit 1
 fi
-if write_service_ports "$ports_root" 18317 18317 13457; then
+if write_service_ports "$ports_root" 18317 18317 13457 13458; then
   printf 'duplicate ports were accepted\n' >&2
   exit 1
 fi
@@ -1403,13 +1425,17 @@ data_root="$fixture/data"
 install -d -m 0700 \
   "$data_root/bin" "$data_root/state" "$data_root/logs"
 touch "$data_root/bin/cli-proxy-api" "$data_root/bin/orichum-route-proxy"
+touch "$data_root/bin/lean-ctx"
 chmod 0755 "$data_root/bin/cli-proxy-api" \
-  "$data_root/bin/orichum-route-proxy"
+  "$data_root/bin/orichum-route-proxy" "$data_root/bin/lean-ctx"
 render_launch_agent "$fixture/cliproxy.plist" "$data_root"
+render_leanctx_proxy_launch_agent \
+  "$fixture/leanctx-proxy.plist" "$data_root" 13458
 render_claudex_proxy_launch_agent \
-  "$fixture/route.plist" "$data_root" "$ROOT" 13457 18317 \
+  "$fixture/route.plist" "$data_root" "$ROOT" 13457 13458 18317 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cliproxy_service_is_owned "$fixture/cliproxy.plist" "$data_root"
+leanctx_proxy_service_is_owned "$fixture/leanctx-proxy.plist" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.plist" "$data_root" "$ROOT"
 cp "$fixture/route.plist" "$fixture/previous-route.plist"
 "$python_bin/python3.14" - "$fixture/previous-route.plist" <<'PY'
@@ -1440,10 +1466,13 @@ rg -Fq '<string>--data-home</string>' "$fixture/route.plist"
 [[ "$(route_service_runtime_digest "$fixture/route.plist")" == \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]
 render_systemd_user_unit "$fixture/cliproxy.service" "$data_root"
+render_leanctx_proxy_systemd_user_unit \
+  "$fixture/leanctx-proxy.service" "$data_root" 13458
 render_claudex_proxy_systemd_user_unit \
-  "$fixture/route.service" "$data_root" "$ROOT" 13457 18317 \
+  "$fixture/route.service" "$data_root" "$ROOT" 13457 13458 18317 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cliproxy_service_is_owned "$fixture/cliproxy.service" "$data_root"
+leanctx_proxy_service_is_owned "$fixture/leanctx-proxy.service" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.service" "$data_root" "$ROOT"
 awk '!/^Environment="ORICHUM_DATA_HOME=/' \
   "$fixture/route.service" >"$fixture/previous-route.service"
@@ -1462,7 +1491,11 @@ rg -Fq "Environment=\"ORICHUM_DATA_HOME=$data_root\"" \
   "$fixture/route.service"
 [[ "$(route_service_runtime_digest "$fixture/route.service")" == \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]
-rg -Fq 'Wants=orichum-cliproxy.service' "$fixture/route.service"
+rg -Fq 'Wants=orichum-leanctx-proxy.service' "$fixture/route.service"
+rg -Fq 'After=orichum-leanctx-proxy.service' "$fixture/route.service"
+rg -Fq 'Wants=orichum-cliproxy.service' "$fixture/leanctx-proxy.service"
+rg -Fq 'After=orichum-cliproxy.service' "$fixture/leanctx-proxy.service"
+rg -Fq -- '--catalog-port 18317' "$fixture/route.service"
 rg -Fq 'resolve_orichum_python' "$ROOT/bin/orichum-route-proxy"
 
 rg -Fq 'for launcher in orichum' "$ROOT/install.sh"
@@ -1471,6 +1504,9 @@ if rg -q 'for launcher in .*claudex-gpt' "$ROOT/install.sh"; then
   exit 1
 fi
 rg -Fq 'ORICHUM_ROUTE_PROXY_PORT' "$ROOT/install.sh"
+rg -Fq \
+  'workflow_python -I -B - \' \
+  "$ROOT/install.sh"
 rg -Fq 'preflight_claudex_translation_proxy' "$ROOT/install.sh"
 rg -Fq \
   'Claudex translation proxy failed isolated bind and catalogue preflight' \

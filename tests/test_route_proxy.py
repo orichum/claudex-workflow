@@ -105,6 +105,17 @@ class RecordingUpstream:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def do_GET(self) -> None:
+                owner.paths.append(self.path)
+                owner.session_headers.append(
+                    self.headers.get("X-Orichum-Session-ID")
+                )
+                status, body = owner.responses.pop(0)
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True
@@ -170,10 +181,19 @@ class ProxyHarness:
         *,
         cooldowns: Cooldowns | None = None,
         data_home: Path | None = None,
+        catalog_port: int | None = None,
     ):
+        config_arguments: dict[str, object] = {}
+        if catalog_port is not None:
+            config_arguments["catalog_port"] = catalog_port
         self.server = RouteProxyServer(
             ("127.0.0.1", 0),
-            ProxyConfig(upstream_port, Path("/unused"), data_home),
+            ProxyConfig(
+                upstream_port,
+                Path("/unused"),
+                data_home,
+                **config_arguments,
+            ),
             route_index=StaticRouteIndex(routes),
             cooldowns=cooldowns,
         )
@@ -241,16 +261,12 @@ class RouteProxyTests(unittest.TestCase):
     fallback = "oc-r-0000000000000002/gpt-5.6-sol"
 
     def test_health_is_not_ready_when_upstream_is_unavailable(self) -> None:
-        rejected = subprocess.CompletedProcess([], 1, stdout="")
-        with RecordingUpstream([]) as upstream:
-            with mock.patch(
-                "integrations.common.route_proxy.subprocess.run",
-                return_value=rejected,
-            ):
-                with ProxyHarness(
-                    upstream.port, {}, data_home=Path("/data")
-                ) as proxy:
-                    status, body = proxy.get("/health")
+        unavailable = socket.socket()
+        unavailable.bind(("127.0.0.1", 0))
+        unavailable_port = unavailable.getsockname()[1]
+        unavailable.close()
+        with ProxyHarness(unavailable_port, {}) as proxy:
+            status, body = proxy.get("/health")
         self.assertEqual(status, 503)
         self.assertEqual(
             json.loads(body),
@@ -267,6 +283,57 @@ class RouteProxyTests(unittest.TestCase):
                 status, body = proxy.get("/health")
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["ready"])
+
+    def test_health_checks_reachability_without_slow_ownership_attestation(
+        self,
+    ) -> None:
+        with (
+            RecordingUpstream([]) as upstream,
+            mock.patch(
+                "integrations.common.route_proxy.subprocess.run",
+                side_effect=AssertionError("health must not run a verifier"),
+            ),
+        ):
+            with ProxyHarness(
+                upstream.port,
+                {},
+                data_home=Path("/managed"),
+            ) as proxy:
+                status, body = proxy.get("/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ready"])
+
+    def test_health_requires_optimizer_and_catalogue(self) -> None:
+        unavailable = socket.socket()
+        unavailable.bind(("127.0.0.1", 0))
+        unavailable_port = unavailable.getsockname()[1]
+        unavailable.close()
+        with RecordingUpstream([]) as optimizer:
+            with ProxyHarness(
+                optimizer.port,
+                {},
+                catalog_port=unavailable_port,
+            ) as proxy:
+                status, body = proxy.get("/health")
+        self.assertEqual(status, 503)
+        self.assertFalse(json.loads(body)["ready"])
+
+    def test_model_catalogue_bypasses_optimizer(self) -> None:
+        with (
+            RecordingUpstream([]) as optimizer,
+            RecordingUpstream([(200, b'{"data":[{"id":"model"}]}')])
+            as catalogue,
+        ):
+            with ProxyHarness(
+                optimizer.port,
+                {},
+                catalog_port=catalogue.port,
+            ) as proxy:
+                status, body = proxy.get("/v1/models")
+
+        self.assertEqual((status, body), (200, b'{"data":[{"id":"model"}]}'))
+        self.assertEqual(optimizer.paths, [])
+        self.assertEqual(catalogue.paths, ["/v1/models"])
 
     def test_concurrent_attestations_share_one_successful_refresh(self) -> None:
         gate = AttestationGate(30)
@@ -434,6 +501,10 @@ class RouteProxyTests(unittest.TestCase):
 
         first_arguments = verifier.call_args_list[0].args[0]
         second_arguments = verifier.call_args_list[1].args[0]
+        self.assertEqual(
+            Path(first_arguments[0]).name,
+            "orichum-verify-leanctx-proxy",
+        )
         self.assertEqual(first_arguments[1:3], ["/data", str(upstream.port)])
         self.assertEqual(
             second_arguments[1:4],

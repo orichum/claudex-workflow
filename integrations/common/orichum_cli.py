@@ -546,6 +546,7 @@ def _leanctx_list(
 def _leanctx_stats(
     run: leanctx_monitor.LeanctxRun,
     stats: leanctx_monitor.LeanctxStats,
+    proxy: leanctx_monitor.LeanctxProxyStats,
 ) -> str:
     if stats.input_tokens:
         savings = Decimal(str(stats.savings_percent)).quantize(
@@ -555,7 +556,7 @@ def _leanctx_stats(
         reduction = f"{savings}%"
     else:
         reduction = "—"
-    return _render_table(
+    session = _render_table(
         (
             "RUN",
             "PROJECT",
@@ -577,6 +578,35 @@ def _leanctx_stats(
             ),
         ),
     )
+    wire_reduction = (
+        f"{Decimal(str(proxy.savings_percent)).quantize(
+            Decimal('0.1'),
+            rounding=ROUND_HALF_UP,
+        )}%"
+        if proxy.bytes_original
+        else "—"
+    )
+    wire = _render_table(
+        (
+            "REQUESTS",
+            "COMPRESSED",
+            "SOURCE BYTES",
+            "FORWARDED BYTES",
+            "EST. TOKENS",
+            "REDUCTION",
+        ),
+        (
+            (
+                f"{proxy.requests_total:,}",
+                f"{proxy.requests_compressed:,}",
+                f"{proxy.bytes_original:,}",
+                f"{proxy.bytes_compressed:,}",
+                f"{proxy.saved_tokens:,}",
+                wire_reduction,
+            ),
+        ),
+    )
+    return f"Session MCP\n{session}\nShared wire proxy\n{wire}"
 
 
 def _session_routes(
@@ -711,6 +741,7 @@ def _runtime_service_ports(paths: Mapping[str, Path]) -> dict[str, int]:
     expected = {
         "claudexProxyPort",
         "cliproxyPort",
+        "leanctxProxyPort",
         "routeProxyPort",
     }
     if not isinstance(document, dict) or set(document) != expected:
@@ -2097,6 +2128,7 @@ def _launch_session(
                 runtime_ports[name]
                 for name in (
                     "cliproxyPort",
+                    "leanctxProxyPort",
                     "routeProxyPort",
                 )
             ),
@@ -2554,7 +2586,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             binary = leanctx_monitor.managed_binary(paths["data"])
             if parsed.leanctx_command == "stats":
                 stats = leanctx_monitor.read_stats(binary, selected)
-                print(_leanctx_stats(selected, stats), end="")
+                ports = _runtime_service_ports(paths)
+                proxy_stats = leanctx_monitor.read_proxy_stats(
+                    binary,
+                    paths["data"],
+                    ports["leanctxProxyPort"],
+                )
+                print(
+                    _leanctx_stats(selected, stats, proxy_stats),
+                    end="",
+                )
                 return 0
             if parsed.leanctx_command == "watch":
                 return leanctx_monitor.run_watch(binary, selected)

@@ -34,7 +34,8 @@ The first run performs the complete installation. It:
 3. validates the focused configuration and controller plugin;
 4. installs the newest available CPython 3.14 patch privately;
 5. installs or upgrades CLIProxyAPI, Claudex, and LeanCTX;
-6. probes required CLIProxyAPI behavior and the exact bounded MCP surfaces;
+6. probes required CLIProxyAPI behavior, the exact bounded MCP surfaces, and
+   LeanCTX's isolated proxy configuration;
 7. installs or reconciles the shared loopback services;
 8. preserves valid configuration and authentication;
 9. runs `orichum doctor` and reports the final locations and ports once a
@@ -147,14 +148,17 @@ packages were created against the earlier installation contract.
 
 ## Services
 
-The shared resident services are CLIProxyAPI and the Orichum route proxy. Each
-active physical session also owns its Claudex translation proxy. Together,
-these are the three services on a request path.
+The shared resident services are CLIProxyAPI, the LeanCTX wire proxy, and the
+Orichum route proxy. Each active physical session owns only its Claudex
+translation proxy. All inference requests use the shared services; model
+catalogue discovery bypasses LeanCTX and queries CLIProxyAPI through the route
+proxy.
 
 On Linux and WSL:
 
 ```bash
 journalctl --user -u orichum-cliproxy.service
+journalctl --user -u orichum-leanctx-proxy.service
 journalctl --user -u orichum-route-proxy.service
 ```
 
@@ -168,8 +172,9 @@ orichum config paths
 The installer never changes the system Python, shell profiles, or another
 project's environment. Upgrade staging is transactional: an unsuccessful
 upgrade restores the prior managed binaries and service state. Orichum installs
-LeanCTX directly from its verified release asset; it never runs LeanCTX
-`wrap`, `setup`, `onboard`, `init`, or proxy commands.
+LeanCTX directly from its verified release asset and does not run its
+machine-wide `wrap`, `setup`, `onboard`, `init`, or `proxy enable` flows. It
+starts only the owned proxy process described above.
 
 ## Uninstall
 

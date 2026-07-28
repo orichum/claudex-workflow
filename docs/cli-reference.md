@@ -55,7 +55,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum plugin sync` / `orichum plugin update` | Reconcile or refresh declared plugins |
 | `orichum plugin remove PLUGIN@MARKETPLACE` | Uninstall and remove a declaration |
 | `orichum leanctx list [--limit N \| --all]` | List attached LeanCTX runs; include incompatible historical runs with `--all` |
-| `orichum leanctx stats [--run RUN]` | Show exact LeanCTX tool-payload reduction |
+| `orichum leanctx stats [--run RUN]` | Show session MCP and shared wire-proxy savings |
 | `orichum leanctx watch [--run RUN]` | Open LeanCTX's live terminal monitor |
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
 | `orichum doctor` | Validate local component ownership, configuration, protocols, and service health |
@@ -94,10 +94,12 @@ never crosses project boundaries and never substitutes an older active run.
 `list` shows up to 20 attached runs by default. Use `--limit N` to change that
 bound or `--all` to include every attached and historical incompatible run.
 
-`stats` compares source tokens processed by LeanCTX with tokens returned to the
-model for the selected physical run only. It does not report aggregate project
-totals, provider input, prompt-cache usage, reasoning, or model output. A dash
-means the called tools did not emit source-compression counters.
+`stats` has two sections. **Session MCP** compares source tokens processed by
+LeanCTX with tokens returned to the model for the selected physical run.
+**Shared wire proxy** reports cumulative request compression across all Orichum
+sessions since the shared proxy started. These are optimizer counters, not
+provider billing, prompt-cache, reasoning, or output-token totals. A dash means
+that path has not observed measurable input yet.
 
 `--port PORT` requests a specific loopback port. When omitted, Orichum selects
 the first available port starting at `3333`. `--open` accepts `browser`,
