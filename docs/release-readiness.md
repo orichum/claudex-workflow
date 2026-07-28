@@ -6,11 +6,12 @@ separates observed live evidence from deterministic and isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.2` runtime passes local macOS ARM64, isolated Ubuntu
-systemd-user, native macOS ARM64, and native Linux AMD64 acceptance. The native
-release gates passed against runtime behavior commit `d26c9ef`. WSL2 with
-systemd shares the Linux service implementation and has deterministic contract
-coverage; it has not been presented here as a native WSL acceptance run.
+The `0.1.0-rc.3` candidate passes local macOS ARM64, isolated Ubuntu
+systemd-user, and deterministic regression coverage. Its native macOS ARM64
+and Linux AMD64 release gates must be rerun after the release metadata is
+merged. WSL2 with systemd shares the Linux service implementation and has
+deterministic contract coverage; it has not been presented here as a native
+WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -36,9 +37,10 @@ validation, and rollover behavior remain covered deterministically.
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
 | Local regression | Complete Python discovery plus installer, transaction, plugin, and smoke boundaries passed against the current source |
 
-## Native release gates
+## Latest published native baseline
 
-Both manual release gates passed against runtime behavior commit `d26c9ef`:
+The latest published native release gates passed against the `0.1.0-rc.2`
+runtime behavior commit `d26c9ef`:
 
 | Gate | Result |
 |---|---|
