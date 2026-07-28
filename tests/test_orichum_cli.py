@@ -108,7 +108,7 @@ class OrichumCliTests(unittest.TestCase):
             orichum_cli.build_parser().parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.1\n")
+        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.2\n")
 
     def test_help_explains_top_level_commands(self) -> None:
         help_text = orichum_cli.build_parser().format_help()
@@ -267,8 +267,10 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(stderr, "")
         self.assertIn("architecture-advisor", stdout)
-        self.assertIn("claude-opus-4-8", stdout)
+        self.assertIn("claude-opus-5", stdout)
+        self.assertIn("claude-opus-4-6-thinking", stdout)
         self.assertIn("anthropic", stdout)
+        self.assertIn("antigravity", stdout)
         self.assertIn("Automatic within provider", stdout)
         self.assertNotIn("oc-a-", stdout)
         self.assertNotIn("oc-c-", stdout)

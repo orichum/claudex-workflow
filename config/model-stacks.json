@@ -20,10 +20,16 @@
         "anthropic": "claude-sonnet-5"
       }
     },
-    "claude-opus-4-8": {
+    "claude-opus-5": {
       "family": "claude",
       "routes": {
-        "anthropic": "claude-opus-4-8"
+        "anthropic": "claude-opus-5"
+      }
+    },
+    "claude-opus-4-6-thinking": {
+      "family": "claude",
+      "routes": {
+        "antigravity": "claude-opus-4-6-thinking"
       }
     }
   },
@@ -60,9 +66,14 @@
         ],
         "architecture-advisor": [
           {
-            "id": "oc-c-15e855e1e22ff2c1",
-            "model": "claude-opus-4-8",
+            "id": "oc-c-4288b15d583a3a48",
+            "model": "claude-opus-5",
             "providers": ["anthropic"]
+          },
+          {
+            "id": "oc-c-b2627d06146d4660",
+            "model": "claude-opus-4-6-thinking",
+            "providers": ["antigravity"]
           }
         ],
         "implementation-worker": [

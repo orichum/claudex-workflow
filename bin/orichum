@@ -25,7 +25,15 @@ case "${1:-}" in
   -h|--help|--version|config|context|models|stack|provider|plugin|leanctx|doctor|session|sessions|resume|fork|run)
     exec "${python_entrypoint[@]}" "$@"
     ;;
-  *)
+  "")
+    exec "${python_entrypoint[@]}" run --
+    ;;
+  -*)
     exec "${python_entrypoint[@]}" run -- "$@"
+    ;;
+  *)
+    printf "ERROR: unknown command '%s'; use 'orichum run -- ...' to forward arguments\n" \
+      "$1" >&2
+    exit 2
     ;;
 esac

@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
-[[ "$(<"$ROOT/VERSION")" == 0.1.0-rc.1 ]]
-rg -Fq '## 0.1.0-rc.1 - 2026-07-27' "$ROOT/CHANGELOG.md"
+[[ "$(<"$ROOT/VERSION")" == 0.1.0-rc.2 ]]
+rg -Fq '## 0.1.0-rc.2 - 2026-07-28' "$ROOT/CHANGELOG.md"
 rg -Fq 'orichum --version' "$ROOT/docs/cli-reference.md"
 rg -Fq '[Changelog](CHANGELOG.md)' "$ROOT/README.md"
 rg -Fq 'orichum sessions cleanup' \
@@ -25,7 +25,7 @@ IFS=$'\t' read -r cliproxy_port claudex_proxy_port route_proxy_port \
 render_claudex_config \
   "$fixture/claudex.toml" \
   gpt-5.6-sol gpt-5.6-terra claude-sonnet-5 gpt-5.6-sol \
-  gpt-5.6-terra claude-sonnet-5 claude-opus-4-8 \
+  gpt-5.6-terra claude-sonnet-5 claude-opus-5 \
   /usr/bin/true 8317 13456 13457
 rg -Fxq 'base_url = "http://127.0.0.1:13457"' "$fixture/claudex.toml"
 
@@ -144,7 +144,8 @@ models="$(
     "$ROOT/bin/orichum" models list
 )"
 rg -Fq 'gpt-5.6-sol' <<<"$models"
-rg -Fq 'claude-opus-4-8' <<<"$models"
+rg -Fq 'claude-opus-5' <<<"$models"
+rg -Fq 'claude-opus-4-6-thinking' <<<"$models"
 
 stacks="$(
   ORICHUM_CONFIG_HOME="$ROOT/config" \

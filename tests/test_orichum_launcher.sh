@@ -26,3 +26,22 @@ forwarded="$(
 
 [[ "$(tail -n 2 <<<"$forwarded")" == $'stack\nlist' ]]
 ! rg -Fxq -- 'run' <<<"$forwarded"
+
+forwarded_option="$(
+  ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" --resume session-id
+)"
+[[ "$(tail -n 4 <<<"$forwarded_option")" == \
+  $'run\n--\n--resume\nsession-id' ]]
+
+set +e
+unknown_output="$(
+  ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" graph hook-update "$ROOT" 2>&1
+)"
+unknown_status=$?
+set -e
+[[ "$unknown_status" -eq 2 ]]
+grep -Fq "unknown command 'graph'" <<<"$unknown_output"
+grep -Fq 'orichum run --' <<<"$unknown_output"
+! grep -Fxq 'run' <<<"$unknown_output"

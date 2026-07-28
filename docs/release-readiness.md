@@ -1,6 +1,6 @@
 # Release readiness
 
-This report records the Orichum `0.1.0-rc.1` acceptance pass run on 2026-07-27.
+This report records the Orichum `0.1.0-rc.2` acceptance pass run on 2026-07-28.
 It separates live evidence from deterministic and isolated acceptance coverage.
 
 ## Verdict
@@ -20,6 +20,16 @@ Two intentionally excluded cases are not release blockers:
 
 Both were excluded at the user's request. Account selection, priority,
 validation, and rollover behavior remain covered deterministically.
+
+The current native release gates passed against behavior commit `4c95e6b`:
+
+| Gate | Result |
+|---|---|
+| [macOS ARM64 acceptance](https://github.com/orichum/claudex-workflow/actions/runs/30307314541) | Pass |
+| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/claudex-workflow/actions/runs/30307312049) | Pass |
+
+The release-version and documentation update after that commit does not change
+runtime behavior.
 
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the

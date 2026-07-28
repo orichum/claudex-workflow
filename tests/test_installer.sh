@@ -1286,10 +1286,8 @@ cp "$ROOT/integrations/common/"*.py "$runtime_root/integrations/common/"
 cp -R "$ROOT/controller/plugin" "$runtime_root/controller/plugin"
 cp "$ROOT/controller/settings.json" "$runtime_root/controller/settings.json"
 cp "$ROOT/config/plugins.json" "$runtime_root/config/plugins.json"
-runtime_python="$(python3 -c \
-  'import pathlib,sys; print(pathlib.Path(sys.executable).resolve())')"
-runtime_python_version="$("$runtime_python" -c \
-  'import platform; print(platform.python_version())')"
+runtime_python="$python_bin/python3.14"
+runtime_python_version=3.14.6
 first_runtime_digest="$(
   verified_route_runtime_digest \
     "$runtime_root" "$runtime_python" "$runtime_python_version" \
@@ -1390,6 +1388,8 @@ rg -Fq "<string>$data_root/bin/orichum-python</string>" \
 rg -Fq '<key>ORICHUM_WORKFLOW_ROOT</key>' "$fixture/route.plist"
 rg -Fq "<string>$ROOT</string>" "$fixture/route.plist"
 rg -Fq '<key>ORICHUM_PYTHON</key>' "$fixture/route.plist"
+rg -Fq '<key>ORICHUM_DATA_HOME</key>' "$fixture/route.plist"
+rg -Fq "<string>$data_root</string>" "$fixture/route.plist"
 rg -Fq '<string>-I</string>' "$fixture/route.plist"
 rg -Fq '<string>-B</string>' "$fixture/route.plist"
 rg -Fq '<string>--data-home</string>' "$fixture/route.plist"
@@ -1409,6 +1409,8 @@ rg -Fq "$data_root/bin/orichum-python" "$fixture/route.service"
 rg -Fq "Environment=\"ORICHUM_WORKFLOW_ROOT=$ROOT\"" \
   "$fixture/route.service"
 rg -Fq "Environment=\"ORICHUM_PYTHON=$data_root/bin/orichum-python\"" \
+  "$fixture/route.service"
+rg -Fq "Environment=\"ORICHUM_DATA_HOME=$data_root\"" \
   "$fixture/route.service"
 [[ "$(route_service_runtime_digest "$fixture/route.service")" == \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]

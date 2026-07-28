@@ -4,6 +4,19 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.2 - 2026-07-28
+
+### Fixed
+
+- Unknown bare launcher commands now fail closed instead of being forwarded to
+  Claude Code as prompts.
+- Route-proxy services now retain the selected Orichum data root, including
+  relocated macOS, Linux, and CI installations.
+- Native acceptance validates the private managed Python and the current
+  route-proxy runtime rather than stale system or wrapper paths.
+- Fast repeat acceptance now requires routing reuse instead of unnecessary
+  repair.
+
 ### Changed
 
 - LeanCTX now owns live code context, repository graphs, task orientation, and

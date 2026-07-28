@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import integrations.common.orichum_cli as orichum_cli
+import integrations.common.orichum_sessions as orichum_sessions
 import integrations.common.session_config as session_config
 from integrations.common.model_routing import ROLES
 from integrations.common.account_registry import Account
@@ -163,6 +164,39 @@ class OrichumSessionTests(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             session.agents[ROLES[0]] = session.controller
+
+    def test_resolve_accepts_logical_or_claude_session_id(self) -> None:
+        session = self.create()
+        resolver = getattr(
+            orichum_sessions, "resolve_logical_session", None
+        )
+        self.assertIsNotNone(resolver)
+
+        self.assertEqual(resolver(self.state, session.id), session)
+        self.assertEqual(
+            resolver(self.state, session.claude_session_id),
+            session,
+        )
+
+    def test_resolve_rejects_unknown_or_duplicate_claude_session_id(
+        self,
+    ) -> None:
+        resolver = getattr(
+            orichum_sessions, "resolve_logical_session", None
+        )
+        self.assertIsNotNone(resolver)
+        unknown = "00000000-0000-4000-8000-000000000099"
+        with self.assertRaisesRegex(LogicalSessionError, "not found"):
+            resolver(self.state, unknown)
+
+        duplicate = "00000000-0000-4000-8000-000000000001"
+        with mock.patch.object(
+            orichum_sessions.uuid, "uuid4", return_value=duplicate
+        ):
+            self.create(1)
+            self.create(2)
+        with self.assertRaisesRegex(LogicalSessionError, "ambiguous"):
+            resolver(self.state, duplicate)
 
     def test_parent_is_recorded_without_reusing_claude_session_uuid(self) -> None:
         parent = self.create(1)

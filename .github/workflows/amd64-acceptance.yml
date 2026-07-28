@@ -174,7 +174,7 @@ jobs:
           done
           systemctl --user show orichum-route-proxy.service \
             --property=ExecStart --value |
-            rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-route-proxy"
+            rg -Fq "$ORICHUM_DATA_HOME/bin/orichum-python"
           route_port="$(jq -r .routeProxyPort "$ORICHUM_DATA_HOME/service-ports.json")"
           curl -fsS "http://127.0.0.1:$route_port/health" |
             jq -e '
@@ -186,7 +186,8 @@ jobs:
               ($ids | index("gpt-5.6-sol")) != null and
               ($ids | index("gpt-5.6-terra")) != null and
               ($ids | index("claude-sonnet-5")) != null and
-              ($ids | index("claude-opus-4-8")) != null
+              ($ids | index("claude-opus-5")) != null and
+              ($ids | index("claude-opus-4-6-thinking")) != null
             ' >/dev/null
           orichum doctor
 
@@ -231,7 +232,7 @@ jobs:
               "$RUNNER_TEMP/orichum-fast.log"
           done
           grep -Eq \
-            '^Routing[[:space:]]+repaired[[:space:]]*$' \
+            '^Routing[[:space:]]+reused[[:space:]]*$' \
             "$RUNNER_TEMP/orichum-fast.log"
           grep -Eq \
             '^Controller plugin[[:space:]]+reused[[:space:]]*$' \
