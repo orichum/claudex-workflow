@@ -1230,10 +1230,18 @@ if [[ "$leanctx_binary_changed" == true ]]; then
 else
   leanctx_candidate="$WORKFLOW_DATA_ROOT/bin/lean-ctx"
 fi
+provision_leanctx_embeddings \
+  "$leanctx_candidate" "$WORKFLOW_DATA_ROOT" "$installer_temp" || \
+  workflow_die "LeanCTX ONNX Runtime provisioning failed"
+leanctx_ort_dylib_path="$(
+  verified_leanctx_ort_dylib_path \
+    "$leanctx_candidate" "$WORKFLOW_DATA_ROOT" "$installer_temp"
+)" || workflow_die "LeanCTX managed ONNX Runtime verification failed"
 if [[ "$leanctx_decision" != reused ]]; then
   probe_leanctx_capabilities \
     "$leanctx_candidate" "$ORICHUM_PYTHON" "$WORKFLOW_ROOT" \
-    "$installer_temp" || \
+    "$installer_temp" "$leanctx_ort_dylib_path" \
+    "$WORKFLOW_DATA_ROOT/leanctx/cache" || \
     workflow_die "LeanCTX failed the bounded headless MCP capability probe"
 fi
 desired_cliproxy_config="$installer_temp/cliproxy.yaml"

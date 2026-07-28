@@ -238,6 +238,26 @@ rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"
+for leanctx_install_contract in \
+    'provision_leanctx_embeddings' \
+    'verified_leanctx_ort_dylib_path' \
+    '$WORKFLOW_DATA_ROOT/leanctx/cache'; do
+  rg -Fq "$leanctx_install_contract" "$ROOT/install.sh"
+done
+rg -Fq 'verified_leanctx_ort_dylib_path' "$ROOT/doctor.sh"
+rg -Fq '$data_root/leanctx/cache' "$ROOT/doctor.sh"
+leanctx_input_fingerprint_block="$(sed -n \
+  '/^leanctx_input_sha=/,/LeanCTX installer input fingerprint failed/p' \
+  "$ROOT/install.sh")"
+rg -Fq 'install.sh lib/workflow.sh' \
+  <<<"$leanctx_input_fingerprint_block"
+leanctx_probe_fingerprint_block="$(sed -n \
+  '/^leanctx_probe_sha=/,/LeanCTX probe fingerprint failed/p' \
+  "$ROOT/install.sh")"
+rg -Fq 'lib/workflow.sh integrations/common/leanctx_contract.py' \
+  <<<"$leanctx_probe_fingerprint_block"
+rg -Fq 'integrations/common/mcp_probe.py' \
+  <<<"$leanctx_probe_fingerprint_block"
 rg -Fq \
   'Display names appear in explicit account and route inspection output.' \
   "$ROOT/docs/providers-and-accounts.md"
@@ -311,6 +331,8 @@ for required_contract in \
     'tests/test_orichum_launcher.sh' \
     'Verify LeanCTX code-intelligence contract' \
     'probe_leanctx_capabilities' \
+    'verified_leanctx_ort_dylib_path' \
+    '$ORICHUM_DATA_HOME/leanctx/cache' \
     'name: Linux AMD64 acceptance' \
     'ubuntu:24.04' \
     '--privileged' \
@@ -370,6 +392,8 @@ for required_contract in \
     'Activate disposable multi-family routes' \
     'Verify LeanCTX code-intelligence contract' \
     'probe_leanctx_capabilities' \
+    'verified_leanctx_ort_dylib_path' \
+    '$ORICHUM_DATA_HOME/leanctx/cache' \
     'Verify fast repeat and explicit upgrade' \
     'repeat_started="$(python3 -c' \
     'test "$repeat_ms" -lt 15000' \
