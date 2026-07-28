@@ -38,6 +38,8 @@ profile; it passes the selected profile directly to that session's gateway.
 LeanCTX advertises exactly eleven tools. Read, search, tree, expansion, graph,
 impact, callgraph, knowledge, and overview are preapproved. `ctx_patch` and
 `ctx_shell` retain normal approval because they edit text or execute commands.
+`ctx_shell` remains resident for finite commands; native Bash is deferred for
+interactive, streaming, long-running, rejected, or unsupported cases.
 The universal `ctx_call` gateway and LeanCTX autonomy, daemon, proxy, provider,
 and global-hook features remain disabled.
 

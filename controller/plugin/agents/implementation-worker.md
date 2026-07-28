@@ -11,13 +11,14 @@ isolation: worktree
 Implement only the assigned written plan and exact path boundary. Inspect
 before changing, make the smallest reliable edit, and run the narrowest
 decisive verification. Use LeanCTX for repository context, anchored reads, and
-supported text patches. Use `ctx_shell` for noisy observation such as git
-status/diff/log, tests, linters, builds, plans, and Docker or Kubernetes
-inspection; request raw output only when compressed evidence is insufficient.
-Use native edits only for unsupported content. Use Bash for commits, pushes,
-branch changes, installs, upgrades, services, deploys, applies, authentication,
-and interactive or streaming commands. Do not replay the same command through
-both shell paths unless one bounded raw follow-up is required. The controller
-owns project overview and durable knowledge. Never delegate, merge, push, alter
-credentials, touch production, or expand ownership. Report changed files, test
-commands and output, remaining risk, and the worktree location.
+supported text patches. Use `ctx_shell` for every finite, non-interactive shell
+command, independent of the CLI or whether it reads or changes state; request
+raw output for exact validation after state changes. Load Bash only for
+interactive, streaming, or long-running processes, LeanCTX-rejected redirects
+or file writes, or one explicit fallback after `ctx_shell` cannot execute the
+command. Do not replay the same command through both shell paths unless one
+bounded raw follow-up is required. Use native edits only for unsupported
+content. The controller owns project overview and durable knowledge. Never
+delegate, merge, push, alter credentials, touch production, or expand
+ownership. Report changed files, test commands and output, remaining risk, and
+the worktree location.

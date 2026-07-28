@@ -16,14 +16,14 @@ Route tools directly without calling another model to choose:
   edits and creates.
 - Use native Edit or Write only when LeanCTX is unavailable or the file is
   binary or unsupported.
-- Use `ctx_shell` for observational commands whose output may be noisy: Git
-  status/diff/log/show, tests, linters, builds, Terraform plans, and
-  Docker/Kubernetes inspection.
-- Use `ctx_shell(raw=true)` when exact diagnostic output is required.
-- Use native Bash for commands that change state: Git commit/push/branch
-  operations, package installation or upgrades, service lifecycle, deploy or
-  infrastructure apply, authentication, and interactive or streaming
-  commands.
+- Use `ctx_shell` for every finite, non-interactive shell command, independent
+  of the CLI, provider, platform, or whether the command reads or changes
+  state.
+- Use `ctx_shell(raw=true)` when exact command output is required, including
+  decisive validation after state changes.
+- Load native Bash only for interactive, streaming, or long-running processes;
+  shell redirects or file writes rejected by LeanCTX; or one explicit fallback
+  after `ctx_shell` rejects or cannot execute the command.
 - Do not run the same command through both shell paths unless compressed
   output is insufficient; then make one bounded raw follow-up.
 - Use LeanCTX for repository relationships, call graphs, and impact analysis.

@@ -105,17 +105,18 @@ LeanCTX surface resident and defers unrelated optional schemas.
 | Read, search, tree, or exact expansion | LeanCTX |
 | Relationships, symbols, call paths, or change impact | LeanCTX graph tools |
 | Anchored supported text edit | `ctx_patch` |
-| Noisy observation: Git status/diff/log, tests, builds, plans, or container/cluster inspection | `ctx_shell` |
-| Exact observational follow-up | `ctx_shell(raw=true)` |
-| Commit/push/branch, install, service, deploy/apply, auth, or interactive/streaming command | Native `Bash` |
+| Any finite, non-interactive shell command | `ctx_shell` |
+| Finite command requiring exact output | `ctx_shell(raw=true)` |
+| Interactive, streaming, long-running, LeanCTX-rejected, or unsupported command | Native `Bash` on demand |
 | Unsupported or binary file operation | Native file tools |
 | Project live services | MCP_DOCKER |
 
-The controller does not ask the model to choose between equivalent shell
-paths: `ctx_shell` is the token-saving observation lane and native `Bash` is
-the mutation and process-control lane. It does not replay a command through
-both unless one bounded raw follow-up is needed. `ctx_patch`, `ctx_shell`, and
-external-service mutations retain Claude Code's normal approval behavior.
+The controller does not choose routes by enumerating CLIs or providers.
+`ctx_shell` is the resident finite-command lane; native `Bash` is deferred and
+loaded only for process control, a LeanCTX rejection, or unsupported shell
+behavior. Orichum does not replay a command through both paths unless one
+bounded raw follow-up is needed. `ctx_patch`, `ctx_shell`, and external-service
+mutations retain Claude Code's normal approval behavior.
 
 ## Boundaries
 

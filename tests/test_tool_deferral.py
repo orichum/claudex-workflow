@@ -37,7 +37,10 @@ class ToolDeferralTests(unittest.TestCase):
                 result = transform_request(
                     request(
                         model,
-                        [client_tool("Bash"), *client_tools(11)],
+                        [
+                            client_tool("mcp__leanctx__ctx_shell"),
+                            *client_tools(11),
+                        ],
                     )
                 )
                 self.assertTrue(result.transformed)
@@ -90,7 +93,7 @@ class ToolDeferralTests(unittest.TestCase):
         for malformed in malformed_entries:
             with self.subTest(malformed=malformed):
                 tools: list[object] = [
-                    client_tool("Bash"),
+                    client_tool("mcp__leanctx__ctx_shell"),
                     *client_tools(11),
                 ]
                 tools[1] = malformed
@@ -103,6 +106,7 @@ class ToolDeferralTests(unittest.TestCase):
         tools = [
             client_tool("mcp__leanctx__ctx_read"),
             client_tool("mcp__leanctx__ctx_patch"),
+            client_tool("mcp__leanctx__ctx_shell"),
             client_tool("Bash"),
             client_tool("Read"),
             client_tool("mcp__leanctx__ctx_graph"),
@@ -122,7 +126,11 @@ class ToolDeferralTests(unittest.TestCase):
             "defer_loading",
             by_name["mcp__leanctx__ctx_graph"],
         )
-        self.assertNotIn("defer_loading", by_name["Bash"])
+        self.assertNotIn(
+            "defer_loading",
+            by_name["mcp__leanctx__ctx_shell"],
+        )
+        self.assertIs(by_name["Bash"].get("defer_loading"), True)
         self.assertTrue(by_name["Read"]["defer_loading"])
         self.assertEqual(document["tools"][-1]["type"], TOOL_SEARCH_TYPE)
 
@@ -139,7 +147,10 @@ class ToolDeferralTests(unittest.TestCase):
         self.assertNotIn("defer_loading", server_tool)
 
     def test_cache_control_moves_to_last_resident_tool(self) -> None:
-        tools = [client_tool("Bash"), *client_tools(11)]
+        tools = [
+            client_tool("mcp__leanctx__ctx_shell"),
+            *client_tools(11),
+        ]
         tools[-1]["cache_control"] = {"type": "ephemeral"}
         document = json.loads(
             transform_request(request("gpt-5.6-sol", tools)).body
@@ -151,7 +162,10 @@ class ToolDeferralTests(unittest.TestCase):
         self.assertEqual(resident[-1]["cache_control"], {"type": "ephemeral"})
 
     def test_multiple_deferred_cache_controls_are_byte_preserving(self) -> None:
-        tools = [client_tool("Bash"), *client_tools(11)]
+        tools = [
+            client_tool("mcp__leanctx__ctx_shell"),
+            *client_tools(11),
+        ]
         tools[1]["cache_control"] = {"type": "ephemeral"}
         tools[2]["cache_control"] = {"type": "ephemeral"}
         body = request("gpt-5.6-sol", tools)
@@ -160,7 +174,10 @@ class ToolDeferralTests(unittest.TestCase):
         self.assertIs(result.body, body)
 
     def test_marked_resident_cache_control_is_byte_preserving(self) -> None:
-        tools = [client_tool("Bash"), *client_tools(11)]
+        tools = [
+            client_tool("mcp__leanctx__ctx_shell"),
+            *client_tools(11),
+        ]
         tools[0]["cache_control"] = {"type": "ephemeral"}
         tools[-1]["cache_control"] = {"type": "ephemeral"}
         body = request("gpt-5.6-sol", tools)
@@ -169,7 +186,10 @@ class ToolDeferralTests(unittest.TestCase):
         self.assertIs(result.body, body)
 
     def test_invalid_cache_control_is_byte_preserving(self) -> None:
-        tools = [client_tool("Bash"), *client_tools(11)]
+        tools = [
+            client_tool("mcp__leanctx__ctx_shell"),
+            *client_tools(11),
+        ]
         tools[-1]["cache_control"] = None
         body = request("gpt-5.6-sol", tools)
         result = transform_request(body)
@@ -180,7 +200,10 @@ class ToolDeferralTests(unittest.TestCase):
         first = transform_request(
             request(
                 "gpt-5.6-sol",
-                [client_tool("Bash"), *client_tools(11)],
+                [
+                    client_tool("mcp__leanctx__ctx_shell"),
+                    *client_tools(11),
+                ],
             )
         )
         second = transform_request(first.body)
