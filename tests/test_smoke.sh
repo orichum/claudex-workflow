@@ -257,6 +257,32 @@ done
   .hooks.SessionStart[0].hooks[0].timeout
 ' "$ROOT/controller/plugin/hooks/hooks.json")" == 6 ]]
 
+audited_workflows="$ROOT/controller/plugin/audited-workflows"
+orchestration_guard="$ROOT/controller/plugin/scripts/guard-orchestration.sh"
+[[ -f "$audited_workflows/investigate.js" ]]
+[[ -f "$audited_workflows/review.js" ]]
+[[ ! -e "$ROOT/controller/plugin/workflows" ]]
+
+allowed_workflow="$(
+  CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \
+    "$orchestration_guard" <<JSON
+{"tool_name":"Workflow","tool_input":{"scriptPath":"$audited_workflows/investigate.js","args":{"question":"q","scope":"s","highRisk":false}}}
+JSON
+)"
+[[ -z "$allowed_workflow" ]]
+
+for denied_workflow in \
+    '{"tool_name":"Workflow","tool_input":{"name":"orichum-controller:orichum-investigate","args":"q"}}' \
+    "{\"tool_name\":\"Workflow\",\"tool_input\":{\"scriptPath\":\"$ROOT/controller/plugin/workflows/investigate.js\",\"args\":{\"question\":\"q\",\"scope\":\"s\",\"highRisk\":false}}}"; do
+  denied_output="$(
+    CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \
+      "$orchestration_guard" <<<"$denied_workflow"
+  )"
+  jq -e '
+    .hookSpecificOutput.permissionDecision == "deny"
+  ' >/dev/null <<<"$denied_output"
+done
+
 for obsolete in \
   claudex-context claudex-doctor claudex-gpt \
   claudex-login claudex-models claudex-plugin \

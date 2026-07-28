@@ -2129,8 +2129,13 @@ def _launch_session(
         "--strict-mcp-config",
         "--allowedTools",
         ",".join(
-            f"mcp__leanctx__{tool}"
-            for tool in LEANCTX_AUTO_APPROVED_TOOLS
+            (
+                "Workflow",
+                *(
+                    f"mcp__leanctx__{tool}"
+                    for tool in LEANCTX_AUTO_APPROVED_TOOLS
+                ),
+            )
         ),
         "--effort",
         runtime["effort"],

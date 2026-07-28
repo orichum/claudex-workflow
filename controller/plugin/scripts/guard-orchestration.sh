@@ -45,10 +45,10 @@ case "$tool_name" in
   Workflow)
     script_path="$(jq -r '.tool_input.scriptPath // empty' <<<"$input")"
     case "$script_path" in
-      "$CLAUDE_PLUGIN_ROOT/workflows/investigate.js"|\
-      "$CLAUDE_PLUGIN_ROOT/workflows/review.js"|\
-      '${CLAUDE_PLUGIN_ROOT}/workflows/investigate.js'|\
-      '${CLAUDE_PLUGIN_ROOT}/workflows/review.js')
+      "$CLAUDE_PLUGIN_ROOT/audited-workflows/investigate.js"|\
+      "$CLAUDE_PLUGIN_ROOT/audited-workflows/review.js"|\
+      '${CLAUDE_PLUGIN_ROOT}/audited-workflows/investigate.js'|\
+      '${CLAUDE_PLUGIN_ROOT}/audited-workflows/review.js')
         exit 0
         ;;
       *)

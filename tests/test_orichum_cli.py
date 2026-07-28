@@ -1242,6 +1242,7 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(
             command[allowed_index + 1],
             ",".join((
+                "Workflow",
                 "mcp__leanctx__ctx_read",
                 "mcp__leanctx__ctx_search",
                 "mcp__leanctx__ctx_tree",
