@@ -2028,6 +2028,20 @@ class TerminalWizardIOTests(unittest.TestCase):
         with self.assertRaises(WizardCancelled):
             self._pty_choose(b"\x03")
 
+    def test_raw_renderer_returns_to_left_margin_for_each_line(self) -> None:
+        selected, output = self._pty_choose(
+            b"\r",
+            options=[Choice("first"), Choice("second")],
+        )
+
+        self.assertEqual(selected, 0)
+        self.assertIn(
+            "\x1b[HStep 2/5 · Model\r\n"
+            "> 1) first\r\n"
+            "  2) second\r\n",
+            output,
+        )
+
     def test_no_color_narrow_render_has_progress_and_full_review_model(
         self,
     ) -> None:

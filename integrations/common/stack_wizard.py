@@ -1369,7 +1369,7 @@ class TerminalWizardIO:
             "Enter keep · Esc back"
         )
         self._stdout.write(
-            "\x1b[2J\x1b[H" + "\n".join(lines) + "\n"
+            "\x1b[2J\x1b[H" + "\r\n".join(lines) + "\r\n"
         )
         self._stdout.flush()
 
