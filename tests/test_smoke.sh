@@ -208,11 +208,11 @@ if rg -Fq 'claude-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md || \
   printf 'documentation references model stacks that are not configured\n' >&2
   exit 1
 fi
-rg -Fq 'https://github.com/orichum/claudex-workflow.git' \
+rg -Fq 'https://github.com/orichum/orichum.git' \
   "$ROOT/README.md" "$ROOT/docs/installation.md"
-if rg -Fq 'https://github.com/arvind9981/claudex-workflow.git' \
+if rg -Fq 'https://github.com/orichum/claudex-workflow' \
     "$ROOT/README.md" "$ROOT/docs/installation.md"; then
-  printf 'documentation still uses the pre-organization repository URL\n' >&2
+  printf 'documentation still uses the previous repository URL\n' >&2
   exit 1
 fi
 rg -Fq 'macOS on Apple Silicon (native acceptance)' \

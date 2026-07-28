@@ -44,8 +44,8 @@ The latest published native release gates passed against behavior commit
 
 | Gate | Result |
 |---|---|
-| [macOS ARM64 acceptance](https://github.com/orichum/claudex-workflow/actions/runs/30307314541) | Pass |
-| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/claudex-workflow/actions/runs/30307312049) | Pass |
+| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30307314541) | Pass |
+| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30307312049) | Pass |
 
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
