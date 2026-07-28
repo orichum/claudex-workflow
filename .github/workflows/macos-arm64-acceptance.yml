@@ -74,8 +74,8 @@ jobs:
           assert sys.version_info[:2] == (3, 14)
           '
           jq -e '
-            keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
-            ([.[]] | unique | length) == 3
+            keys == ["claudexProxyPort", "cliproxyPort", "leanctxProxyPort", "routeProxyPort"] and
+            ([.[]] | unique | length) == 4
           ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.cliproxy" >/dev/null
           if launchctl print "gui/$(id -u)/io.orichum.route-proxy" \
@@ -148,8 +148,8 @@ jobs:
             --priority primary
           ./install.sh
           jq -e '
-            keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
-            ([.[]] | unique | length) == 3
+            keys == ["claudexProxyPort", "cliproxyPort", "leanctxProxyPort", "routeProxyPort"] and
+            ([.[]] | unique | length) == 4
           ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.cliproxy" >/dev/null
           launchctl print "gui/$(id -u)/io.orichum.route-proxy" >/dev/null
@@ -295,6 +295,7 @@ jobs:
             jq '{
               preferredClaudexProxyPort: .claudexProxyPort,
               cliproxyPort,
+              leanctxProxyPort,
               routeProxyPort
             }' "$ports_file"
             for field_and_path in \
@@ -306,6 +307,7 @@ jobs:
                 jq '{service, status, ready, object, modelCount: (.data | length)}'
             done
           fi
+          exit 0
 
       - name: Clean up launch agents
         if: always()

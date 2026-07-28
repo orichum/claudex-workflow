@@ -98,8 +98,8 @@ jobs:
           assert sys.version_info[:2] == (3, 14)
           '
           jq -e '
-            keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
-            ([.[]] | unique | length) == 3
+            keys == ["claudexProxyPort", "cliproxyPort", "leanctxProxyPort", "routeProxyPort"] and
+            ([.[]] | unique | length) == 4
           ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           test "$(systemctl --user is-active orichum-cliproxy.service)" = active
           test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
@@ -165,8 +165,8 @@ jobs:
             "AMD64 Claude" anthropic claude-amd64.json shared --priority primary
           ./install.sh
           jq -e '
-            keys == ["claudexProxyPort", "cliproxyPort", "routeProxyPort"] and
-            ([.[]] | unique | length) == 3
+            keys == ["claudexProxyPort", "cliproxyPort", "leanctxProxyPort", "routeProxyPort"] and
+            ([.[]] | unique | length) == 4
           ' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
           for unit in \
               orichum-cliproxy.service \
@@ -309,6 +309,7 @@ jobs:
             jq '{
               preferredClaudexProxyPort: .claudexProxyPort,
               cliproxyPort,
+              leanctxProxyPort,
               routeProxyPort
             }' "$ports_file"
             for field_and_path in \
@@ -320,6 +321,7 @@ jobs:
                 jq '{service, status, ready, object, modelCount: (.data | length)}'
             done
           fi
+          exit 0
 
       - name: Exercise WSL-compatible user-service contract
         shell: bash
@@ -411,9 +413,10 @@ jobs:
                 keys == [
                   "claudexProxyPort",
                   "cliproxyPort",
+                  "leanctxProxyPort",
                   "routeProxyPort"
                 ] and
-                ([.[]] | unique | length) == 3
+                ([.[]] | unique | length) == 4
               '\'' "$ORICHUM_DATA_HOME/service-ports.json" >/dev/null
               test "$(systemctl --user is-enabled orichum-cliproxy.service)" = enabled
               test "$(systemctl --user is-active orichum-cliproxy.service)" = active
