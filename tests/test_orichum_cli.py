@@ -33,6 +33,7 @@ class OrichumCliTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.environment = {
+            "ORICHUM_HOME": str(self.root / "orichum"),
             "ORICHUM_CONFIG_HOME": str(REPOSITORY_ROOT / "config"),
             "ORICHUM_DATA_HOME": str(self.root / "data"),
             "ORICHUM_CACHE_HOME": str(self.root / "cache"),
@@ -111,7 +112,7 @@ class OrichumCliTests(unittest.TestCase):
                 "cache": str(self.root / "cache"),
                 "config": str(REPOSITORY_ROOT / "config"),
                 "data": str(self.root / "data"),
-                "home": str(Path.home() / ".orichum"),
+                "home": str(self.root / "orichum"),
                 "state": str(self.root / "data" / "state"),
             },
         )
