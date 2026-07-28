@@ -1380,6 +1380,19 @@ render_claudex_proxy_launch_agent \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cliproxy_service_is_owned "$fixture/cliproxy.plist" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.plist" "$data_root" "$ROOT"
+cp "$fixture/route.plist" "$fixture/previous-route.plist"
+"$python_bin/python3.14" - "$fixture/previous-route.plist" <<'PY'
+import plistlib
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+del document["EnvironmentVariables"]["ORICHUM_DATA_HOME"]
+path.write_bytes(plistlib.dumps(document))
+PY
+claudex_proxy_service_is_owned \
+  "$fixture/previous-route.plist" "$data_root" "$ROOT"
 rg -Fq '<string>io.orichum.cliproxy</string>' "$fixture/cliproxy.plist"
 rg -Fq '<string>io.orichum.route-proxy</string>' "$fixture/route.plist"
 rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' "$fixture/route.plist"
@@ -1401,6 +1414,10 @@ render_claudex_proxy_systemd_user_unit \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cliproxy_service_is_owned "$fixture/cliproxy.service" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.service" "$data_root" "$ROOT"
+awk '!/^Environment="ORICHUM_DATA_HOME=/' \
+  "$fixture/route.service" >"$fixture/previous-route.service"
+claudex_proxy_service_is_owned \
+  "$fixture/previous-route.service" "$data_root" "$ROOT"
 rg -Fq 'Description=Orichum same-family recovery proxy' \
   "$fixture/route.service"
 rg -Fq 'Orichum route runtime SHA-256: aaaaaaaaaa' \
