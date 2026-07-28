@@ -27,6 +27,14 @@ from integrations.common.project_context import (
 )
 
 
+def jira(name: str) -> dict[str, str]:
+    return {
+        "url": f"https://{name}.atlassian.net",
+        "username": f"{name}@example.com",
+        "apiToken": f"{name}-token",
+    }
+
+
 class ProjectContextTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -46,11 +54,11 @@ class ProjectContextTests(unittest.TestCase):
             "contexts": [
                 {
                     "root": str(self.xebia),
-                    "dockerProfile": "xebia",
+                    "atlassian": jira("xebia"),
                 },
                 {
                     "root": str(self.complion),
-                    "dockerProfile": "realtime",
+                    "atlassian": jira("realtime"),
                 },
             ],
         }
@@ -80,12 +88,12 @@ class ProjectContextTests(unittest.TestCase):
         xebia = self.resolve(self.xebia / "repo")["route"]
         self.assertEqual(xebia["id"], "xebia")
         self.assertEqual(xebia["contextRootReal"], str(self.xebia))
-        self.assertEqual(xebia["dockerProfile"], "xebia")
+        self.assertIs(xebia["atlassianConfigured"], True)
 
         complion = self.resolve(self.complion / "nested" / "repo")["route"]
         self.assertEqual(complion["id"], "complion")
         self.assertEqual(complion["contextRootReal"], str(self.complion))
-        self.assertEqual(complion["dockerProfile"], "realtime")
+        self.assertIs(complion["atlassianConfigured"], True)
         self.assertIsNone(self.resolve(self.root / "xebia-old")["route"])
         self.assertIsNone(self.resolve(self.root / "elsewhere")["route"])
 
@@ -211,13 +219,13 @@ class StackContextAssignmentTests(unittest.TestCase):
             "contexts": [
                 {
                     "root": str(self.workspace),
-                    "dockerProfile": "dev",
+                    "atlassian": jira("dev"),
                     "modelStack": None,
                     "accountPools": ["shared"],
                 },
                 {
                     "root": str(self.other),
-                    "dockerProfile": "other",
+                    "atlassian": jira("other"),
                     "modelStack": "balanced",
                     "accountPools": ["shared"],
                 },
@@ -574,7 +582,7 @@ class ContextCommandTests(unittest.TestCase):
                     "schemaVersion": 1,
                     "providers": {},
                     "accountPools": {
-                        "docker-dev": {"providers": []},
+                        "work": {"providers": []},
                         "shared": {"providers": []},
                     },
                     "fallbackRoutes": {},
@@ -711,8 +719,6 @@ class ContextCommandTests(unittest.TestCase):
         added = self.run_focused_context(
             "add",
             str(self.workspace),
-            "--docker",
-            "docker-dev",
             "--github-account",
             "work-account",
         )
@@ -722,7 +728,7 @@ class ContextCommandTests(unittest.TestCase):
         self.assertEqual(document["schemaVersion"], 1)
         self.assertEqual(
             document["contexts"][0]["accountPools"],
-            ["docker-dev", "shared"],
+            ["shared"],
         )
         self.assertEqual(
             document["contexts"][0]["githubAccount"], "work-account"
@@ -733,14 +739,47 @@ class ContextCommandTests(unittest.TestCase):
             str(self.workspace),
             "--pool",
             "shared",
-            "--no-docker",
             "--no-github-account",
         )
         self.assertEqual(updated.returncode, 0, updated.stderr)
         document = json.loads(self.config_path.read_text(encoding="utf-8"))
-        self.assertIsNone(document["contexts"][0]["dockerProfile"])
+        self.assertIsNone(document["contexts"][0]["atlassian"])
         self.assertIsNone(document["contexts"][0]["githubAccount"])
         self.assertEqual(document["contexts"][0]["accountPools"], ["shared"])
+
+    def test_jira_command_configures_and_removes_project_credentials(self):
+        self.config_path.write_text(
+            '{"schemaVersion":1,"contexts":[]}\n', encoding="utf-8"
+        )
+        added = self.run_focused_context("add", str(self.workspace))
+        self.assertEqual(added.returncode, 0, added.stderr)
+        arguments = [
+            "--config",
+            str(self.config_path),
+            "--routing-config",
+            str(self.focused_routing_path),
+            "--providers-config",
+            str(self.providers_path),
+            "jira",
+            str(self.workspace),
+            "--url",
+            "https://work.atlassian.net",
+            "--username",
+            "work@example.com",
+        ]
+        with mock.patch.dict(os.environ, {"HOME": str(self.root)}), mock.patch(
+            "integrations.common.project_context.getpass.getpass",
+            return_value="work-token",
+        ):
+            self.assertEqual(project_context.context_main(arguments), 0)
+        configured = self.load_contexts()[0]["atlassian"]
+        self.assertEqual(configured, jira("work"))
+
+        removed = self.run_focused_context(
+            "jira", str(self.workspace), "--remove"
+        )
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIsNone(self.load_contexts()[0]["atlassian"])
 
 
 
@@ -751,7 +790,7 @@ class ContextCommandTests(unittest.TestCase):
             [
                 {
                     "root": str(self.workspace),
-                    "dockerProfile": "dev",
+                    "atlassian": jira("dev"),
                     "modelStack": None,
                 }
             ]
@@ -774,7 +813,7 @@ class ContextCommandTests(unittest.TestCase):
             [
                 {
                     "root": str(self.workspace),
-                    "dockerProfile": "dev",
+                    "atlassian": jira("dev"),
                     "modelStack": "missing",
                 }
             ]
@@ -794,7 +833,7 @@ class ContextCommandTests(unittest.TestCase):
             [
                 {
                     "root": str(self.workspace),
-                    "dockerProfile": "dev",
+                    "atlassian": jira("dev"),
                     "modelStack": "missing",
                 }
             ]
@@ -804,7 +843,7 @@ class ContextCommandTests(unittest.TestCase):
         rejected = self.run_context(
             "update",
             str(self.workspace),
-            "--docker",
+            "--github-account",
             "next",
         )
         self.assertEqual(rejected.returncode, 1)
@@ -819,11 +858,11 @@ class ContextCommandTests(unittest.TestCase):
         self.assertEqual(repaired.returncode, 0, repaired.stderr)
         self.assertEqual(self.load_contexts()[0]["modelStack"], "xebia")
 
-    def test_add_without_docker_omits_profile_and_renders_placeholder(self):
+    def test_add_without_jira_renders_placeholder(self):
         added = self.run_context("add", str(self.workspace))
 
         self.assertEqual(added.returncode, 0, added.stderr)
-        self.assertIsNone(self.load_contexts()[0]["dockerProfile"])
+        self.assertIsNone(self.load_contexts()[0]["atlassian"])
 
         listed = self.run_context("list")
         self.assertEqual(listed.returncode, 0, listed.stderr)
@@ -843,7 +882,7 @@ class ContextCommandTests(unittest.TestCase):
         listed = self.run_context("list")
 
         self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertIn("| PROJECT ROOT | MODEL STACK | MCP_DOCKER PROFILE", listed.stdout)
+        self.assertIn("| PROJECT ROOT | MODEL STACK | JIRA", listed.stdout)
         self.assertEqual(len(listed.stdout.splitlines()), 4)
 
 
@@ -882,7 +921,7 @@ class ContextCommandTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("| PROJECT ROOT", completed.stdout)
-        self.assertIn("| MCP_DOCKER PROFILE", completed.stdout)
+        self.assertIn("| JIRA", completed.stdout)
 
     def test_add_rejects_canonical_root_alias_overlap_before_writing(self):
         alias = self.root / "workspace-alias"
@@ -893,12 +932,12 @@ class ContextCommandTests(unittest.TestCase):
             [
                 {
                     "root": str(alias),
-                    "dockerProfile": "dev",
+                    "atlassian": jira("dev"),
                 }
             ]
         )
         original = self.config_path.read_text(encoding="utf-8")
-        rejected = self.run_context("add", str(nested), "--docker", "nested")
+        rejected = self.run_context("add", str(nested))
         self.assertNotEqual(rejected.returncode, 0)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), original)
 
@@ -912,12 +951,17 @@ class ContextCommandTests(unittest.TestCase):
                     [
                         {
                             "root": str(alias),
-                            "dockerProfile": "dev",
+                            "atlassian": jira("dev"),
                         }
                     ]
                 )
                 original = self.config_path.read_text(encoding="utf-8")
-                rejected = self.run_context("update", str(alias), "--docker", "next")
+                rejected = self.run_context(
+                    "update",
+                    str(alias),
+                    "--github-account",
+                    "next",
+                )
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertEqual(self.config_path.read_text(encoding="utf-8"), original)
 
@@ -934,7 +978,7 @@ class ContextCommandTests(unittest.TestCase):
                     [
                         {
                             "root": root,
-                            "dockerProfile": "dev",
+                            "atlassian": jira("dev"),
                         }
                     ]
                 )
@@ -949,7 +993,7 @@ class ContextCommandTests(unittest.TestCase):
             [
                 {
                     "root": "/",
-                    "dockerProfile": "dev",
+                    "atlassian": jira("dev"),
                 }
             ]
         )
@@ -966,11 +1010,11 @@ class StructuralConfigValidationTests(unittest.TestCase):
             "contexts": [
                 {
                     "root": "~/xebia",
-                    "dockerProfile": "xebia",
+                    "atlassian": jira("xebia"),
                 },
                 {
                     "root": "~/complion",
-                    "dockerProfile": "realtime",
+                    "atlassian": jira("realtime"),
                 },
             ],
         }

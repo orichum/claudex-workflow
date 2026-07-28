@@ -1175,7 +1175,7 @@ class OrichumCliTests(unittest.TestCase):
                     "route": {
                         "id": "xebia",
                         "contextRootReal": "/Users/example/xebia",
-                        "dockerProfile": "xebia",
+                        "atlassianConfigured": True,
                         "modelStack": None,
                         "accountPools": ["xebia", "shared"],
                         "githubAccount": "athevar-xebia",
@@ -1277,7 +1277,7 @@ class OrichumCliTests(unittest.TestCase):
         launch_policy = Path(command[policy_index + 1])
         self.assertEqual(launch_policy, run_dir / "launch-policy.md")
         binding_prompt = launch_policy.read_text(encoding="utf-8")
-        self.assertIn('MCP_DOCKER profile: "xebia"', binding_prompt)
+        self.assertIn("Jira configured: yes", binding_prompt)
         self.assertIn('GitHub account: "athevar-xebia"', binding_prompt)
         self.assertIn(
             "LeanCTX project memory follows the verified project root",
@@ -1287,8 +1287,7 @@ class OrichumCliTests(unittest.TestCase):
             "already bound to this physical session", binding_prompt
         )
         self.assertIn(
-            "Never activate, switch, create, update, or remove Docker MCP "
-            "profiles",
+            "bound to this physical session and project",
             binding_prompt,
         )
         self.assertNotIn("mcp__leanctx__*", command)

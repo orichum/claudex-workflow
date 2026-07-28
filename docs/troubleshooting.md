@@ -67,11 +67,24 @@ Set the expected identity with `orichum context update ROOT
 --github-account ACCOUNT`. New physical sessions receive an isolated
 `GH_CONFIG_DIR`; the global active account is not switched.
 
-## Missing MCP
+## Missing Jira tools
 
-MCPs are intentionally conditional. Check that the project context has the
-required Docker profile and that `orichum doctor` finds the managed LeanCTX
-binary.
+Atlassian is intentionally conditional. Check the project entry:
+
+```bash
+orichum context list
+orichum doctor
+```
+
+If the context shows no Jira URL, run `orichum context jira ROOT`. If the URL
+or username is wrong, rerun the same command; submit an empty token to retain
+the existing token. Start a fresh physical session afterward; existing session
+MCP files are immutable.
+
+Orichum does not read or switch Docker MCP profiles. A Docker Toolkit profile
+therefore cannot supply Jira tools to an Orichum session.
+
+## Missing LeanCTX MCP
 
 LeanCTX is included for every configured project, including a multi-repository
 parent such as `~/xebia`. Run `orichum leanctx list`; the default view contains
@@ -81,6 +94,19 @@ and start a new physical session; existing session MCP files are immutable.
 `orichum doctor` also verifies that the product-managed controller policy is
 current and that LeanCTX advertises exactly Orichum's eleven allowed tools.
 Orichum does not depend on a global LeanCTX setup or shell hook.
+
+## `ctx_shell` rejects a troubleshooting command
+
+New Orichum sessions disable LeanCTX's executable-name allowlist inside their
+private MCP. Arbitrary finite CLI names therefore need no manual registration.
+The user's global LeanCTX configuration is not changed.
+
+LeanCTX can still reject an unconditional dangerous pattern, a path-jail
+violation, file-writing shell syntax, or an unsupported execution mode. Use
+the deferred native Bash lane once for that bounded fallback; use it directly
+for interactive, streaming, or long-running commands. If an ordinary CLI name
+is rejected in a newly created session, rerun `./install.sh`, start a fresh
+physical session, and confirm `orichum doctor` passes.
 
 ## LeanCTX has no activity or graph results
 

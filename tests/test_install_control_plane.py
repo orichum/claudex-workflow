@@ -279,7 +279,7 @@ class InstallControlPlaneTests(unittest.TestCase):
             "contexts": [
                 {
                     "root": str(project_root),
-                    "dockerProfile": None,
+                    "atlassianAccount": "old",
                     "modelStack": None,
                     "accountPools": ["shared"],
                     "githubAccount": None,
@@ -300,7 +300,7 @@ class InstallControlPlaneTests(unittest.TestCase):
             activated["contexts"][0],
             {
                 "root": str(project_root),
-                "dockerProfile": None,
+                "atlassian": None,
                 "modelStack": None,
                 "accountPools": ["shared"],
                 "githubAccount": None,

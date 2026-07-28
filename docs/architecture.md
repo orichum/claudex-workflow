@@ -30,7 +30,7 @@ flowchart LR
     O --> S["Private session package"]
     S --> CC["Claude Code"]
     S --> L["LeanCTX context and memory"]
-    S --> D["Optional MCP_DOCKER profile"]
+    S -. "only when bound" .-> D["Per-session mcp-atlassian"]
 ```
 
 Orichum resolves the launch directory, selects the configured stack and named
@@ -47,8 +47,8 @@ flowchart LR
     A --> L
     L --> S["Live read, search, tree, graph, impact, callgraph"]
     C --> K["LeanCTX overview and durable knowledge"]
-    C --> D["Optional MCP_DOCKER"]
-    D --> X["Project-specific live services"]
+    C -. "only when bound" .-> D["mcp-atlassian"]
+    D --> X["Project Jira configuration"]
 ```
 
 LeanCTX is the only code-context and durable-memory engine. Source indexes and
@@ -62,12 +62,14 @@ the controller alone calls overview and durable knowledge. This keeps worker
 reads compressed without duplicating Orichum's orchestration or allowing
 concurrent memory writes.
 
-MCP_DOCKER is attached only when the resolved project declares a profile.
+`mcp-atlassian` is started only when the resolved project declares Jira
+credentials. The process reads that project's private URL, username, and token
+at startup. The session MCP file contains only the project root.
 
 ## Launch sequence
 
 1. Resolve the longest matching project context.
-2. Validate configuration and the optional Docker profile/GitHub identity.
+2. Validate configuration and the optional Atlassian/GitHub identities.
 3. Discover live provider/model routes and select eligible accounts.
 4. Freeze the logical session route and integrity digests.
 5. Materialize the controller plugin, strict MCP file, and private LeanCTX
@@ -120,14 +122,18 @@ on later turns.
 | Finite command requiring exact output | `ctx_shell(raw=true)` |
 | Interactive, streaming, long-running, LeanCTX-rejected, or unsupported command | Native `Bash` on demand |
 | Unsupported or binary file operation | Native file tools |
-| Project live services | MCP_DOCKER |
+| Jira reads and writes | Project-bound `mcp-atlassian` |
 
 The controller does not choose routes by enumerating CLIs or providers.
 `ctx_shell` is the resident finite-command lane; native `Bash` is deferred and
 loaded only for process control, a LeanCTX rejection, or unsupported shell
-behavior. Orichum does not replay a command through both paths unless one
-bounded raw follow-up is needed. `ctx_patch`, `ctx_shell`, and external-service
-mutations retain Claude Code's normal approval behavior.
+behavior. Orichum disables LeanCTX's executable-name allowlist only inside the
+private session MCP, so installed, custom, and future CLIs use the same lane
+without per-command configuration. LeanCTX's dangerous-pattern blocking,
+project jail, and secret redaction remain active. Orichum does not replay a
+command through both paths unless one bounded raw follow-up is needed.
+`ctx_patch`, `ctx_shell`, and external-service mutations retain Claude Code's
+normal approval behavior.
 
 ## Boundaries
 
@@ -135,6 +141,9 @@ mutations retain Claude Code's normal approval behavior.
 - CLIProxyAPI, LeanCTX, and the Orichum route proxy are shared services; each
   active session has only its own Claudex translator and immutable state.
 - Session files and account registries are private and digest-bound.
+- Each Atlassian process belongs to one physical session and one project
+  configuration; projects without Jira credentials pay no process or schema
+  cost.
 - LeanCTX shared data contains repo-aware graph and knowledge state; session
   configuration, events, and cache remain isolated.
 - The controller is the sole writer; specialist agents follow the configured

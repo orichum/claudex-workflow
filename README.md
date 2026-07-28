@@ -132,11 +132,15 @@ This saves the directory mapping immediately. LeanCTX builds source,
 relationship, and project-knowledge context only when the session needs it;
 there is no mining or population step.
 
-Docker MCP Toolkit is optional. Add a profile only when the project needs one:
+Jira is optional. Configure it only for a project that needs Atlassian:
 
 ```bash
-orichum context add ~/work --pool shared --docker work
+orichum context jira ~/projects
 ```
+
+The command stores the Jira URL, username, and token directly on that private
+project entry. New sessions below the root receive a dedicated
+`mcp-atlassian` process; projects without a binding load no Atlassian tools.
 
 Check the configured directory mappings:
 
@@ -177,6 +181,8 @@ orichum doctor
 |---|---|
 | Start in the current project | `orichum` |
 | Check project mappings | `orichum context list` |
+| Configure project Jira | `orichum context jira ROOT` |
+| Remove project Jira | `orichum context jira ROOT --remove` |
 | List or inspect stacks | `orichum stack list` / `orichum stack show STACK` |
 | Check named accounts | `orichum provider accounts` |
 | List sessions | `orichum sessions` |
@@ -204,15 +210,17 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
   live source, and answers structural or impact questions. See
   [Memory and code graph](docs/memory-and-code-graph.md).
 - **Live source context:** LeanCTX gives the controller compact reads, search,
-  trees, lossless expansion, and approved text patches. Specialists reuse the
-  same jailed context engine instead of falling back to raw repository reads.
-  A shared LeanCTX wire proxy also trims growing conversation history before
-  each request reaches the provider.
+  trees, lossless expansion, approved text patches, and compressed output from
+  arbitrary finite CLIs. Specialists reuse the same jailed context engine
+  instead of falling back to raw repository reads. A shared LeanCTX wire proxy
+  also trims growing conversation history before each request reaches the
+  provider.
   See [LeanCTX](docs/leanctx.md).
 - **Plugins:** declare and synchronize optional Claude Code plugins through
   Orichum. See [Plugins](docs/plugins.md).
-- **MCP_DOCKER:** attach a project-specific Docker MCP Toolkit profile for Jira
-  and other live-service tools. See [MCP integrations](docs/mcp-integrations.md).
+- **Jira:** configure private Jira credentials on a project root. Orichum loads
+  `mcp-atlassian` only for sessions below that root. See
+  [MCP integrations](docs/mcp-integrations.md).
 - **Specialist agents:** let the controller delegate bounded exploration,
   review, architecture, or implementation work while keeping one writer. See
   [Subagents](docs/subagents.md).
@@ -226,7 +234,7 @@ flowchart LR
     M["Selected account and model"] -. "frozen route" .-> S
     S --> L["LeanCTX context and knowledge"]
     S --> W["Shared LeanCTX wire optimization"]
-    S -. "only when the project declares a profile" .-> D["MCP_DOCKER"]
+    S -. "only for a bound project" .-> D["mcp-atlassian"]
 ```
 
 The directory where you run `orichum` selects the project configuration.
@@ -268,13 +276,13 @@ historical session contracts, and installer port conflicts.
 | [Providers and accounts](docs/providers-and-accounts.md) | Login, credentials, account names, pools, and priorities |
 | [Multi-account routing](docs/multi-account-usage.md) | Multiple accounts from the same or different providers |
 | [Model stacks](docs/model-stacks.md) | Interactive model selection, roles, and provider locks |
-| [Project contexts](docs/project-contexts.md) | Directory mappings, identities, account pools, and Docker profiles |
+| [Project contexts](docs/project-contexts.md) | Directory mappings, identities, account pools, and Jira bindings |
 | [Sessions](docs/sessions.md) | Start, inspect, resume, fork, and concurrent sessions |
 | [Status line](docs/status-line.md) | Active model, account, failover state, context, and quota metrics |
 | [Routing and failover](docs/routing-and-failover.md) | Route selection, cooldowns, rollover, and handoff boundaries |
 | [Subagents](docs/subagents.md) | Automatic delegation, specialist roles, and the sole-writer policy |
 | [Plugins](docs/plugins.md) | Add, update, synchronize, inspect, and remove plugins |
-| [MCP integrations](docs/mcp-integrations.md) | MCP_DOCKER and per-session MCP configuration |
+| [MCP integrations](docs/mcp-integrations.md) | LeanCTX and project-bound Atlassian MCP configuration |
 | [LeanCTX](docs/leanctx.md) | Compact source context, fallbacks, savings statistics, and live monitoring |
 | [Memory and code intelligence](docs/memory-and-code-graph.md) | How LeanCTX combines live code context with durable project knowledge |
 | [Configuration](docs/configuration.md) | Focused files, private state, and environment overrides |
@@ -299,9 +307,8 @@ historical session contracts, and installer port conflicts.
   provider authentication and model access.
 - [LeanCTX](https://github.com/yvgude/lean-ctx) — provides compact live file,
   tree, search, graph, callgraph, and impact context.
-- [Docker MCP Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
-  — provides project-specific external tools through Orichum's `MCP_DOCKER`
-  integration.
+- [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) — provides
+  project-bound Jira tools from each project's private credentials.
 
 Orichum is an independent project. It is not affiliated with or endorsed by
 these upstream projects, and it integrates them without modifying their source
@@ -321,5 +328,5 @@ content it integrates.
 - [LeanCTX documentation](https://leanctx.com/docs/)
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 - [Claudex](https://github.com/StringKe/claudex)
-- [Docker MCP Toolkit documentation](https://docs.docker.com/ai/mcp-catalog-and-toolkit/get-started/)
+- [mcp-atlassian documentation](https://mcp-atlassian.soomiles.com/docs/)
 - [Orichum architecture](docs/architecture.md)

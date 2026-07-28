@@ -27,6 +27,14 @@ ROLES = (
 )
 
 
+def jira(name: str) -> dict[str, str]:
+    return {
+        "url": f"https://{name}.atlassian.net",
+        "username": f"{name}@example.com",
+        "apiToken": f"{name}-token",
+    }
+
+
 class OrichumConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -83,7 +91,7 @@ class OrichumConfigTests(unittest.TestCase):
                 "contexts": [
                     {
                         "root": str(self.root / "xebia"),
-                        "dockerProfile": "xebia",
+                        "atlassian": jira("xebia"),
                         "modelStack": None,
                         "accountPools": ["work", "shared"],
                     }
@@ -390,6 +398,10 @@ class OrichumConfigTests(unittest.TestCase):
         redacted = redact_control_plane(augmented)
 
         self.assertEqual(redacted["machine-local"]["token"], "<redacted>")
+        self.assertEqual(
+            redacted["projects"]["contexts"][0]["atlassian"]["apiToken"],
+            "<redacted>",
+        )
         self.assertEqual(
             redacted["machine-local"]["nested"]["apiKey"], "<redacted>"
         )

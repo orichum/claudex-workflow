@@ -1522,4 +1522,34 @@ if rg -Fq 'home=Path.home()' "$ROOT/install.sh"; then
   exit 1
 fi
 
+atlassian_rollback_library="$fixture/atlassian-tool-rollback.sh"
+python3 - "$ROOT/install.sh" "$atlassian_rollback_library" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index("rollback_consolidated_runtime_and_home()")
+end = source.index(
+    'if [[ "$home_migration_active" == true ]]',
+    start,
+)
+Path(sys.argv[2]).write_text(source[start:end], encoding="utf-8")
+PY
+# shellcheck source=/dev/null
+source "$atlassian_rollback_library"
+WORKFLOW_DATA_ROOT="$fixture/atlassian-data"
+snapshot_dir="$fixture/atlassian-snapshot"
+install -d -m 0700 "$WORKFLOW_DATA_ROOT/tools/uv" "$snapshot_dir"
+printf 'before\n' >"$WORKFLOW_DATA_ROOT/tools/uv/state"
+snapshot_path "$WORKFLOW_DATA_ROOT/tools" \
+  "$snapshot_dir" atlassian-tools
+printf 'after\n' >"$WORKFLOW_DATA_ROOT/tools/uv/state"
+printf 'new\n' >"$WORKFLOW_DATA_ROOT/tools/uv/new-state"
+atlassian_tool_transaction_active=true
+runtime_transaction_active=false
+home_migration_active=false
+rollback_consolidated_runtime_and_home
+[[ "$(cat "$WORKFLOW_DATA_ROOT/tools/uv/state")" == before ]]
+[[ ! -e "$WORKFLOW_DATA_ROOT/tools/uv/new-state" ]]
+
 printf 'installer contract tests passed\n'

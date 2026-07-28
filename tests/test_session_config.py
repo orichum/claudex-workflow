@@ -47,15 +47,6 @@ class SessionConfigTests(unittest.TestCase):
             self.complion,
         ):
             directory.mkdir(parents=True, exist_ok=True)
-        self.tools = {
-            "docker": "/opt/tools/docker",
-        }
-        which = mock.patch(
-            "integrations.common.session_config.shutil.which",
-            side_effect=lambda name: self.tools.get(name),
-        )
-        which.start()
-        self.addCleanup(which.stop)
         self.config_path = self.workflow_root / "project-context.json"
         self.routing_path = self.workflow_root / "model-routing.json"
         self.models_path = self.fixture / "models.json"
@@ -101,12 +92,12 @@ class SessionConfigTests(unittest.TestCase):
                     "contexts": [
                         {
                             "root": str(self.xebia),
-                            "dockerProfile": "xebia",
+                            "atlassian": None,
                             "modelStack": None,
                         },
                         {
                             "root": str(self.complion),
-                            "dockerProfile": "realtime",
+                            "atlassian": None,
                             "modelStack": None,
                         },
                     ],
@@ -645,6 +636,7 @@ class SessionConfigTests(unittest.TestCase):
                     "LEAN_CTX_HEADLESS": "1",
                     "LEAN_CTX_MINIMAL": "1",
                     "LEAN_CTX_PROJECT_ROOT": str(repository),
+                    "LEAN_CTX_SHELL_ALLOWLIST_OVERRIDE": "",
                     "LEAN_CTX_STATE_DIR": str(leanctx_dir / "state"),
                     "XDG_DATA_HOME": str(shared_data),
                 },

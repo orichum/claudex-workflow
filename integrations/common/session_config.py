@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from integrations.common.atlassian_mcp import (
+    AtlassianError,
+    managed_binary as managed_atlassian_binary,
+)
 from integrations.common.leanctx_contract import (
     config_bytes as leanctx_config_bytes,
     mcp_server as leanctx_mcp_server,
@@ -230,13 +234,31 @@ def _session_mcp_payload(
     servers: dict[str, object] = {}
     route = context.get("route")
 
-    if isinstance(route, dict):
-        docker = shutil.which("docker")
-        profile = route.get("dockerProfile")
-        if docker and isinstance(profile, str) and profile:
-            servers["docker"] = {
-                "command": docker,
-                "args": ["mcp", "gateway", "run", "--profile", profile],
+    if isinstance(route, dict) and data_root is not None:
+        project_root = route.get("contextRootReal")
+        if (
+            route.get("atlassianConfigured") is True
+            and isinstance(project_root, str)
+            and project_root
+        ):
+            try:
+                managed_atlassian_binary(data_root)
+            except AtlassianError as error:
+                raise SessionError(
+                    "project Atlassian MCP is not ready"
+                ) from error
+            launcher = (
+                Path(__file__).resolve().parents[2]
+                / "bin"
+                / "orichum-atlassian-mcp"
+            )
+            if not launcher.is_file() or not os.access(launcher, os.X_OK):
+                raise SessionError(
+                    "Orichum Atlassian MCP launcher is unavailable"
+                )
+            servers["atlassian"] = {
+                "command": str(launcher),
+                "args": [project_root],
             }
 
     if run_dir is not None and data_root is not None:

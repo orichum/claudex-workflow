@@ -64,10 +64,11 @@ service ownership, health, and one provider-backed controller request.
 | Antigravity transport | Claude Opus 4.6 Thinking and Gemini 3 Flash returned live acceptance markers through the named Antigravity route | Pass |
 | Sessions | New, resume, same-family fork, parent linkage, immutable route display, and concurrent physical state were exercised | Pass |
 | Subagents | Explorer, verifier, critic, architect, and implementation-worker roles completed bounded tasks | Pass |
-| Project routing | Xebia and Complion resolved different Docker profiles, GitHub identities, and account pools | Pass |
+| Project routing | Xebia and Complion resolved independent Jira configurations, GitHub identities, and account pools | Pass |
 | GitHub identity | Isolated `GH_CONFIG_DIR` instances resolved `athevar-xebia` and `arvind9981` without changing the user's active account | Pass |
-| MCP_DOCKER | Both `xebia` and `realtime` profiles completed MCP initialize and tools/list handshakes | Pass |
+| Atlassian isolation | Hermetic tests proved project-local URLs and tokens; session MCP state contains only the project root | Pass |
 | LeanCTX | Exact eleven-tool jailed MCP exposed only the bounded source, graph, overview, and knowledge surface | Pass |
+| LeanCTX shell | A fresh session ran `orichum --version` through `ctx_shell` without registering the executable; interpreter inline execution remained blocked | Pass |
 | LeanCTX wire path | A real structured tool-result request completed through the installed shared proxy and reduced 3,919 bytes to 2,909 bytes; ordinary fresh prose remained unchanged | Pass |
 | LeanCTX specialists | Explorer, verifier, critic, architect, and implementation worker each completed a live bounded read through the shared session MCP | Pass |
 | LeanCTX memory route | The controller dynamically loaded deferred overview and knowledge tools, completed task orientation, and performed read-only project recall | Pass |
@@ -94,4 +95,4 @@ tool-payload measurements, not whole-session provider-token savings.
 | Linux AMD64 | Native GitHub Actions acceptance plus a privileged Ubuntu systemd-user container |
 | WSL2 contract | The Linux systemd-user path plus WSL1 rejection and WSL2 detection fixtures; native WSL execution is a separate release-environment check |
 | macOS ARM64 | Native macOS 15 acceptance with launchd service lifecycle |
-| Security | Private ownership/modes, no-follow reads, immutable session digests, project jails, strict MCP config, and exact tool allowlists |
+| Security | Private ownership/modes, no-follow reads, immutable session digests, project jails, strict MCP config, exact tool surfaces, and blocklist-only shell execution with dangerous-pattern enforcement |

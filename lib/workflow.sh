@@ -825,6 +825,7 @@ print_install_summary() {
     "  Claudex runtime:   $claudex_binary" \
     "  CLIProxyAPI:       $cliproxy_binary" \
     "  LeanCTX:           $leanctx_binary" \
+    "  Atlassian MCP:     $data_root/tools/bin/mcp-atlassian" \
     '' \
     'Python runtime' \
     '  Python request: 3.14.x' \

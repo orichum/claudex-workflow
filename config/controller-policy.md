@@ -32,8 +32,8 @@ Route tools directly without calling another model to choose:
 - Use `ctx_knowledge` to recall prior decisions and conventions. Remember only
   durable, confirmed decisions or outcomes—not raw source, logs, or routine
   recaps.
-- Load MCP_DOCKER only for a matching project profile and relevant live-service
-  work.
+- Use the `atlassian` MCP only when the verified project binding exposes it and
+  the task needs Jira. Its project binding is fixed for the physical session.
 
 Before changing a file, retrieve its exact current bytes with a raw or fresh
 LeanCTX read, or use the native read tool. Use raw output for decisive

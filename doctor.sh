@@ -177,6 +177,46 @@ else
   fail "LeanCTX is unavailable or exposes tools outside Orichum policy"
 fi
 
+atlassian_binary="$data_root/tools/bin/mcp-atlassian"
+if [[ -x "$atlassian_binary" ]] && \
+   "$atlassian_binary" --version >/dev/null 2>&1; then
+  ok "mcp-atlassian is installed for project-bound Jira sessions ($atlassian_binary)"
+else
+  fail "mcp-atlassian is unavailable ($atlassian_binary)"
+fi
+
+atlassian_bindings_ready=true
+atlassian_binding_count=0
+while IFS= read -r atlassian_root; do
+  [[ -n "$atlassian_root" ]] || continue
+  atlassian_binding_count=$((atlassian_binding_count + 1))
+  ORICHUM_DATA_HOME="$data_root" \
+  ORICHUM_CONFIG_HOME="$config_root" \
+    "$orichum_python" -I -B \
+      "$WORKFLOW_ROOT/integrations/common/mcp_probe.py" \
+      --timeout 15 \
+      --require-tool jira_get_issue \
+      --require-tool jira_create_issue \
+      -- "$WORKFLOW_ROOT/bin/orichum-atlassian-mcp" \
+      "$atlassian_root" >/dev/null 2>&1 || {
+        atlassian_bindings_ready=false
+        break
+      }
+done < <(
+  jq -r '
+    .contexts[]
+    | select(.atlassian != null)
+    | .root
+  ' "$config_root/projects.json"
+)
+if [[ "$atlassian_binding_count" -eq 0 ]]; then
+  ok 'no project-bound Jira configurations are present'
+elif [[ "$atlassian_bindings_ready" == true ]]; then
+  ok 'project-bound Jira configurations initialize read/write tools'
+else
+  fail 'one or more project-bound Jira configurations failed MCP readiness'
+fi
+
 if command -v claude >/dev/null 2>&1; then
   ok "Claude Code is available ($(command -v claude))"
 else

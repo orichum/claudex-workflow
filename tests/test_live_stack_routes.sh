@@ -312,7 +312,7 @@ projects_path.write_text(
             "contexts": [
                 {
                     "root": project,
-                    "dockerProfile": None,
+                    "atlassian": None,
                     "modelStack": None,
                     "accountPools": ["shared"],
                 }

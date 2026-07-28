@@ -67,7 +67,7 @@ class LeanctxMonitorTests(unittest.TestCase):
             "route": {
                 "id": project.name,
                 "contextRootReal": str(context_root),
-                "dockerProfile": None,
+                "atlassian": None,
                 "modelStack": None,
             },
         }

@@ -638,7 +638,7 @@ class RouteProxyTests(unittest.TestCase):
         tools = [
             client_tool("mcp__leanctx__ctx_shell"),
             *[
-                client_tool(f"mcp__docker__tool_{index}")
+                client_tool(f"mcp__sample__tool_{index}")
                 for index in range(11)
             ],
         ]

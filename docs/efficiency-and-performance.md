@@ -49,15 +49,19 @@ requests:
   shell tools.
 
 `ctx_shell` is the visible default for every finite, non-interactive command,
-including unknown or custom CLIs. Native `Bash` is deferred and loaded only for
-interactive, streaming, or long-running processes; LeanCTX-rejected shell
-behavior; or one explicit fallback. This removes speculative shell selection
-without maintaining a command inventory.
+including unknown or custom CLIs. Orichum's private MCP uses LeanCTX's empty
+allowlist override, eliminating rejected discovery calls and per-command
+configuration while retaining dangerous-pattern blocking, project jailing,
+secret redaction, and Claude Code approval. Native `Bash` is deferred and
+loaded only for interactive, streaming, or long-running processes;
+LeanCTX-rejected shell behavior; or one explicit fallback. This removes
+speculative shell selection without maintaining a command inventory.
 
 Overview and knowledge remain available but are deferred until the controller
 needs task orientation or durable history. Native Bash and other native and
 project-specific tools are marked for deferred loading, and Claude receives
-the tool-search primitive. MCP_DOCKER schemas are loaded only when needed.
+the tool-search primitive. Atlassian schemas exist only in physical sessions
+whose project context declares an account.
 Keeping the small execution surface resident makes code routing deterministic
 without paying for unused schemas on every turn.
 

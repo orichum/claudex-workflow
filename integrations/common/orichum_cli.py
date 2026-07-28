@@ -249,7 +249,11 @@ def _context_list(config: ResolvedConfig) -> str:
     rows = [
         (
             context["root"],
-            context["dockerProfile"] or "—",
+            (
+                context["atlassian"]["url"]
+                if isinstance(context["atlassian"], dict)
+                else "—"
+            ),
             context.get("githubAccount") or "—",
             context["modelStack"] or "default",
             ", ".join(context["accountPools"]),
@@ -259,7 +263,7 @@ def _context_list(config: ResolvedConfig) -> str:
     return _render_table(
         (
             "ROOT",
-            "DOCKER",
+            "JIRA",
             "GITHUB",
             "MODEL STACK",
             "ACCOUNT POOLS",
@@ -1891,14 +1895,13 @@ def _materialize_launch_policy(
     if not isinstance(route, dict):
         raise CliError("session project binding is unavailable")
     project_root = route.get("contextRootReal")
-    docker_profile = route.get("dockerProfile")
+    atlassian_configured = route.get("atlassianConfigured")
     github_account = route.get("githubAccount")
     if (
         not isinstance(project_root, str)
         or not project_root
         or (
-            docker_profile is not None
-            and (not isinstance(docker_profile, str) or not docker_profile)
+            type(atlassian_configured) is not bool
         )
         or (
             github_account is not None
@@ -1914,14 +1917,13 @@ def _materialize_launch_policy(
         "\n\n## Verified Orichum session bindings\n\n"
         "These values are frozen and authoritative for this physical session:\n\n"
         f"- Project context root: {json.dumps(project_root)}\n"
-        f"- MCP_DOCKER profile: {shown(docker_profile)}\n"
+        f"- Jira configured: {'yes' if atlassian_configured else 'no'}\n"
         f"- GitHub account: {shown(github_account)}\n"
         "- LeanCTX project memory follows the verified project root.\n\n"
-        "When an MCP_DOCKER profile is shown, the `docker` MCP gateway is "
-        "already bound to this physical session with that profile. Never "
-        "activate, switch, create, update, or remove Docker MCP profiles. "
-        "Diagnose empty or rejected service results against the bound "
-        "profile's credentials and upstream permissions.\n"
+        "When Jira is configured, the `atlassian` MCP server is already "
+        "bound to this physical session and project. Diagnose empty or "
+        "rejected Jira results against that project's credentials and "
+        "upstream permissions.\n"
     ).encode("utf-8")
     payload = policy_bytes + binding
     if handoff is not None:
@@ -2235,6 +2237,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for name, help_text in (
         ("add", "add a project context"),
+        ("jira", "configure or remove project Jira"),
         ("remove", "remove a context mapping"),
         ("update", "change a context mapping"),
     ):
@@ -2472,7 +2475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         len(arguments) >= 2
         and arguments[0] == "context"
-        and arguments[1] in {"add", "remove", "update", "validate"}
+        and arguments[1] in {"add", "jira", "remove", "update", "validate"}
     ):
         return _run_external("orichum-context", arguments[1:])
     if len(arguments) >= 2 and arguments[0] == "plugin":

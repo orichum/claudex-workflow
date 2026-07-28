@@ -341,7 +341,7 @@ class OrichumSessionTests(unittest.TestCase):
         def context(root: str) -> dict[str, object]:
             return {
                 "root": root,
-                "dockerProfile": None,
+                "atlassian": None,
                 "modelStack": None,
                 "accountPools": ["shared"],
             }

@@ -351,7 +351,7 @@ def _validate_projects(
     for index, raw_context in enumerate(contexts):
         base_keys = {
             "root",
-            "dockerProfile",
+            "atlassian",
             "modelStack",
             "accountPools",
         }
@@ -470,7 +470,8 @@ def validate_control_plane(config: ResolvedConfig) -> None:
         ):
             raise ConfigError("control-plane sources are incomplete")
         for name, document in config.documents.items():
-            _reject_sensitive_values(document, name)
+            if name != "projects":
+                _reject_sensitive_values(document, name)
         routing = normalize_model_stacks(
             config.documents["model-stacks"]
         )
