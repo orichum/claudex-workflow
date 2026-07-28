@@ -25,6 +25,7 @@ buddy_enabled = false
 enable_wakeup_ctx = true
 journal_enabled = false
 max_index_threads = 2
+max_ram_percent = 12
 no_degrade = true
 prefer_native_editor = false
 proxy_enabled = false
@@ -33,6 +34,10 @@ shadow_mode = false
 shell_activation = "off"
 shell_hook_disabled = true
 update_check_disabled = true
+
+[embedding]
+auto_download = true
+model = "minilm"
 """
 
 
@@ -81,7 +86,7 @@ def mcp_server(
             raise ValueError("LeanCTX paths must be absolute")
     config = str(session_dir / "config")
     state = str(session_dir / "state")
-    cache = str(session_dir / "cache")
+    cache = str(shared_data_home / "cache")
     return {
         "command": str(binary),
         "args": [],

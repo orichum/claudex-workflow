@@ -61,4 +61,8 @@ transactionally.
 Orichum's private LeanCTX MCP uses blocklist-only shell execution so arbitrary
 finite CLIs work without changing `~/.config/lean-ctx/config.toml`. Project
 jailing, secret redaction, dangerous-pattern blocking, and Claude Code command
-approval remain active.
+approval remain active. Project-bound sessions keep private configuration and
+state while reusing shared data and cache directories. They use two indexing
+threads, a 12% soft process-RSS target, and lazy automatic download of the local
+MiniLM semantic model. Orichum does not prewarm or explicitly build the semantic
+index.
