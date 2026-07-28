@@ -4,6 +4,8 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.2 - 2026-07-28
+
 ### Added
 
 - Orichum now installs an allowlisted, content-addressed runtime under
@@ -21,29 +23,6 @@ All notable Orichum changes are recorded here.
   the Git checkout is used only as an installation and upgrade source.
 - Architecture, installation, configuration, troubleshooting, and CLI
   documentation now describe the consolidated runtime and state layout.
-
-### Fixed
-
-- Provider-free installs no longer emit a routing-fingerprint traceback while
-  waiting for the first account login.
-- Nested context and plugin help is delegated to the helper that owns the
-  command, so it displays the real options instead of generic passthrough help.
-
-## 0.1.0-rc.2 - 2026-07-28
-
-### Fixed
-
-- Unknown bare launcher commands now fail closed instead of being forwarded to
-  Claude Code as prompts.
-- Route-proxy services now retain the selected Orichum data root, including
-  relocated macOS, Linux, and CI installations.
-- Native acceptance validates the private managed Python and the current
-  route-proxy runtime rather than stale system or wrapper paths.
-- Fast repeat acceptance now requires routing reuse instead of unnecessary
-  repair.
-
-### Changed
-
 - LeanCTX now owns live code context, repository graphs, task orientation, and
   durable project knowledge through one repo-aware store.
 - Every built-in specialist reuses the session's jailed LeanCTX MCP under an
@@ -56,6 +35,24 @@ All notable Orichum changes are recorded here.
   native `Bash` for mutations, authentication, and interactive processes.
 - User documentation now reflects the consolidated LeanCTX architecture and
   complete Orichum command surface.
+
+### Fixed
+
+- Unknown bare launcher commands now fail closed instead of being forwarded to
+  Claude Code as prompts.
+- Route-proxy services now retain the selected Orichum data root, including
+  relocated macOS, Linux, and CI installations.
+- Native acceptance validates the private managed Python and the current
+  route-proxy runtime rather than stale system or wrapper paths.
+- Fast repeat acceptance now requires routing reuse instead of unnecessary
+  repair.
+- Provider-free installs no longer emit a routing-fingerprint traceback or
+  report intentionally inactive route telemetry as a second failure while
+  waiting for the first account login.
+- Native acceptance isolates the consolidated home and validates only models
+  provided by its disposable OpenAI and Anthropic accounts.
+- Nested context and plugin help is delegated to the helper that owns the
+  command, so it displays the real options instead of generic passthrough help.
 
 ### Removed
 
