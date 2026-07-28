@@ -3361,7 +3361,7 @@ PY
     --probe-call \
       '{"name":"ctx_search","arguments":{"action":"reindex","path":"."}}' \
     --probe-call \
-      '{"name":"ctx_search","arguments":{"action":"semantic","query":"function that returns the Orichum probe value","path":"."},"contains":"orichum_probe_target"}' \
+      '{"name":"ctx_search","arguments":{"action":"semantic","mode":"dense","query":"function that returns the Orichum probe value","path":"."},"contains":"orichum_probe_target"}' \
     --probe-call \
       '{"name":"ctx_shell","arguments":{"command":"printf orichum-shell-ready","raw":true},"contains":"orichum-shell-ready"}' \
     -- env \

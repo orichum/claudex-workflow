@@ -513,6 +513,7 @@ for line in sys.stdin:
             text = "Reindexed project: 1 files, 1 chunks"
         elif name == "ctx_search" and arguments == {
             "action": "semantic",
+            "mode": "dense",
             "query": "function that returns the Orichum probe value",
             "path": ".",
         }:
