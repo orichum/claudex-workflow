@@ -63,9 +63,14 @@ The wizard rechecks live availability immediately before saving.
 ## Using accounts from different providers
 
 Claude models can be available through both `anthropic` and `antigravity`.
-Configure separate stack candidates and choose the provider explicitly in the
-wizard. Normal wizard-created automatic candidates stay within their selected
-provider; they do not silently switch from Anthropic to Antigravity.
+Configure separate ordered stack candidates and choose each provider
+explicitly in the wizard. The shipped architecture-advisor role demonstrates
+this: Anthropic Opus 5 is the first startup candidate and Antigravity Opus 4.6
+Thinking is the second.
+
+Candidate fallback happens only while binding a new session. Normal
+wizard-created automatic candidates stay within their selected provider, and
+an existing session never silently changes model or provider.
 
 ```bash
 orichum provider configure  # choose anthropic

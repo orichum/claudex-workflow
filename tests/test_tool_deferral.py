@@ -28,6 +28,20 @@ def request(model: str, tools: list[object]) -> bytes:
 
 
 class ToolDeferralTests(unittest.TestCase):
+    def test_current_opus_routes_receive_tool_deferral(self) -> None:
+        for model in (
+            "oc-anthropic/claude-opus-5",
+            "oc-antigravity/claude-opus-4-6-thinking",
+        ):
+            with self.subTest(model=model):
+                result = transform_request(
+                    request(
+                        model,
+                        [client_tool("Bash"), *client_tools(11)],
+                    )
+                )
+                self.assertTrue(result.transformed)
+
     def test_unknown_model_is_byte_preserving(self) -> None:
         body = request("future-model", client_tools(20))
         result = transform_request(body)

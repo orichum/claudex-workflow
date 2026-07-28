@@ -46,3 +46,24 @@ The standard roles are controller, repository explorer, repository verifier,
 correctness critic, architecture advisor, and implementation worker. Runtime
 policy decides whether specialists are needed; defining them does not cause
 automatic fan-out on every task.
+
+## Shipped balanced stack
+
+| Role | Ordered default | Why |
+|---|---|---|
+| Controller | GPT-5.6 Sol | Primary coordinator and sole writer |
+| Repository explorer | GPT-5.6 Terra | Efficient bounded reconnaissance |
+| Repository verifier | GPT-5.6 Terra | Independent read-only verification |
+| Correctness critic | Claude Sonnet 5 through Anthropic | Strong routine review without paying Opus cost |
+| Architecture advisor | Claude Opus 5 through Anthropic, then Claude Opus 4.6 Thinking through Antigravity | Highest configured architecture model per provider |
+| Implementation worker | GPT-5.6 Sol | Strong execution inside an explicit ownership boundary |
+
+Ordered candidates are evaluated only while creating a session. For example,
+the architecture advisor uses Anthropic Opus 5 when that route is live and uses
+the declared Antigravity candidate only when the first candidate cannot be
+bound. The selected route is then frozen with the session; Orichum does not
+silently change the model of an existing session.
+
+These defaults are ordinary entries in `model-stacks.json`. Edit that file or
+run `orichum stack configure` to change them; no agent definition needs to be
+rewritten.

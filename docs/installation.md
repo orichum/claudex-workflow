@@ -58,6 +58,16 @@ damaged component is repaired without upgrading unrelated tools. Fresh
 installations automatically use the complete path. Repairs can take longer
 than the fast-path target.
 
+The installer preserves an existing `~/.config/orichum/model-stacks.json`
+because it may contain user-created stacks. Repository default-model changes
+apply automatically only to fresh installations. Existing users can review and
+adopt newer defaults without losing custom stacks through:
+
+```bash
+orichum stack available
+orichum stack configure
+```
+
 Install and uninstall share one per-user lifecycle lock at
 `~/.local/state/orichum/install.lock`. Even when `ORICHUM_DATA_HOME` is
 relocated, two processes cannot concurrently replace the same launcher or user

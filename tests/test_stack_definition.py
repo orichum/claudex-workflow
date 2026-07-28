@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 from types import MappingProxyType
 import unittest
 
@@ -23,6 +25,36 @@ ROLES = (
 
 
 class StackDefinitionTests(unittest.TestCase):
+    def test_shipped_stack_prefers_current_opus_by_provider(self) -> None:
+        document = json.loads(
+            (Path(__file__).parents[1] / "config/model-stacks.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        normalized = normalize_model_stacks(document)
+        candidates = normalized.stacks["balanced"].agents[
+            "architecture-advisor"
+        ]
+
+        self.assertEqual(
+            [(candidate.model, candidate.providers) for candidate in candidates],
+            [
+                ("claude-opus-5", ("anthropic",)),
+                ("claude-opus-4-6-thinking", ("antigravity",)),
+            ],
+        )
+        self.assertEqual(
+            normalized.models["claude-opus-5"].routes["anthropic"],
+            "claude-opus-5",
+        )
+        self.assertEqual(
+            normalized.models["claude-opus-4-6-thinking"].routes[
+                "antigravity"
+            ],
+            "claude-opus-4-6-thinking",
+        )
+
     def v1_document(self) -> dict[str, object]:
         models = {
             "gpt-5.6-sol": {

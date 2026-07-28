@@ -186,7 +186,8 @@ jobs:
               ($ids | index("gpt-5.6-sol")) != null and
               ($ids | index("gpt-5.6-terra")) != null and
               ($ids | index("claude-sonnet-5")) != null and
-              ($ids | index("claude-opus-4-8")) != null
+              ($ids | index("claude-opus-5")) != null and
+              ($ids | index("claude-opus-4-6-thinking")) != null
             ' >/dev/null
           orichum doctor
 

@@ -56,6 +56,7 @@ from .orichum_sessions import (
     create_logical_session,
     list_logical_sessions,
     load_logical_session,
+    resolve_logical_session,
     resolve_session_plan,
 )
 from .model_routing import EffectiveStack, ROLES, RoutingError
@@ -790,7 +791,7 @@ def _prepare_resume(
     launch_dir: Path,
 ) -> PreparedLaunch:
     _verify_runtime(paths)
-    logical = load_logical_session(paths["state"], identifier)
+    logical = resolve_logical_session(paths["state"], identifier)
     context = resolve_control_plane_context(
         config.documents["projects"], launch_dir
     )
@@ -2320,7 +2321,7 @@ def build_parser() -> argparse.ArgumentParser:
     session_routes.add_argument("session_id")
     resume = commands.add_parser(
         "resume",
-        help="resume a logical session",
+        help="resume by Orichum or Claude session ID",
     )
     resume.add_argument("session_id")
     resume.add_argument("arguments", nargs=argparse.REMAINDER)

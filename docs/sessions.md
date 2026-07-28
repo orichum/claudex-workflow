@@ -35,6 +35,10 @@ most one compatible fallback.
 orichum resume SESSION_ID
 ```
 
+`SESSION_ID` may be the `oc-s-…` logical ID shown by `orichum sessions` or the
+Claude session UUID printed when Claude Code exits. Orichum resolves either form
+to the same frozen logical session.
+
 Resume loads the stored Orichum context again, verifies its integrity, and
 preserves the original model/account binding and Claude session identity. It
 does not silently move to another family after configuration changes.

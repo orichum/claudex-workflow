@@ -13,6 +13,8 @@ VERIFIED_MODELS = frozenset(
         "gpt-5.6-terra",
         "claude-sonnet-5",
         "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-opus-4-6-thinking",
     }
 )
 RESIDENT_NAMES = frozenset(

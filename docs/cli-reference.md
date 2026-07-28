@@ -61,7 +61,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum sessions [--limit N \| --all]` | List recent logical sessions |
 | `orichum sessions cleanup [--older-than DAYS] [--yes]` | Preview or remove inactive physical launch snapshots |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
-| `orichum resume ID` | Resume the same logical session |
+| `orichum resume ID` | Resume by Orichum logical ID or Claude session UUID |
 | `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |
 
 Forward ordinary Claude Code arguments after `--`, for example:

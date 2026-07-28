@@ -5,7 +5,7 @@ launches:
 
 ```text
 ORICHUM │ my-app │ balanced
-Claude · Opus 4.8 │ Work Claude [primary] │ context 41% │ 5h 63% │ 7d —
+Claude · Opus 5 │ Work Claude [primary] │ context 41% │ 5h 63% │ 7d —
 ```
 
 The first line identifies the project and selected model stack. The second

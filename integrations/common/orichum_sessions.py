@@ -628,6 +628,27 @@ def load_logical_session(state_home: Path, identifier: str) -> LogicalSession:
     return session
 
 
+def resolve_logical_session(state_home: Path, selector: str) -> LogicalSession:
+    if isinstance(selector, str) and _SESSION_ID.fullmatch(selector):
+        return load_logical_session(state_home, selector)
+    try:
+        parsed_uuid = uuid.UUID(selector)
+    except (AttributeError, TypeError, ValueError) as failure:
+        raise LogicalSessionError("session selector is invalid") from failure
+    if parsed_uuid.version != 4 or str(parsed_uuid) != selector:
+        raise LogicalSessionError("session selector is invalid")
+    matches = tuple(
+        session
+        for session in list_logical_sessions(state_home)
+        if session.claude_session_id == selector
+    )
+    if not matches:
+        raise LogicalSessionError("session selector was not found")
+    if len(matches) != 1:
+        raise LogicalSessionError("session selector is ambiguous")
+    return matches[0]
+
+
 def list_logical_sessions(state_home: Path) -> tuple[LogicalSession, ...]:
     root = _session_root(state_home)
     try:
