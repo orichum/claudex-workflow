@@ -26,6 +26,7 @@ COMPONENTS = frozenset({
     "claudex",
     "leanctx",
     "routing",
+    "completion",
     "controllerPlugin",
 })
 _TOP_LEVEL_KEYS = frozenset({

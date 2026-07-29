@@ -26,6 +26,7 @@ from .model_routing import (
     load_routing_view,
     validate_stack_name,
 )
+from .orichum_completion import set_completion
 
 
 class ContextError(RuntimeError):
@@ -1052,34 +1053,161 @@ def _load_account_pool_names(path: Optional[Path]) -> Optional[set[str]]:
     return pools
 
 
+def add_context_commands(
+    commands: argparse._SubParsersAction,
+) -> None:
+    def command(name: str, summary: str) -> argparse.ArgumentParser:
+        return commands.add_parser(
+            name,
+            help=summary,
+            description=summary,
+        )
+
+    command("list", "List configured project contexts.")
+    add = command("add", "Add a project context mapping.")
+    set_completion(
+        add.add_argument(
+            "root",
+            metavar="ROOT",
+            help="project root or parent directory to map",
+        ),
+        "directory",
+    )
+    set_completion(
+        add.add_argument(
+            "--model-stack",
+            metavar="STACK",
+            help="model stack to bind to the context",
+        ),
+        "stack",
+    )
+    set_completion(
+        add.add_argument(
+            "--pool",
+            action="append",
+            metavar="POOL",
+            help="account pool to use; repeat for ordered fallback",
+        ),
+        "pool",
+    )
+    add.add_argument(
+        "--github-account",
+        metavar="ACCOUNT",
+        help="GitHub account identity to bind",
+    )
+    jira = command("jira", "Configure or remove Jira for a project context.")
+    set_completion(
+        jira.add_argument(
+            "root",
+            metavar="ROOT",
+            help="configured project root",
+        ),
+        "context",
+    )
+    jira.add_argument(
+        "--url",
+        metavar="URL",
+        help="Jira base URL",
+    )
+    jira.add_argument(
+        "--username",
+        metavar="USER",
+        help="Jira username or email address",
+    )
+    jira.add_argument(
+        "--remove",
+        action="store_true",
+        help="remove Jira from the context",
+    )
+    update = command("update", "Update a project context mapping.")
+    set_completion(
+        update.add_argument(
+            "root",
+            metavar="ROOT",
+            help="configured project root",
+        ),
+        "context",
+    )
+    set_completion(
+        update.add_argument(
+            "--model-stack",
+            metavar="STACK",
+            help="replace the bound model stack",
+        ),
+        "stack",
+    )
+    set_completion(
+        update.add_argument(
+            "--pool",
+            action="append",
+            metavar="POOL",
+            help="replace account pools; repeat for ordered fallback",
+        ),
+        "pool",
+    )
+    update.add_argument(
+        "--github-account",
+        metavar="ACCOUNT",
+        help="replace the bound GitHub account",
+    )
+    update.add_argument(
+        "--no-github-account",
+        action="store_true",
+        help="remove the bound GitHub account",
+    )
+    update.add_argument(
+        "--inherit-model-stack",
+        action="store_true",
+        help="inherit the model stack instead of binding one explicitly",
+    )
+    remove = command("remove", "Remove a project context mapping.")
+    set_completion(
+        remove.add_argument(
+            "root",
+            metavar="ROOT",
+            help="configured project root",
+        ),
+        "context",
+    )
+    remove.add_argument(
+        "--yes",
+        action="store_true",
+        help="remove without an interactive confirmation",
+    )
+    command("validate", "Validate every configured project context.")
+
+
 def context_main(arguments: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="orichum context")
-    parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--routing-config", required=True, type=Path)
-    parser.add_argument("--providers-config", type=Path)
-    commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list")
-    add = commands.add_parser("add")
-    add.add_argument("root")
-    add.add_argument("--model-stack")
-    add.add_argument("--pool", action="append")
-    add.add_argument("--github-account")
-    jira = commands.add_parser("jira")
-    jira.add_argument("root")
-    jira.add_argument("--url")
-    jira.add_argument("--username")
-    jira.add_argument("--remove", action="store_true")
-    update = commands.add_parser("update")
-    update.add_argument("root")
-    update.add_argument("--model-stack")
-    update.add_argument("--pool", action="append")
-    update.add_argument("--github-account")
-    update.add_argument("--no-github-account", action="store_true")
-    update.add_argument("--inherit-model-stack", action="store_true")
-    remove = commands.add_parser("remove")
-    remove.add_argument("root")
-    remove.add_argument("--yes", action="store_true")
-    commands.add_parser("validate")
+    parser = argparse.ArgumentParser(
+        prog="orichum context",
+        description="Manage project context mappings.",
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="project context configuration file",
+    )
+    parser.add_argument(
+        "--routing-config",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="model stack configuration file",
+    )
+    parser.add_argument(
+        "--providers-config",
+        type=Path,
+        metavar="FILE",
+        help="provider and account-pool configuration file",
+    )
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="COMMAND",
+    )
+    add_context_commands(commands)
     parsed = parser.parse_args(arguments)
     home = Path.home()
 

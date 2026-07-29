@@ -154,6 +154,68 @@ rg -Fq 'Claude settings changed during rollback' \
   "$fixture/settings-drift.stderr"
 [[ "$(<"$settings_path")" == '{"concurrent":true}' ]]
 
+completion_snapshot="$fixture/completion-snapshot"
+completion_root="$fixture/completion-root"
+completion_zsh="$completion_root/zsh/_orichum"
+completion_bash="$completion_root/bash/orichum"
+completion_fish="$fixture/fish/orichum.fish"
+completion_prior_fish="$fixture/prior-fish/orichum.fish"
+completion_fish_record="$completion_root/fish-path"
+completion_zshrc="$fixture/home/.zshrc"
+completion_bashrc="$fixture/home/.bashrc"
+completion_bash_login="$fixture/home/.bash_profile"
+install -d -m 0700 \
+  "$(dirname "$completion_zsh")" "$(dirname "$completion_bash")" \
+  "$(dirname "$completion_fish")" "$(dirname "$completion_prior_fish")" \
+  "$(dirname "$completion_zshrc")" \
+  "$completion_snapshot"
+completion_paths=(
+  "$completion_zsh"
+  "$completion_bash"
+  "$completion_fish"
+  "$completion_prior_fish"
+  "$completion_fish_record"
+  "$completion_zshrc"
+  "$completion_bashrc"
+  "$completion_bash_login"
+)
+completion_names=(
+  completion-zsh
+  completion-bash
+  completion-fish
+  completion-fish-prior
+  completion-fish-record
+  completion-zshrc
+  completion-bashrc
+  completion-bash-login
+)
+for index in "${!completion_paths[@]}"; do
+  printf 'before %s\n' "$index" >"${completion_paths[$index]}"
+  snapshot_path \
+    "${completion_paths[$index]}" "$completion_snapshot" \
+    "${completion_names[$index]}"
+  printf 'installed %s\n' "$index" >"${completion_paths[$index]}"
+  snapshot_path \
+    "${completion_paths[$index]}" "$completion_snapshot" \
+    "${completion_names[$index]}-installed"
+done
+snapshot_dir="$completion_snapshot"
+completion_transaction_active=true
+completion_installed_snapshotted=true
+completion_zsh_path="$completion_zsh"
+completion_bash_path="$completion_bash"
+completion_fish_path="$completion_fish"
+completion_prior_fish_path="$completion_prior_fish"
+completion_zsh_profile="$completion_zshrc"
+completion_bash_profile="$completion_bashrc"
+completion_bash_login_profile="$completion_bash_login"
+claude_settings_transaction_active=false
+rollback_install_transaction
+for index in "${!completion_paths[@]}"; do
+  [[ "$(<"${completion_paths[$index]}")" == "before $index" ]]
+done
+completion_transaction_active=false
+
 install_state_dir="$fixture/install-state"
 install_state_snapshot="$fixture/install-state-snapshot"
 install_state_file="$install_state_dir/install-state.json"

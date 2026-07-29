@@ -23,6 +23,7 @@ Installer modes are separate from the `orichum` command:
 | Command | Purpose |
 |---|---|
 | `orichum --version` | Print the installed Orichum release identity |
+| `orichum completion zsh\|bash\|fish` | Print the native completion definition for one shell |
 | `orichum` / `orichum run [--leanctx-profile lean\|full]` | Start a project-aware session; new sessions default to the lean provider-residency profile |
 | `orichum config show` | Show the merged, redacted control plane |
 | `orichum config validate` | Validate focused configuration |
@@ -80,6 +81,32 @@ orichum run -- -p "Summarize this repository"
 Orichum rejects model, session, workspace, MCP, plugin, effort, tool-approval,
 and permission-mode options because those are bound by its validated control
 plane.
+
+## Shell completion
+
+The installer generates native zsh, Bash, and fish definitions. Completion
+covers the full command tree, options, fixed choices, files and directories,
+and safe local identifiers for stacks, providers, login types, account pools,
+accounts, plugins, marketplaces, project contexts, logical sessions, and
+physical runs. It reads only local configuration/state fields and never emits
+credential contents.
+
+Plugin installation completes declared plugin IDs directly and completes the
+marketplace portion after `@`, for example `sample@off` to
+`sample@official`. Option values also complete in both `--stack balanced` and
+`--stack=balanced` forms.
+
+Definitions can also be generated directly:
+
+```bash
+orichum completion zsh
+orichum completion bash
+orichum completion fish
+```
+
+Orichum stops completing its own grammar when a forwarded argument begins.
+For example, arguments after `orichum run --` belong to Claude Code and are not
+completed by Orichum.
 
 ## LeanCTX monitoring
 

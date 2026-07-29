@@ -53,6 +53,11 @@ from .orichum_config import (
     load_control_plane,
     redact_control_plane,
 )
+from .orichum_completion import (
+    CompletionError,
+    render_completion,
+    set_completion,
+)
 from .orichum_sessions import (
     LogicalSession,
     LogicalSessionCleanup,
@@ -70,7 +75,11 @@ from .orichum_sessions import (
 )
 from .orichum_status import main as render_status_main
 from .model_routing import EffectiveStack, ROLES, RoutingError
-from .project_context import ContextError, resolve_control_plane_context
+from .project_context import (
+    ContextError,
+    add_context_commands,
+    resolve_control_plane_context,
+)
 from .provider_credentials import (
     CredentialError,
     credential_metadata_transaction,
@@ -2371,16 +2380,46 @@ def _economics_hours(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="orichum")
+    parser = argparse.ArgumentParser(
+        prog="orichum",
+        description=(
+            "Run project-aware AI sessions and manage Orichum's local "
+            "control plane."
+        ),
+        epilog=(
+            "Run 'orichum COMMAND --help' for command-specific options. "
+            "Forward Claude Code arguments with 'orichum run -- ARG ...'."
+        ),
+    )
     parser.add_argument(
         "--version",
         action="version",
         version=f"Orichum {_release_version()}",
+        help="print the installed Orichum version and exit",
     )
-    commands = parser.add_subparsers(dest="command")
-    run = commands.add_parser(
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    def command(
+        subparsers: argparse._SubParsersAction,
+        name: str,
+        summary: str,
+        *,
+        description: str | None = None,
+    ) -> argparse.ArgumentParser:
+        return subparsers.add_parser(
+            name,
+            help=summary,
+            description=description or summary,
+        )
+
+    run = command(
+        commands,
         "run",
-        help="start a project-aware session",
+        "Start a project-aware session.",
+        description=(
+            "Create a logical session for the current project and launch "
+            "Claude Code through Orichum's validated routing control plane."
+        ),
     )
     run.add_argument(
         "--leanctx-profile",
@@ -2388,165 +2427,313 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LEANCTX_PROFILE,
         help="resident LeanCTX tool profile (default: lean)",
     )
-    run.add_argument("arguments", nargs=argparse.REMAINDER)
+    run.add_argument(
+        "arguments",
+        nargs=argparse.REMAINDER,
+        metavar="CLAUDE_ARG",
+        help="Claude Code arguments forwarded after '--'",
+    )
 
-    config = commands.add_parser(
+    config = command(
+        commands,
         "config",
-        help="inspect and validate configuration",
+        "Inspect and validate configuration.",
     )
-    config_action = config.add_subparsers(dest="config_command", required=True)
+    config_action = config.add_subparsers(
+        dest="config_command",
+        required=True,
+        metavar="COMMAND",
+    )
     for name, help_text in (
-        ("show", "show merged redacted configuration"),
-        ("validate", "validate the focused control plane"),
-        ("paths", "print configuration and data paths"),
+        ("show", "Show the merged redacted configuration."),
+        ("validate", "Validate the focused control plane."),
+        ("paths", "Print configuration and data paths."),
     ):
-        config_action.add_parser(name, help=help_text)
+        command(config_action, name, help_text)
 
-    context = commands.add_parser(
+    context = command(
+        commands,
         "context",
-        help="manage project contexts",
+        "Manage project contexts.",
     )
-    context_action = context.add_subparsers(dest="context_command", required=True)
-    context_action.add_parser("list", help="list configured contexts")
-    context_action.add_parser(
-        "validate",
-        help="validate every configured context",
+    context_action = context.add_subparsers(
+        dest="context_command",
+        required=True,
+        metavar="COMMAND",
     )
-    for name, help_text in (
-        ("add", "add a project context"),
-        ("jira", "configure or remove project Jira"),
-        ("remove", "remove a context mapping"),
-        ("update", "change a context mapping"),
-    ):
-        command = context_action.add_parser(name, help=help_text)
-        command.add_argument("arguments", nargs=argparse.REMAINDER)
+    add_context_commands(context_action)
 
-    models = commands.add_parser(
+    models = command(
+        commands,
         "models",
-        help="inspect models and resolved stacks",
+        "Inspect models and resolved stacks.",
     )
-    model_action = models.add_subparsers(dest="models_command", required=True)
-    model_action.add_parser("list", help="list declared models")
-    model_action.add_parser("stacks", help="list configured stacks")
-    model_action.add_parser("validate", help="validate model routing")
-    resolve = model_action.add_parser(
+    model_action = models.add_subparsers(
+        dest="models_command",
+        required=True,
+        metavar="COMMAND",
+    )
+    command(model_action, "list", "List declared models.")
+    command(model_action, "stacks", "List configured stacks.")
+    command(model_action, "validate", "Validate model routing.")
+    resolve = command(
+        model_action,
         "resolve",
-        help="resolve effective routes for a stack",
+        "Resolve effective routes for a stack.",
     )
-    resolve.add_argument("stack", nargs="?")
-
-    stack = commands.add_parser(
+    set_completion(
+        resolve.add_argument(
+            "stack",
+            nargs="?",
+            metavar="STACK",
+            help="stack name; defaults to the configured default stack",
+        ),
         "stack",
-        help="configure model stacks",
+    )
+
+    stack = command(
+        commands,
+        "stack",
+        "Configure model stacks.",
     )
     stack_action = stack.add_subparsers(
-        dest="stack_command", required=True
+        dest="stack_command",
+        required=True,
+        metavar="COMMAND",
     )
-    stack_action.add_parser(
+    command(
+        stack_action,
         "available",
-        help="show live provider and model choices",
+        "Show live provider and model choices.",
     )
-    stack_action.add_parser("list", help="list configured stacks")
-    show_stack = stack_action.add_parser(
+    command(stack_action, "list", "List configured stacks.")
+    show_stack = command(
+        stack_action,
         "show",
-        help="inspect one stack",
+        "Inspect one stack.",
     )
-    show_stack.add_argument("name")
-    stack_action.add_parser(
+    set_completion(
+        show_stack.add_argument(
+            "name",
+            metavar="STACK",
+            help="configured stack name",
+        ),
+        "stack",
+    )
+    command(
+        stack_action,
         "configure",
-        help="create or edit a stack interactively",
+        "Create or edit a stack interactively.",
     )
 
-    provider = commands.add_parser(
+    provider = command(
+        commands,
         "provider",
-        help="manage provider accounts",
+        "Manage provider accounts.",
     )
     provider_action = provider.add_subparsers(
-        dest="provider_command", required=True
+        dest="provider_command",
+        required=True,
+        metavar="COMMAND",
     )
-    provider_action.add_parser(
+    command(
+        provider_action,
         "list",
-        help="list configured provider adapters",
+        "List configured provider adapters.",
     )
-    provider_action.add_parser(
+    command(
+        provider_action,
         "configure",
-        help="configure and register an account",
+        "Configure and register an account interactively.",
     )
-    login = provider_action.add_parser(
+    login = command(
+        provider_action,
         "login",
-        help="authenticate through CLIProxyAPI",
+        "Authenticate through CLIProxyAPI.",
     )
-    login.add_argument("arguments", nargs=argparse.REMAINDER)
-    provider_action.add_parser(
+    set_completion(
+        login.add_argument(
+            "login_type",
+            metavar="TYPE",
+            help="provider login type",
+        ),
+        "auth-type",
+    )
+    login.add_argument(
+        "arguments",
+        nargs=argparse.REMAINDER,
+        metavar="LOGIN_ARG",
+        help="arguments forwarded to the provider login flow",
+    )
+    command(
+        provider_action,
         "accounts",
-        help="list named accounts",
+        "List named accounts.",
     )
-    account = provider_action.add_parser(
+    account = command(
+        provider_action,
         "account",
-        help="manage one named account",
+        "Manage one named account.",
     )
     account_action = account.add_subparsers(
-        dest="account_command", required=True
+        dest="account_command",
+        required=True,
+        metavar="COMMAND",
     )
-    add = account_action.add_parser("add", help="register an account")
-    add.add_argument("name")
-    add.add_argument("provider")
-    add.add_argument("credential_ref")
-    add.add_argument("pool")
-    add.add_argument("--priority", default="primary")
-    rename = account_action.add_parser("rename", help="rename an account")
-    rename.add_argument("selector")
-    rename.add_argument("name")
-    priority = account_action.add_parser(
+    add = command(account_action, "add", "Register an account.")
+    add.add_argument("name", metavar="NAME", help="account display name")
+    set_completion(
+        add.add_argument(
+            "provider",
+            metavar="PROVIDER",
+            help="configured provider adapter",
+        ),
+        "provider",
+    )
+    set_completion(
+        add.add_argument(
+            "credential_ref",
+            metavar="CREDENTIAL_FILE",
+            help="managed provider credential file",
+        ),
+        "file",
+    )
+    set_completion(
+        add.add_argument(
+            "pool",
+            metavar="POOL",
+            help="account pool to join",
+        ),
+        "pool",
+    )
+    add.add_argument(
+        "--priority",
+        default="primary",
+        metavar="VALUE",
+        help="priority alias or numeric weight (default: primary)",
+    )
+    rename = command(account_action, "rename", "Rename an account.")
+    set_completion(
+        rename.add_argument(
+            "selector",
+            metavar="ACCOUNT",
+            help="account ID, name, or alias",
+        ),
+        "account",
+    )
+    rename.add_argument("name", metavar="NAME", help="new display name")
+    priority = command(
+        account_action,
         "priority",
-        help="change account priority",
+        "Change account priority.",
     )
-    priority.add_argument("selector")
-    priority.add_argument("priority")
+    set_completion(
+        priority.add_argument(
+            "selector",
+            metavar="ACCOUNT",
+            help="account ID, name, or alias",
+        ),
+        "account",
+    )
+    priority.add_argument(
+        "priority",
+        metavar="VALUE",
+        help="priority alias or numeric weight",
+    )
     for name, help_text in (
-        ("enable", "enable an account"),
-        ("disable", "disable an account"),
-        ("remove", "remove an account"),
+        ("enable", "Enable an account."),
+        ("disable", "Disable an account."),
+        ("remove", "Remove an account."),
     ):
-        command = account_action.add_parser(name, help=help_text)
-        command.add_argument("selector")
-    sync = account_action.add_parser(
+        account_command = command(account_action, name, help_text)
+        set_completion(
+            account_command.add_argument(
+                "selector",
+                metavar="ACCOUNT",
+                help="account ID, name, or alias",
+            ),
+            "account",
+        )
+    sync = command(
+        account_action,
         "sync",
-        help="reconcile account credentials",
+        "Reconcile account credentials.",
     )
-    sync.add_argument("selector", nargs="?")
+    set_completion(
+        sync.add_argument(
+            "selector",
+            nargs="?",
+            metavar="ACCOUNT",
+            help="account ID, name, or alias; defaults to every account",
+        ),
+        "account",
+    )
 
-    plugin = commands.add_parser(
+    plugin = command(
+        commands,
         "plugin",
-        help="manage optional Claude Code plugins",
+        "Manage optional Claude Code plugins.",
     )
-    plugin_action = plugin.add_subparsers(dest="plugin_command", required=True)
-    plugin_action.add_parser("list", help="list declared plugins")
-    for name, help_text in (
-        ("add", "declare and install a plugin"),
-        ("remove", "remove a declared plugin"),
-        ("sync", "reconcile declared plugins"),
-        ("update", "update a declared plugin"),
-    ):
-        command = plugin_action.add_parser(name, help=help_text)
-        command.add_argument("arguments", nargs=argparse.REMAINDER)
+    plugin_action = plugin.add_subparsers(
+        dest="plugin_command",
+        required=True,
+        metavar="COMMAND",
+    )
+    command(plugin_action, "list", "List declared plugins.")
+    plugin_add = command(
+        plugin_action,
+        "add",
+        "Declare, install, and enable a plugin.",
+    )
+    set_completion(
+        plugin_add.add_argument(
+            "plugin",
+            metavar="PLUGIN@MARKETPLACE",
+            help="Claude Code plugin identifier",
+        ),
+        "plugin-add",
+    )
+    plugin_add.add_argument(
+        "--source",
+        metavar="SOURCE",
+        help="marketplace source when it is not already declared",
+    )
+    plugin_remove = command(
+        plugin_action,
+        "remove",
+        "Uninstall and remove a declared plugin.",
+    )
+    set_completion(
+        plugin_remove.add_argument(
+            "plugin",
+            metavar="PLUGIN@MARKETPLACE",
+            help="declared Claude Code plugin identifier",
+        ),
+        "plugin",
+    )
+    command(plugin_action, "sync", "Reconcile declared plugins.")
+    command(plugin_action, "update", "Update declared plugins.")
 
-    leanctx = commands.add_parser(
+    leanctx = command(
+        commands,
         "leanctx",
-        help="inspect and monitor LeanCTX",
+        "Inspect and monitor LeanCTX.",
     )
     leanctx_action = leanctx.add_subparsers(
         dest="leanctx_command",
         required=True,
+        metavar="COMMAND",
     )
-    leanctx_list = leanctx_action.add_parser(
+    leanctx_list = command(
+        leanctx_action,
         "list",
-        help="list recent LeanCTX runs",
+        "List recent LeanCTX runs.",
     )
     leanctx_list.add_argument(
         "--limit",
         type=_positive_int,
         default=20,
+        metavar="N",
         help="number of newest runs to show (default: 20)",
     )
     leanctx_list.add_argument(
@@ -2556,51 +2743,95 @@ def build_parser() -> argparse.ArgumentParser:
         help="show every run",
     )
     for name, help_text in (
-        ("stats", "show exact context savings"),
-        ("watch", "open the terminal monitor"),
+        ("stats", "Show exact context savings."),
+        ("watch", "Open the terminal monitor."),
     ):
-        command = leanctx_action.add_parser(name, help=help_text)
-        command.add_argument("--run")
-    economics = leanctx_action.add_parser(
+        leanctx_command = command(leanctx_action, name, help_text)
+        set_completion(
+            leanctx_command.add_argument(
+                "--run",
+                metavar="RUN",
+                help=(
+                    "physical LeanCTX run ID; defaults to the current project"
+                ),
+            ),
+            "run",
+        )
+    economics = command(
+        leanctx_action,
         "economics",
-        help="show profile footprint and savings estimates",
+        "Show profile footprint and savings estimates.",
     )
-    economics.add_argument("--session")
+    set_completion(
+        economics.add_argument(
+            "--session",
+            metavar="SESSION",
+            help="logical session ID; defaults to the current live session",
+        ),
+        "logical-session",
+    )
     economics.add_argument(
         "--hours",
         type=_economics_hours,
         default=24,
+        metavar="HOURS",
         help="rolling ledger window from 1 through 168 hours (default: 24)",
     )
-    dashboard = leanctx_action.add_parser(
+    dashboard = command(
+        leanctx_action,
         "dashboard",
-        help="open the local authenticated Observatory",
+        "Open the local authenticated Observatory.",
     )
-    dashboard.add_argument("--run")
-    dashboard.add_argument("--port", type=int)
+    set_completion(
+        dashboard.add_argument(
+            "--run",
+            metavar="RUN",
+            help="physical LeanCTX run ID; defaults to the current project",
+        ),
+        "run",
+    )
+    dashboard.add_argument(
+        "--port",
+        type=int,
+        metavar="PORT",
+        help="loopback port; defaults to the first available port",
+    )
     dashboard.add_argument(
         "--open",
         dest="open_mode",
         choices=("browser", "none", "vscode"),
         default="browser",
+        help="how to open the Observatory (default: browser)",
     )
-    commands.add_parser(
+    command(
+        commands,
         "doctor",
-        help="verify the complete local installation",
+        "Verify the complete local installation.",
     )
-    status = commands.add_parser(
+    status = command(
+        commands,
         "status",
-        help="show live identity, routing, and quota for a session",
+        "Show live identity, routing, and quota for a session.",
     )
-    status.add_argument("session_id", nargs="?")
-    sessions = commands.add_parser(
+    set_completion(
+        status.add_argument(
+            "session_id",
+            nargs="?",
+            metavar="SESSION",
+            help="logical session ID; defaults to the current live session",
+        ),
+        "logical-session",
+    )
+    sessions = command(
+        commands,
         "sessions",
-        help="inspect and clean sessions",
+        "Inspect and clean sessions.",
     )
     sessions.add_argument(
         "--limit",
         type=_positive_int,
         default=20,
+        metavar="N",
         help="number of newest sessions to show (default: 20)",
     )
     sessions.add_argument(
@@ -2609,20 +2840,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show every logical session",
     )
-    sessions_action = sessions.add_subparsers(dest="sessions_command")
-    sessions_routes = sessions_action.add_parser(
-        "routes",
-        help="inspect frozen routes for one session",
+    sessions_action = sessions.add_subparsers(
+        dest="sessions_command",
+        metavar="COMMAND",
     )
-    sessions_routes.add_argument("session_id")
-    sessions_cleanup = sessions_action.add_parser(
+    sessions_routes = command(
+        sessions_action,
+        "routes",
+        "Inspect frozen routes for one session.",
+    )
+    set_completion(
+        sessions_routes.add_argument(
+            "session_id",
+            metavar="SESSION",
+            help="Orichum logical or Claude session ID",
+        ),
+        "logical-session",
+    )
+    sessions_cleanup = command(
+        sessions_action,
         "cleanup",
-        help="preview or remove inactive physical launch snapshots",
+        "Preview or remove inactive physical launch snapshots.",
     )
     sessions_cleanup.add_argument(
         "--older-than",
         type=int,
         default=7,
+        metavar="DAYS",
         help="minimum snapshot age in days (default: 7)",
     )
     sessions_cleanup.add_argument(
@@ -2630,79 +2874,140 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="remove the previewed snapshots",
     )
-    sessions_remove = sessions_action.add_parser(
+    sessions_remove = command(
+        sessions_action,
         "remove",
-        help="preview or remove one inactive logical session",
+        "Preview or remove one inactive logical session.",
     )
-    sessions_remove.add_argument(
-        "session_id",
-        help="Orichum or Claude session ID",
+    set_completion(
+        sessions_remove.add_argument(
+            "session_id",
+            metavar="SESSION",
+            help="Orichum or Claude session ID",
+        ),
+        "logical-session",
     )
     sessions_remove.add_argument(
         "--yes",
         action="store_true",
         help="remove the previewed logical session",
     )
-    sessions_clear = sessions_action.add_parser(
+    sessions_clear = command(
+        sessions_action,
         "clear",
-        help="preview or remove all inactive logical sessions",
+        "Preview or remove all inactive logical sessions.",
     )
     sessions_clear.add_argument(
         "--yes",
         action="store_true",
         help="remove the previewed logical sessions",
     )
-    session = commands.add_parser(
+    session = command(
+        commands,
         "session",
-        help="inspect one logical session",
+        "Inspect one logical session.",
     )
     session_action = session.add_subparsers(
-        dest="session_command", required=True
+        dest="session_command",
+        required=True,
+        metavar="COMMAND",
     )
-    session_routes = session_action.add_parser(
+    session_routes = command(
+        session_action,
         "routes",
-        help="inspect frozen routes",
+        "Inspect frozen routes.",
     )
-    session_routes.add_argument("session_id")
-    resume = commands.add_parser(
+    set_completion(
+        session_routes.add_argument(
+            "session_id",
+            metavar="SESSION",
+            help="Orichum logical or Claude session ID",
+        ),
+        "logical-session",
+    )
+    resume = command(
+        commands,
         "resume",
-        help="resume by Orichum or Claude session ID",
+        "Resume by Orichum or Claude session ID.",
     )
-    resume.add_argument("session_id")
-    resume.add_argument("arguments", nargs=argparse.REMAINDER)
-    fork = commands.add_parser(
+    set_completion(
+        resume.add_argument(
+            "session_id",
+            metavar="SESSION",
+            help="Orichum logical or Claude session ID",
+        ),
+        "logical-session",
+    )
+    resume.add_argument(
+        "arguments",
+        nargs=argparse.REMAINDER,
+        metavar="CLAUDE_ARG",
+        help="Claude Code arguments forwarded after the session ID",
+    )
+    fork = command(
+        commands,
         "fork",
-        help="fork a session onto another stack",
+        "Fork a session onto another stack.",
     )
-    fork.add_argument("session_id")
-    fork.add_argument("--stack")
-    fork.add_argument("--handoff-file", type=Path)
+    set_completion(
+        fork.add_argument(
+            "session_id",
+            metavar="SESSION",
+            help="Orichum logical or Claude parent session ID",
+        ),
+        "logical-session",
+    )
+    set_completion(
+        fork.add_argument(
+            "--stack",
+            metavar="STACK",
+            help="target stack; defaults to the parent stack",
+        ),
+        "stack",
+    )
+    set_completion(
+        fork.add_argument(
+            "--handoff-file",
+            type=Path,
+            metavar="FILE",
+            help="UTF-8 handoff document to attach to the child session",
+        ),
+        "file",
+    )
     fork.add_argument(
         "--leanctx-profile",
         choices=LEANCTX_PROFILES,
         help="override the parent LeanCTX tool profile",
+    )
+    completion = command(
+        commands,
+        "completion",
+        "Generate native shell completion definitions.",
+    )
+    completion.add_argument(
+        "shell",
+        choices=("zsh", "bash", "fish"),
+        help="shell definition to generate",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if (
-        len(arguments) >= 2
-        and arguments[0] == "context"
-        and arguments[1] in {"add", "jira", "remove", "update", "validate"}
-    ):
-        return _run_external("orichum-context", arguments[1:])
-    if len(arguments) >= 2 and arguments[0] == "plugin":
-        return _run_external("orichum-plugin", arguments[1:])
-
     parser = build_parser()
     parsed = parser.parse_args(arguments)
     try:
         if parsed.command is None:
             raise CliError("run Orichum through the installed launcher")
+        if parsed.command == "context" and parsed.context_command != "list":
+            return _run_external("orichum-context", arguments[1:])
+        if parsed.command == "plugin":
+            return _run_external("orichum-plugin", arguments[1:])
         if parsed.command == "doctor":
             return _run_external("orichum-doctor", [])
+        if parsed.command == "completion":
+            print(render_completion(parser, parsed.shell), end="")
+            return 0
         if parsed.command == "config" and parsed.config_command == "paths":
             paths = _paths()
             print(
@@ -2744,7 +3049,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(_session_status(paths, session_id), end="")
             return 0
         if parsed.command == "provider" and parsed.provider_command == "login":
-            return _run_external("orichum-login", list(parsed.arguments))
+            return _run_external(
+                "orichum-login",
+                [parsed.login_type, *parsed.arguments],
+            )
         if parsed.command == "leanctx":
             if parsed.leanctx_command == "economics":
                 identifier = parsed.session or os.environ.get(
@@ -3059,6 +3367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         AccountError,
         CatalogError,
         CliError,
+        CompletionError,
         ConfigError,
         ContextError,
         CredentialError,

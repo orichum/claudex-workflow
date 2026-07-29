@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+kind="${1:-}"
+prefix="${2:-}"
+[[ "$prefix" != *$'\n'* && "$prefix" != *$'\r'* && "$prefix" != *$'\t'* ]] || exit 0
+
+orichum_home="${ORICHUM_HOME:-$HOME/.orichum}"
+config_root="${ORICHUM_CONFIG_HOME:-$orichum_home/config}"
+data_root="${ORICHUM_DATA_HOME:-$orichum_home}"
+state_root="${ORICHUM_STATE_HOME:-$data_root/state}"
+for root in "$orichum_home" "$config_root" "$data_root" "$state_root"; do
+  [[ "$root" == /* ]] || exit 0
+done
+
+safe_json_values() {
+  local path="$1" query="$2"
+  [[ -f "$path" && ! -L "$path" && -O "$path" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -er "$query" "$path" 2>/dev/null || true
+}
+
+safe_directory_values() {
+  local root="$1" pattern="$2" marker="$3" value entry marker_path
+  [[ -d "$root" && ! -L "$root" && -O "$root" ]] || return 0
+  while IFS= read -r entry; do
+    [[ -d "$entry" && ! -L "$entry" && -O "$entry" ]] || continue
+    marker_path="$entry/$marker"
+    [[ -f "$marker_path" && ! -L "$marker_path" && -O "$marker_path" ]] || continue
+    value="${entry##*/}"
+    [[ "$value" == $pattern ]] || continue
+    printf '%s\n' "$value"
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
+}
+
+raw_candidates() {
+  case "$kind" in
+    stack)
+      safe_json_values "$config_root/model-stacks.json" '
+        select(.schemaVersion == 2 and (.stacks | type == "object")) |
+        .stacks | keys[] |
+        select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    provider)
+      safe_json_values "$config_root/providers.json" '
+        select(.schemaVersion == 1 and (.providers | type == "object")) |
+        .providers | keys[] |
+        select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    pool)
+      safe_json_values "$config_root/providers.json" '
+        select(.schemaVersion == 1 and (.accountPools | type == "object")) |
+        .accountPools | keys[] |
+        select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    auth-type)
+      safe_json_values "$config_root/providers.json" '
+        select(.schemaVersion == 1 and (.providers | type == "object")) |
+        [.providers[] | .authType |
+          select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))] |
+        unique[]
+      '
+      ;;
+    account)
+      safe_json_values "$config_root/accounts.json" '
+        select(.schemaVersion == 2 and (.accounts | type == "array")) |
+        .accounts[] | .id, .name |
+        select(type == "string" and length > 0 and
+          (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    plugin)
+      safe_json_values "$config_root/plugins.json" '
+        select(.schemaVersion == 1 and (.plugins | type == "array")) |
+        .plugins[] |
+        select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    plugin-add)
+      if [[ "$prefix" == *@* ]]; then
+        plugin_name="${prefix%%@*}"
+        [[ -n "$plugin_name" ]] || return 0
+        while IFS= read -r marketplace; do
+          printf '%s@%s\n' "$plugin_name" "$marketplace"
+        done < <(safe_json_values "$config_root/plugins.json" '
+          select(.schemaVersion == 1 and (.marketplaces | type == "array")) |
+          .marketplaces[] | .name |
+          select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+        ')
+      else
+        safe_json_values "$config_root/plugins.json" '
+          select(.schemaVersion == 1 and (.plugins | type == "array")) |
+          .plugins[] |
+          select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+        '
+      fi
+      ;;
+    marketplace)
+      safe_json_values "$config_root/plugins.json" '
+        select(.schemaVersion == 1 and (.marketplaces | type == "array")) |
+        .marketplaces[] | .name |
+        select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    context)
+      safe_json_values "$config_root/projects.json" '
+        select(.schemaVersion == 1 and (.contexts | type == "array")) |
+        .contexts[] | .root |
+        select(type == "string" and (test("[\u0000-\u001f\u007f]") | not))
+      '
+      ;;
+    logical-session)
+      safe_directory_values \
+        "$state_root/logical-sessions" 'oc-s-????????????????' binding.json
+      ;;
+    run)
+      safe_directory_values "$state_root/sessions" 'run.*' .complete
+      ;;
+    file|directory)
+      ;;
+    *) exit 2 ;;
+  esac
+}
+
+case "$kind" in
+  stack) description=stack ;;
+  provider) description=provider ;;
+  pool) description=pool ;;
+  auth-type) description='provider login type' ;;
+  account) description=account ;;
+  plugin|plugin-add) description=plugin ;;
+  marketplace) description=marketplace ;;
+  context) description=context ;;
+  logical-session) description='logical session' ;;
+  run) description='physical run' ;;
+  file|directory) exit 0 ;;
+  *) exit 2 ;;
+esac
+
+while IFS= read -r candidate; do
+  [[ -n "$candidate" && "$candidate" == "$prefix"* ]] || continue
+  [[ "$candidate" != *$'\n'* && "$candidate" != *$'\r'* && "$candidate" != *$'\t'* ]] || continue
+  printf '%s\n' "$candidate"
+done < <(raw_candidates) |
+  LC_ALL=C sort -u |
+  while IFS= read -r candidate; do
+    printf '%s\t%s\n' "$candidate" "$description"
+  done

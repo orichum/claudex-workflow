@@ -72,7 +72,7 @@ install_state_component_field() {
 }
 
 print_component_status_table() {
-  (($# == 6)) || return 2
+  (($# == 7)) || return 2
   local value
   for value in "$@"; do
     case "$value" in
@@ -88,7 +88,8 @@ print_component_status_table() {
     Claudex "$3" \
     LeanCTX "$4" \
     Routing "$5" \
-    'Controller plugin' "$6"
+    'Controller plugin' "$6" \
+    Completion "$7"
 }
 
 linux_environment_kind() {
@@ -2257,6 +2258,686 @@ descriptor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 descriptor.write_text(value + "\n", encoding="ascii")
 os.chmod(descriptor, 0o600)
 print(value)
+PY
+}
+
+orichum_completion_root() {
+  (($# == 1)) || return 2
+  printf '%s/completions' "$1"
+}
+
+orichum_fish_completion_path() {
+  printf '%s/fish/completions/orichum.fish' \
+    "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+orichum_fish_completion_record_path() {
+  (($# == 1)) || return 2
+  printf '%s/completions/fish-path' "$1"
+}
+
+orichum_recorded_fish_completion_path() {
+  (($# == 1)) || return 2
+  workflow_python -I -B - "$(orichum_fish_completion_record_path "$1")" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    observed = path.lstat()
+except FileNotFoundError:
+    raise SystemExit(1)
+if (
+    stat.S_ISLNK(observed.st_mode)
+    or not stat.S_ISREG(observed.st_mode)
+    or observed.st_uid != os.getuid()
+    or stat.S_IMODE(observed.st_mode) != 0o600
+    or observed.st_size > 4096
+):
+    raise SystemExit(10)
+try:
+    payload = path.read_text(encoding="utf-8")
+except (OSError, UnicodeError):
+    raise SystemExit(10)
+if not payload.endswith("\n") or payload.count("\n") != 1:
+    raise SystemExit(10)
+value = payload[:-1]
+if (
+    not value.startswith("/")
+    or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    or not value.endswith("/fish/completions/orichum.fish")
+):
+    raise SystemExit(10)
+print(value)
+PY
+}
+
+orichum_write_fish_completion_record() {
+  (($# == 2)) || return 2
+  local home_root="$1"
+  local fish_path="$2"
+  local record_path
+  record_path="$(orichum_fish_completion_record_path "$home_root")"
+  orichum_prepare_completion_directory \
+    "$(dirname "$record_path")" "$home_root" || return 1
+  workflow_python -I -B - "$record_path" "$fish_path" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = sys.argv[2]
+if (
+    not value.startswith("/")
+    or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    or not value.endswith("/fish/completions/orichum.fish")
+):
+    raise SystemExit(1)
+try:
+    observed = path.lstat()
+except FileNotFoundError:
+    observed = None
+if observed is not None and (
+    stat.S_ISLNK(observed.st_mode)
+    or not stat.S_ISREG(observed.st_mode)
+    or observed.st_uid != os.getuid()
+    or stat.S_IMODE(observed.st_mode) != 0o600
+):
+    raise SystemExit(1)
+descriptor, temporary = tempfile.mkstemp(
+    prefix=".orichum-fish-path.", dir=path.parent
+)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(value + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+orichum_bash_login_profile_path() {
+  local candidate
+  for candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s/.bash_profile\n' "$HOME"
+}
+
+orichum_prepare_completion_directory() {
+  (($# == 2)) || return 2
+  workflow_python -I -B - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1])
+managed_root = Path(sys.argv[2])
+if not directory.is_absolute() or not managed_root.is_absolute():
+    raise SystemExit("completion paths must be absolute")
+try:
+    directory.relative_to(managed_root)
+except ValueError as error:
+    raise SystemExit("completion path escapes its managed root") from error
+
+cursor = Path(directory.anchor)
+managed_started = False
+for component in directory.parts[1:]:
+    cursor /= component
+    if cursor == managed_root:
+        managed_started = True
+    try:
+        observed = cursor.lstat()
+    except FileNotFoundError:
+        cursor.mkdir(mode=0o700 if cursor == managed_root else 0o755)
+        observed = cursor.lstat()
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+        raise SystemExit(f"unsafe completion directory: {cursor}")
+    if managed_started and observed.st_uid != os.getuid():
+        raise SystemExit(f"foreign completion directory: {cursor}")
+PY
+}
+
+render_orichum_completion_definition() {
+  (($# == 3 || $# == 4)) || return 2
+  local workflow_root="$1"
+  local shell="$2"
+  local destination="$3"
+  local destination_dir managed_root temporary raw digest
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    orichum_completion_file_is_owned "$destination" || {
+      printf 'ERROR: refusing unknown Orichum completion path: %s\n' \
+        "$destination" >&2
+      return 1
+    }
+  fi
+  destination_dir="$(dirname "$destination")"
+  if (($# == 4)); then
+    managed_root="$4"
+  elif [[ "$shell" == fish ]]; then
+    managed_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+  else
+    managed_root="${ORICHUM_HOME:-$HOME/.orichum}"
+  fi
+  orichum_prepare_completion_directory \
+    "$destination_dir" "$managed_root" || return 1
+  temporary="$(mktemp "$destination_dir/.orichum-completion.XXXXXX")" || \
+    return 1
+  raw="$temporary.raw"
+  if ! (
+    cd "$workflow_root"
+    PYTHONDONTWRITEBYTECODE=1 workflow_python -I -B - \
+      "$workflow_root" "$shell" >"$raw" <<'PY'
+import sys
+
+root = sys.argv[1]
+sys.path.insert(0, root)
+from integrations.common.orichum_cli import build_parser
+from integrations.common.orichum_completion import render_completion
+
+sys.stdout.write(render_completion(build_parser(), sys.argv[2]))
+PY
+  ); then
+    rm -f -- "$temporary" "$raw"
+    return 1
+  fi
+  [[ -s "$raw" ]] || {
+    rm -f -- "$temporary" "$raw"
+    return 1
+  }
+  case "$shell" in
+    bash)
+      if command -v bash >/dev/null 2>&1; then
+        bash -n "$raw" || {
+          rm -f -- "$temporary" "$raw"
+          return 1
+        }
+      fi
+      ;;
+    zsh)
+      if command -v zsh >/dev/null 2>&1; then
+        zsh -n "$raw" || {
+          rm -f -- "$temporary" "$raw"
+          return 1
+        }
+      fi
+      ;;
+    fish)
+      if command -v fish >/dev/null 2>&1; then
+        fish -n "$raw" || {
+          rm -f -- "$temporary" "$raw"
+          return 1
+        }
+      fi
+      ;;
+    *)
+      rm -f -- "$temporary" "$raw"
+      return 2
+      ;;
+  esac
+  digest="$(sha256_file "$raw")" || {
+    rm -f -- "$temporary" "$raw"
+    return 1
+  }
+  if [[ "$shell" == zsh ]]; then
+    {
+      IFS= read -r first_line <"$raw"
+      printf '%s\n' "$first_line"
+      printf '# Orichum completion body-sha256: %s\n' "$digest"
+      sed '1d' "$raw"
+    } >"$temporary"
+  else
+    {
+      printf '# Orichum completion body-sha256: %s\n' "$digest"
+      cat "$raw"
+    } >"$temporary"
+  fi
+  chmod 0644 "$temporary"
+  mv -f "$temporary" "$destination"
+  rm -f -- "$raw"
+}
+
+orichum_completion_file_is_owned() {
+  (($# == 1)) || return 2
+  workflow_python -I -B - "$1" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    observed = path.lstat()
+except FileNotFoundError:
+    raise SystemExit(1)
+if (
+    stat.S_ISLNK(observed.st_mode)
+    or not stat.S_ISREG(observed.st_mode)
+    or observed.st_uid != os.getuid()
+    or stat.S_IMODE(observed.st_mode) & 0o022
+):
+    raise SystemExit(1)
+lines = path.read_bytes().splitlines(keepends=True)
+header = re.compile(
+    rb"^# Orichum completion body-sha256: ([a-f0-9]{64})\n$"
+)
+matches = [
+    (index, header.fullmatch(line))
+    for index, line in enumerate(lines[:2])
+    if header.fullmatch(line)
+]
+if len(matches) != 1:
+    raise SystemExit(1)
+index, match = matches[0]
+body = b"".join((*lines[:index], *lines[index + 1 :]))
+if hashlib.sha256(body).hexdigest().encode("ascii") != match.group(1):
+    raise SystemExit(1)
+PY
+}
+
+orichum_profile_block() {
+  (($# == 3)) || return 2
+  local shell="$1"
+  local completion_path="$2"
+  local destination="$3"
+  local quoted
+  printf -v quoted '%q' "$completion_path"
+  case "$shell" in
+    zsh)
+      cat >"$destination" <<EOF
+# >>> Orichum completion >>>
+fpath=($quoted \$fpath)
+if (( \$+functions[compdef] )); then
+  autoload -Uz _orichum
+  compdef _orichum orichum
+fi
+# <<< Orichum completion <<<
+EOF
+      ;;
+    bash)
+      cat >"$destination" <<EOF
+# >>> Orichum completion >>>
+if [ -n "\${BASH_VERSION:-}" ] && [ -r $quoted ]; then
+  . $quoted
+fi
+# <<< Orichum completion <<<
+EOF
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+orichum_profile_block_matches() {
+  (($# == 2)) || return 2
+  workflow_python -I -B - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+profile = Path(sys.argv[1])
+expected = Path(sys.argv[2]).read_bytes()
+try:
+    observed = profile.lstat()
+except FileNotFoundError:
+    raise SystemExit(1)
+if (
+    stat.S_ISLNK(observed.st_mode)
+    or not stat.S_ISREG(observed.st_mode)
+    or observed.st_uid != os.getuid()
+):
+    raise SystemExit(1)
+payload = profile.read_bytes()
+if payload.count(b"# >>> Orichum completion >>>") != 1:
+    raise SystemExit(1)
+if payload.count(b"# <<< Orichum completion <<<") != 1:
+    raise SystemExit(1)
+start = payload.index(b"# >>> Orichum completion >>>")
+end = payload.index(b"# <<< Orichum completion <<<", start)
+end = payload.find(b"\n", end)
+end = len(payload) if end < 0 else end + 1
+if payload[start:end] != expected:
+    raise SystemExit(1)
+PY
+}
+
+reconcile_orichum_profile_block() {
+  (($# == 4)) || return 2
+  local profile="$1"
+  local block="$2"
+  local shell="$3"
+  local manual="$4"
+  local status=0
+  workflow_python -I -B - "$profile" "$block" <<'PY' || status=$?
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+profile = Path(sys.argv[1])
+block = Path(sys.argv[2]).read_bytes()
+begin = b"# >>> Orichum completion >>>"
+end = b"# <<< Orichum completion <<<"
+
+def fingerprint(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+def read_path(path):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise SystemExit(10)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid():
+            raise SystemExit(10)
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read()
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            fingerprint(before) != fingerprint(after)
+            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise SystemExit(10)
+        return current, payload
+    finally:
+        os.close(descriptor)
+
+try:
+    observed, payload = read_path(profile)
+except FileNotFoundError:
+    observed = None
+    payload = b""
+mode = 0o600 if observed is None else stat.S_IMODE(observed.st_mode)
+begin_count = payload.count(begin)
+end_count = payload.count(end)
+if begin_count == end_count == 0:
+    separator = b"" if not payload or payload.endswith(b"\n") else b"\n"
+    separator += b"" if not payload else b"\n"
+    updated = payload + separator + block
+elif begin_count == end_count == 1:
+    start = payload.index(begin)
+    finish = payload.index(end, start)
+    finish = payload.find(b"\n", finish)
+    finish = len(payload) if finish < 0 else finish + 1
+    if payload[start:finish] != block:
+        raise SystemExit(10)
+    updated = payload
+else:
+    raise SystemExit(10)
+if updated == payload:
+    raise SystemExit(0)
+profile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+descriptor, temporary = tempfile.mkstemp(
+    prefix=".orichum-profile.", dir=profile.parent
+)
+claim = Path(temporary + ".original")
+
+def retain_or_restore_claim():
+    try:
+        os.link(claim, profile, follow_symlinks=False)
+    except FileExistsError:
+        print(
+            f"WARNING: original profile retained at conflict path: {claim}",
+            file=sys.stderr,
+        )
+    except OSError:
+        print(
+            f"WARNING: original profile retained at conflict path: {claim}",
+            file=sys.stderr,
+        )
+    else:
+        os.unlink(claim)
+
+try:
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(updated)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    # Claim the path atomically before replacement.
+    if observed is None:
+        try:
+            os.link(temporary, profile, follow_symlinks=False)
+        except (FileExistsError, OSError):
+            raise SystemExit(10)
+    else:
+        try:
+            os.rename(profile, claim)
+        except (FileNotFoundError, OSError):
+            raise SystemExit(10)
+        try:
+            current, current_payload = read_path(claim)
+        except (OSError, SystemExit):
+            retain_or_restore_claim()
+            raise
+        if (
+            fingerprint(current) != fingerprint(observed)
+            or current_payload != payload
+        ):
+            retain_or_restore_claim()
+            raise SystemExit(10)
+        # Install without replacing a concurrent writer.
+        try:
+            os.link(temporary, profile, follow_symlinks=False)
+        except (FileExistsError, OSError):
+            retain_or_restore_claim()
+            raise SystemExit(10)
+        os.unlink(claim)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+  case "$status" in
+    0) return 0 ;;
+    10)
+      printf 'WARNING: retained unsafe or drifted Orichum completion profile: %s\n' \
+        "$profile" >&2
+      printf 'Manual %s activation: %s\n' "$shell" "$manual" >&2
+      return 0
+      ;;
+    *) return "$status" ;;
+  esac
+}
+
+reconcile_orichum_completions() {
+  (($# == 4 || $# == 5)) || return 2
+  local workflow_root="$1"
+  local home_root="$2"
+  local config_root="$3"
+  local data_root="$4"
+  local completion_root zsh_path bash_path fish_path fish_record prior_fish_path
+  local bash_login_profile temporary record_status
+  local zsh_manual bash_manual quoted
+  completion_root="$(orichum_completion_root "$home_root")"
+  zsh_path="$completion_root/zsh/_orichum"
+  bash_path="$completion_root/bash/orichum"
+  fish_path="$(orichum_fish_completion_path)"
+  fish_record="$(orichum_fish_completion_record_path "$home_root")"
+  bash_login_profile="${5:-$(orichum_bash_login_profile_path)}"
+  prior_fish_path=
+  record_status=0
+  prior_fish_path="$(
+    orichum_recorded_fish_completion_path "$home_root"
+  )" || record_status=$?
+  case "$record_status" in
+    0) ;;
+    1) prior_fish_path= ;;
+    *)
+      printf 'ERROR: refusing unsafe Orichum fish completion record: %s\n' \
+        "$fish_record" >&2
+      return 1
+      ;;
+  esac
+  if [[ -n "$prior_fish_path" && "$prior_fish_path" != "$fish_path" && \
+        ( -e "$prior_fish_path" || -L "$prior_fish_path" ) ]]; then
+    orichum_completion_file_is_owned "$prior_fish_path" || {
+      printf 'ERROR: refusing drifted prior Orichum fish completion: %s\n' \
+        "$prior_fish_path" >&2
+      return 1
+    }
+  fi
+  ORICHUM_HOME="$home_root" ORICHUM_CONFIG_HOME="$config_root" \
+  ORICHUM_DATA_HOME="$data_root" \
+    render_orichum_completion_definition \
+      "$workflow_root" zsh "$zsh_path" || return 1
+  ORICHUM_HOME="$home_root" ORICHUM_CONFIG_HOME="$config_root" \
+  ORICHUM_DATA_HOME="$data_root" \
+    render_orichum_completion_definition \
+      "$workflow_root" bash "$bash_path" || return 1
+  ORICHUM_HOME="$home_root" ORICHUM_CONFIG_HOME="$config_root" \
+  ORICHUM_DATA_HOME="$data_root" \
+    render_orichum_completion_definition \
+      "$workflow_root" fish "$fish_path" || return 1
+  if [[ -n "$prior_fish_path" && "$prior_fish_path" != "$fish_path" ]]; then
+    rm -f -- "$prior_fish_path"
+  fi
+  orichum_write_fish_completion_record "$home_root" "$fish_path" || \
+    return 1
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/orichum-profiles.XXXXXX")" || \
+    return 1
+  orichum_profile_block zsh "$(dirname "$zsh_path")" \
+    "$temporary/zsh.block"
+  orichum_profile_block bash "$bash_path" "$temporary/bash.block"
+  printf -v quoted '%q' "$(dirname "$zsh_path")"
+  zsh_manual="fpath=($quoted \$fpath); autoload -Uz compinit && compinit"
+  printf -v quoted '%q' "$bash_path"
+  bash_manual="source $quoted"
+  reconcile_orichum_profile_block \
+    "$HOME/.zshrc" "$temporary/zsh.block" zsh "$zsh_manual" || {
+      rm -rf -- "$temporary"
+      return 1
+    }
+  reconcile_orichum_profile_block \
+    "$HOME/.bashrc" "$temporary/bash.block" bash "$bash_manual" || {
+      rm -rf -- "$temporary"
+      return 1
+    }
+  reconcile_orichum_profile_block \
+    "$bash_login_profile" "$temporary/bash.block" bash "$bash_manual" || {
+      rm -rf -- "$temporary"
+      return 1
+    }
+  rm -rf -- "$temporary"
+}
+
+verify_orichum_completions() {
+  (($# == 4 || $# == 5)) || return 2
+  local workflow_root="$1"
+  local home_root="$2"
+  local config_root="$3"
+  local data_root="$4"
+  local completion_root zsh_path bash_path fish_path recorded_fish_path
+  local bash_login_profile temporary shell target
+  completion_root="$(orichum_completion_root "$home_root")"
+  zsh_path="$completion_root/zsh/_orichum"
+  bash_path="$completion_root/bash/orichum"
+  fish_path="$(orichum_fish_completion_path)"
+  recorded_fish_path="$(
+    orichum_recorded_fish_completion_path "$home_root"
+  )" || return 1
+  [[ "$recorded_fish_path" == "$fish_path" ]] || return 1
+  bash_login_profile="${5:-$(orichum_bash_login_profile_path)}"
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/orichum-completion-verify.XXXXXX")" || \
+    return 1
+  temporary="$(cd -P "$temporary" && pwd)" || return 1
+  for shell in zsh bash fish; do
+    case "$shell" in
+      zsh) target="$zsh_path" ;;
+      bash) target="$bash_path" ;;
+      fish) target="$fish_path" ;;
+    esac
+    orichum_completion_file_is_owned "$target" || {
+      rm -rf -- "$temporary"
+      return 1
+    }
+    ORICHUM_HOME="$home_root" ORICHUM_CONFIG_HOME="$config_root" \
+    ORICHUM_DATA_HOME="$data_root" \
+      render_orichum_completion_definition \
+        "$workflow_root" "$shell" "$temporary/$shell" "$temporary" || {
+          rm -rf -- "$temporary"
+          return 1
+        }
+    cmp -s "$temporary/$shell" "$target" || {
+      rm -rf -- "$temporary"
+      return 1
+    }
+  done
+  orichum_profile_block zsh "$(dirname "$zsh_path")" \
+    "$temporary/zsh.block"
+  orichum_profile_block bash "$bash_path" "$temporary/bash.block"
+  local status=0
+  if ! orichum_profile_block_matches \
+      "$HOME/.zshrc" "$temporary/zsh.block"; then
+    status=1
+  elif ! orichum_profile_block_matches \
+      "$HOME/.bashrc" "$temporary/bash.block"; then
+    status=1
+  elif ! orichum_profile_block_matches \
+      "$bash_login_profile" "$temporary/bash.block"; then
+    status=1
+  fi
+  rm -rf -- "$temporary"
+  return "$status"
+}
+
+verified_orichum_completion_artifact() {
+  (($# == 1)) || return 2
+  local completion_root zsh_path bash_path fish_path recorded_fish_path
+  completion_root="$(orichum_completion_root "$1")"
+  zsh_path="$completion_root/zsh/_orichum"
+  bash_path="$completion_root/bash/orichum"
+  fish_path="$(orichum_fish_completion_path)"
+  recorded_fish_path="$(
+    orichum_recorded_fish_completion_path "$1"
+  )" || return 1
+  [[ "$recorded_fish_path" == "$fish_path" ]] || return 1
+  orichum_completion_file_is_owned "$zsh_path" && \
+    orichum_completion_file_is_owned "$bash_path" && \
+    orichum_completion_file_is_owned "$fish_path" || return 1
+  workflow_python -I -B - "$zsh_path" "$bash_path" "$fish_path" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+digest = hashlib.sha256()
+for path in map(Path, sys.argv[1:]):
+    digest.update(path.name.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+print(digest.hexdigest())
 PY
 }
 

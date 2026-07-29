@@ -40,6 +40,192 @@ install -d -m 0700 "$path_home"
   [[ "$(workflow_cache_dir)" == "$fixture/custom-home/cache" ]]
 )
 
+completion_fixture="$fixture/completion"
+completion_home="$completion_fixture/home"
+completion_config="$completion_fixture/config"
+completion_data="$completion_fixture/data"
+completion_xdg="$completion_fixture/xdg"
+install -d -m 0700 \
+  "$completion_home" "$completion_config" "$completion_data" \
+  "$completion_xdg"
+printf '# user login profile\n' >"$completion_home/.bash_profile"
+(
+  export HOME="$completion_home"
+  export XDG_CONFIG_HOME="$completion_xdg"
+  export ORICHUM_HOME="$completion_data"
+  export ORICHUM_CONFIG_HOME="$completion_config"
+  export ORICHUM_DATA_HOME="$completion_data"
+  reconcile_orichum_completions \
+    "$ROOT" "$completion_data" "$completion_config" "$completion_data"
+  completion_targets=(
+    "$completion_data/completions/zsh/_orichum"
+    "$completion_data/completions/bash/orichum"
+    "$completion_xdg/fish/completions/orichum.fish"
+    "$completion_data/completions/fish-path"
+    "$completion_home/.zshrc"
+    "$completion_home/.bashrc"
+    "$completion_home/.bash_profile"
+  )
+  for target in "${completion_targets[@]}"; do
+    [[ -f "$target" && ! -L "$target" ]]
+  done
+  verify_orichum_completions \
+    "$ROOT" "$completion_data" "$completion_config" "$completion_data"
+  first_digest="$(
+    for target in "${completion_targets[@]}"; do
+      sha256_file "$target"
+    done
+  )"
+  reconcile_orichum_completions \
+    "$ROOT" "$completion_data" "$completion_config" "$completion_data"
+  second_digest="$(
+    for target in "${completion_targets[@]}"; do
+      sha256_file "$target"
+    done
+  )"
+  [[ "$second_digest" == "$first_digest" ]]
+  [[ "$(rg -c '^# >>> Orichum completion >>>$' \
+    "$completion_home/.zshrc")" == 1 ]]
+  [[ "$(rg -c '^# >>> Orichum completion >>>$' \
+    "$completion_home/.bashrc")" == 1 ]]
+  HOME="$completion_home" bash --noprofile --norc -c \
+    'source "$HOME/.bashrc"; complete -p orichum' >/dev/null
+  HOME="$completion_home" bash -l -c \
+    'complete -p orichum' >/dev/null
+  if command -v zsh >/dev/null 2>&1; then
+    HOME="$completion_home" zsh -f -c \
+      'source "$HOME/.zshrc"; autoload -Uz compinit; compinit -d "$HOME/.zcompdump"; whence -w _orichum' \
+      | rg -Fq '_orichum: function'
+  fi
+  orichum_completion_file_is_owned \
+    "$completion_data/completions/zsh/_orichum"
+  printf '\n# drift\n' >>"$completion_data/completions/zsh/_orichum"
+  if verify_orichum_completions \
+      "$ROOT" "$completion_data" "$completion_config" "$completion_data"; then
+    printf 'drifted completion artifact passed verification\n' >&2
+    exit 1
+  fi
+)
+
+completion_xdg_migration="$fixture/completion-xdg-migration"
+install -d -m 0700 \
+  "$completion_xdg_migration/home" \
+  "$completion_xdg_migration/config" \
+  "$completion_xdg_migration/data" \
+  "$completion_xdg_migration/xdg-one" \
+  "$completion_xdg_migration/xdg-two"
+(
+  export HOME="$completion_xdg_migration/home"
+  export ORICHUM_HOME="$completion_xdg_migration/data"
+  export ORICHUM_CONFIG_HOME="$completion_xdg_migration/config"
+  export ORICHUM_DATA_HOME="$completion_xdg_migration/data"
+  export XDG_CONFIG_HOME="$completion_xdg_migration/xdg-one"
+  reconcile_orichum_completions \
+    "$ROOT" "$ORICHUM_HOME" "$ORICHUM_CONFIG_HOME" "$ORICHUM_DATA_HOME"
+  [[ -f "$XDG_CONFIG_HOME/fish/completions/orichum.fish" ]]
+  export XDG_CONFIG_HOME="$completion_xdg_migration/xdg-two"
+  reconcile_orichum_completions \
+    "$ROOT" "$ORICHUM_HOME" "$ORICHUM_CONFIG_HOME" "$ORICHUM_DATA_HOME"
+  [[ ! -e "$completion_xdg_migration/xdg-one/fish/completions/orichum.fish" ]]
+  [[ -f "$XDG_CONFIG_HOME/fish/completions/orichum.fish" ]]
+)
+
+profile_fallback="$fixture/profile-fallback"
+install -d -m 0700 \
+  "$profile_fallback/home" "$profile_fallback/config" \
+  "$profile_fallback/data" "$profile_fallback/xdg"
+printf '# portable profile\n' >"$profile_fallback/home/.profile"
+(
+  export HOME="$profile_fallback/home"
+  export XDG_CONFIG_HOME="$profile_fallback/xdg"
+  export ORICHUM_HOME="$profile_fallback/data"
+  export ORICHUM_CONFIG_HOME="$profile_fallback/config"
+  export ORICHUM_DATA_HOME="$profile_fallback/data"
+  reconcile_orichum_completions \
+    "$ROOT" "$ORICHUM_HOME" "$ORICHUM_CONFIG_HOME" "$ORICHUM_DATA_HOME"
+  sh -n "$HOME/.profile"
+  HOME="$HOME" bash -l -c 'complete -p orichum' >/dev/null
+)
+
+profile_race="$fixture/profile-race"
+install -d -m 0700 "$profile_race"
+printf '# user profile\n' >"$profile_race/profile"
+orichum_profile_block bash "$completion_data/completions/bash/orichum" \
+  "$profile_race/block"
+(
+  workflow_python() {
+    shift 3
+    command python3 -c '
+import sys
+code = sys.stdin.read()
+mutation = "    profile.write_bytes(payload + b\"# concurrent edit\\n\")\n"
+marker = "    # Claim the path atomically before replacement.\n"
+if marker in code:
+    code = code.replace(marker, mutation + marker, 1)
+else:
+    needle = "    os.replace(temporary, profile)\n"
+    code = code.replace(needle, mutation + needle, 1)
+exec(compile(code, "<profile-race>", "exec"))
+' "$@"
+  }
+  reconcile_orichum_profile_block \
+    "$profile_race/profile" "$profile_race/block" bash manual \
+    >"$profile_race/stdout" 2>"$profile_race/stderr"
+)
+rg -Fq '# concurrent edit' "$profile_race/profile"
+if rg -Fq '# >>> Orichum completion >>>' "$profile_race/profile"; then
+  printf 'profile reconciliation overwrote a concurrent user edit\n' >&2
+  exit 1
+fi
+rg -Fq 'retained unsafe or drifted' "$profile_race/stderr"
+
+unsafe_completion="$fixture/unsafe-completion"
+install -d -m 0700 \
+  "$unsafe_completion/home" "$unsafe_completion/config" \
+  "$unsafe_completion/data" "$unsafe_completion/xdg"
+printf 'foreign profile\n' >"$unsafe_completion/foreign-zshrc"
+ln -s "$unsafe_completion/foreign-zshrc" \
+  "$unsafe_completion/home/.zshrc"
+(
+  export HOME="$unsafe_completion/home"
+  export XDG_CONFIG_HOME="$unsafe_completion/xdg"
+  export ORICHUM_HOME="$unsafe_completion/data"
+  export ORICHUM_CONFIG_HOME="$unsafe_completion/config"
+  export ORICHUM_DATA_HOME="$unsafe_completion/data"
+  reconcile_orichum_completions \
+    "$ROOT" "$unsafe_completion/data" "$unsafe_completion/config" \
+    "$unsafe_completion/data" \
+    >"$unsafe_completion/stdout" 2>"$unsafe_completion/stderr"
+)
+[[ -L "$unsafe_completion/home/.zshrc" ]]
+[[ "$(<"$unsafe_completion/foreign-zshrc")" == 'foreign profile' ]]
+rg -Fq 'Manual zsh activation:' "$unsafe_completion/stderr"
+
+foreign_completion="$fixture/foreign-completion"
+install -d -m 0700 \
+  "$foreign_completion/home" "$foreign_completion/config" \
+  "$foreign_completion/data/completions/zsh" "$foreign_completion/xdg"
+printf 'foreign definition\n' >"$foreign_completion/external"
+ln -s "$foreign_completion/external" \
+  "$foreign_completion/data/completions/zsh/_orichum"
+if (
+  export HOME="$foreign_completion/home"
+  export XDG_CONFIG_HOME="$foreign_completion/xdg"
+  export ORICHUM_HOME="$foreign_completion/data"
+  export ORICHUM_CONFIG_HOME="$foreign_completion/config"
+  export ORICHUM_DATA_HOME="$foreign_completion/data"
+  reconcile_orichum_completions \
+    "$ROOT" "$foreign_completion/data" "$foreign_completion/config" \
+    "$foreign_completion/data"
+) >"$foreign_completion/stdout" 2>"$foreign_completion/stderr"; then
+  printf 'foreign completion definition was overwritten\n' >&2
+  exit 1
+fi
+[[ -L "$foreign_completion/data/completions/zsh/_orichum" ]]
+[[ "$(<"$foreign_completion/external")" == 'foreign definition' ]]
+rg -Fq 'refusing unknown Orichum completion path' \
+  "$foreign_completion/stderr"
+
 [[ "$(parse_install_mode)" == fast ]]
 [[ "$(parse_install_mode --upgrade)" == upgrade ]]
 [[ "$(parse_install_mode --uninstall)" == uninstall ]]
@@ -107,12 +293,12 @@ INSTALL_MODE=upgrade
 INSTALL_MODE=fast
 component_table="$(
   print_component_status_table \
-    reused repaired upgraded reused repaired repaired
+    reused repaired upgraded reused repaired repaired reused
 )"
 rg -Fq 'CLIProxyAPI           repaired' <<<"$component_table"
 rg -Fq 'Controller plugin     repaired' <<<"$component_table"
 if print_component_status_table \
-    invalid reused reused reused reused reused >/dev/null; then
+    invalid reused reused reused reused reused reused >/dev/null; then
   printf 'invalid component status was accepted\n' >&2
   exit 1
 fi
