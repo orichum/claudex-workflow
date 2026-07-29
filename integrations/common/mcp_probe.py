@@ -181,29 +181,65 @@ def probe(
             name = call.get("name")
             arguments = call.get("arguments", {})
             expected = call.get("contains")
+            retry_contains = call.get("retry_contains")
+            attempts = call.get("attempts", 1)
+            retry_delay = call.get("retry_delay", 0)
             if (
                 not isinstance(name, str)
                 or not name
                 or not isinstance(arguments, dict)
                 or (expected is not None and not isinstance(expected, str))
+                or (
+                    retry_contains is not None
+                    and (
+                        not isinstance(retry_contains, str)
+                        or not retry_contains
+                    )
+                )
+                or isinstance(attempts, bool)
+                or not isinstance(attempts, int)
+                or not 1 <= attempts <= 31
+                or isinstance(retry_delay, bool)
+                or not isinstance(retry_delay, (int, float))
+                or not 0 <= retry_delay <= 5
+                or (attempts - 1) * retry_delay > 30
+                or (
+                    attempts > 1
+                    and (
+                        retry_contains is None
+                        or not isinstance(expected, str)
+                        or not expected
+                    )
+                )
             ):
                 raise ProbeError("MCP tool-call probe is invalid")
-            result = client.request(
-                "tools/call",
-                {"name": name, "arguments": arguments},
-            )
-            if result.get("isError") is True:
-                raise ProbeError(f"MCP tool call failed: {name}")
-            content = result.get("content")
-            if not isinstance(content, list):
-                raise ProbeError(f"MCP tool call returned invalid content: {name}")
-            text = "\n".join(
-                item["text"]
-                for item in content
-                if isinstance(item, dict)
-                and isinstance(item.get("text"), str)
-            )
-            if expected is not None and expected not in text:
+            for attempt in range(attempts):
+                result = client.request(
+                    "tools/call",
+                    {"name": name, "arguments": arguments},
+                )
+                if result.get("isError") is True:
+                    raise ProbeError(f"MCP tool call failed: {name}")
+                content = result.get("content")
+                if not isinstance(content, list):
+                    raise ProbeError(
+                        f"MCP tool call returned invalid content: {name}"
+                    )
+                text = "\n".join(
+                    item["text"]
+                    for item in content
+                    if isinstance(item, dict)
+                    and isinstance(item.get("text"), str)
+                )
+                if expected is None or expected in text:
+                    break
+                if (
+                    attempt + 1 < attempts
+                    and retry_contains is not None
+                    and retry_contains in text
+                ):
+                    time.sleep(retry_delay)
+                    continue
                 observed = " ".join(text.split())[:160]
                 detail = f" (observed: {observed})" if observed else ""
                 raise ProbeError(

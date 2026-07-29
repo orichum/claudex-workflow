@@ -697,7 +697,11 @@ for line in sys.stdin:
             "path": ".",
         }:
             semantic_ready = True
-            text = "Reindexed project: 1 files, 1 chunks"
+            text = (
+                "reindex incomplete"
+                if os.environ.get("FAKE_LEANCTX_REINDEX_MISS") == "1"
+                else "Reindexed project: 1 files, 1 chunks"
+            )
         elif name == "ctx_search" and arguments == {
             "action": "semantic",
             "mode": "dense",
@@ -791,6 +795,18 @@ FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
     "$expected_ort_runtime" "$managed_leanctx_root/leanctx/cache"
 rg -Fxq 'ctx_shell' "$fixture/leanctx-calls"
 rg -Fxq 'ctx_search' "$fixture/leanctx-calls"
+if FAKE_LEANCTX_REINDEX_MISS=1 \
+    FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
+    probe_leanctx_capabilities \
+    "$leanctx_probe" "$python_bin/python3.14" "$ROOT" "$fixture" \
+    "$expected_ort_runtime" "$managed_leanctx_root/leanctx/cache" \
+    >"$fixture/leanctx-reindex-miss.stdout" \
+    2>"$fixture/leanctx-reindex-miss.stderr"; then
+  printf 'LeanCTX capability probe accepted an incomplete reindex\n' >&2
+  exit 1
+fi
+rg -Fq 'MCP tool call omitted expected output: ctx_search' \
+  "$fixture/leanctx-reindex-miss.stderr"
 if FAKE_LEANCTX_EXTRA=ctx_call \
     FAKE_LEANCTX_EXPECTED_CACHE="$managed_leanctx_root/leanctx/cache" \
     probe_leanctx_capabilities \
