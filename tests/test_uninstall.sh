@@ -145,6 +145,16 @@ seed_installation() {
   printf 'key\n' >"$data_root/cliproxy-management.key"
   ln -s "$ROOT/bin/orichum" "$user_bin/orichum"
   render_services "$platform" "$home" "$data_root"
+  (
+    export HOME="$home"
+    export XDG_CONFIG_HOME="$home/.config"
+    export ORICHUM_HOME="$home/.orichum"
+    export ORICHUM_CONFIG_HOME="$config_root"
+    export ORICHUM_DATA_HOME="$data_root"
+    export ORICHUM_INSTALL_BOOTSTRAP=true
+    reconcile_orichum_completions \
+      "$ROOT" "$home/.orichum" "$config_root" "$data_root"
+  )
 
   if [[ "$platform" == darwin ]]; then
     printf '%s\n' \
@@ -223,6 +233,15 @@ for removed in \
      ! -L "$darwin_root/data/$removed" ]]
 done
 [[ ! -e "$darwin_root/user-bin/orichum" ]]
+[[ ! -e "$darwin_root/home/.orichum/completions/zsh/_orichum" ]]
+[[ ! -e "$darwin_root/home/.orichum/completions/bash/orichum" ]]
+[[ ! -e "$darwin_root/home/.config/fish/completions/orichum.fish" ]]
+if rg -q '^# (>>>|<<<) Orichum completion' \
+    "$darwin_root/home/.zshrc" "$darwin_root/home/.bashrc" \
+    "$darwin_root/home/.bash_profile"; then
+  printf 'managed completion profile block survived uninstall\n' >&2
+  exit 1
+fi
 [[ ! -e "$darwin_root/home/Library/LaunchAgents/io.orichum.cliproxy.plist" ]]
 [[ ! -e "$darwin_root/home/Library/LaunchAgents/io.orichum.leanctx-proxy.plist" ]]
 [[ ! -e "$darwin_root/home/Library/LaunchAgents/io.orichum.route-proxy.plist" ]]
@@ -233,6 +252,79 @@ grep -Fq 'bootout' "$darwin_root/service.log"
 run_uninstall darwin "$darwin_root"
 [[ -f "$darwin_root/data/auth/account.json" ]]
 [[ -f "$darwin_root/config/projects.json" ]]
+
+drift_root="$TEST_ROOT/drifted-completion"
+seed_installation darwin "$drift_root"
+printf '\n# user-edited completion\n' \
+  >>"$drift_root/home/.orichum/completions/zsh/_orichum"
+python3 - "$drift_root/home/.bashrc" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+payload = path.read_text(encoding="utf-8")
+path.write_text(
+    payload.replace("  . ", "  . -- ", 1),
+    encoding="utf-8",
+)
+PY
+run_uninstall darwin "$drift_root" \
+  >"$drift_root/uninstall.stdout" 2>"$drift_root/uninstall.stderr"
+[[ -f "$drift_root/home/.orichum/completions/zsh/_orichum" ]]
+[[ -f "$drift_root/home/.bashrc" ]]
+rg -Fq '# >>> Orichum completion >>>' "$drift_root/home/.bashrc"
+rg -Fq 'retained drifted Orichum completion' \
+  "$drift_root/uninstall.stderr"
+[[ ! -e "$drift_root/home/.orichum/completions/bash/orichum" ]]
+
+xdg_change_root="$TEST_ROOT/xdg-change"
+seed_installation darwin "$xdg_change_root"
+install -d "$xdg_change_root/old-xdg"
+(
+  export HOME="$xdg_change_root/home"
+  export XDG_CONFIG_HOME="$xdg_change_root/old-xdg"
+  export ORICHUM_HOME="$xdg_change_root/home/.orichum"
+  export ORICHUM_CONFIG_HOME="$xdg_change_root/config"
+  export ORICHUM_DATA_HOME="$xdg_change_root/data"
+  export ORICHUM_INSTALL_BOOTSTRAP=true
+  reconcile_orichum_completions \
+    "$ROOT" "$ORICHUM_HOME" "$ORICHUM_CONFIG_HOME" "$ORICHUM_DATA_HOME"
+)
+[[ -f "$xdg_change_root/old-xdg/fish/completions/orichum.fish" ]]
+run_uninstall darwin "$xdg_change_root"
+[[ ! -e "$xdg_change_root/old-xdg/fish/completions/orichum.fish" ]]
+
+profile_race="$TEST_ROOT/uninstall-profile-race"
+install -d "$profile_race"
+orichum_profile_block bash "/tmp/orichum-completion" "$profile_race/block"
+{
+  printf '# user profile\n'
+  cat "$profile_race/block"
+} >"$profile_race/profile"
+(
+  workflow_python() {
+    shift 3
+    command python3 -c '
+import sys
+code = sys.stdin.read()
+mutation = "    profile.write_bytes(payload + b\"# concurrent edit\\n\")\n"
+marker = "    # Claim the path atomically before replacement.\n"
+if marker in code:
+    code = code.replace(marker, mutation + marker, 1)
+else:
+    needle = "    os.replace(temporary, profile)\n"
+    code = code.replace(needle, mutation + needle, 1)
+exec(compile(code, "<profile-race>", "exec"))
+' "$@"
+  }
+  orichum_uninstall_remove_profile_block \
+    "$profile_race/profile" "$profile_race/block" \
+    >"$profile_race/stdout" 2>"$profile_race/stderr"
+)
+rg -Fq '# concurrent edit' "$profile_race/profile"
+rg -Fq '# >>> Orichum completion >>>' "$profile_race/profile"
+rg -Fq 'retained drifted Orichum completion profile' \
+  "$profile_race/stderr"
 
 systemd_root="$TEST_ROOT/systemd-purge"
 seed_installation Linux "$systemd_root"

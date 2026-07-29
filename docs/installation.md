@@ -39,8 +39,9 @@ The first run performs the complete installation. It:
 7. probes required CLIProxyAPI behavior, the exact bounded MCP surfaces,
    LeanCTX dense semantic search, and LeanCTX's isolated proxy configuration;
 8. installs or reconciles the shared loopback services;
-9. preserves valid configuration and authentication;
-10. runs `orichum doctor` and reports the final locations and ports once a
+9. installs native zsh, Bash, and fish completion and bounded shell activation;
+10. preserves valid configuration and authentication;
+11. runs `orichum doctor` and reports the final locations and ports once a
    provider route is available.
 
 ONNX Runtime provisioning is eager and idempotent, so a verified runtime is
@@ -118,6 +119,8 @@ next available port.
 | Stable private Python | `~/.orichum/bin/orichum-python` |
 | Logical sessions and install state | `~/.orichum/state/` |
 | LeanCTX project knowledge | `~/.orichum/leanctx/` |
+| zsh and Bash completion definitions | `~/.orichum/completions/` |
+| fish completion definition | `${XDG_CONFIG_HOME:-~/.config}/fish/completions/orichum.fish` |
 | Logs and cache | `~/.orichum/logs/`, `~/.orichum/cache/` |
 
 Set `ORICHUM_HOME` to one absolute private directory before installation to
@@ -137,6 +140,9 @@ The only normal paths outside `ORICHUM_HOME` are:
 
 - `~/.local/bin/orichum`, a launcher symlink;
 - the operating system's LaunchAgent or systemd user-unit files;
+- the fish completion definition under the user's XDG configuration directory;
+- bounded completion blocks in `~/.zshrc`, `~/.bashrc`, and the effective Bash
+  login profile (`~/.bash_profile`, `~/.bash_login`, or `~/.profile`);
 - the per-user lifecycle lock while install or uninstall is running.
 
 The lifecycle lock directory is removed when the operation ends.
@@ -186,10 +192,28 @@ orichum doctor
 orichum config paths
 ```
 
-The installer never changes the system Python, shell profiles, or another
-project's environment. Upgrade staging is transactional: an unsuccessful
-upgrade restores the prior managed binaries and service state. Orichum installs
-LeanCTX directly from its verified release asset and does not run its
+The installer never changes the system Python or another project's
+environment. It manages only the profile content between these exact markers:
+
+```text
+# >>> Orichum completion >>>
+# <<< Orichum completion <<<
+```
+
+The zsh block adds Orichum's definition directory to `fpath` and registers the
+function only when completion is already initialized; it does not run
+`compinit`. The Bash block sources the generated definition from both
+interactive and login shells. Missing profiles are created privately.
+Symlinked, foreign-owned, malformed, concurrently changed, or edited managed
+blocks are retained unchanged, and the installer prints a manual activation
+command instead. Completion definitions carry a body digest so upgrades and
+uninstall can distinguish owned files from edited content. Orichum also records
+the active fish destination under `~/.orichum/completions/` so reinstall and
+uninstall can reconcile it after `XDG_CONFIG_HOME` changes.
+
+Upgrade staging is transactional: an unsuccessful upgrade restores the prior
+managed definitions, profile blocks, binaries, and service state. Orichum
+installs LeanCTX directly from its verified release asset and does not run its
 machine-wide `wrap`, `setup`, `onboard`, `init`, or `proxy enable` flows. It
 starts only the owned proxy process described above.
 
@@ -202,7 +226,9 @@ Run uninstall from the Orichum checkout:
 ```
 
 This stops and removes only verified Orichum-owned services, removes the
-`orichum` launcher, and deletes replaceable managed runtime files. It preserves:
+`orichum` launcher, removes unchanged completion definitions and exact managed
+profile blocks, and deletes replaceable managed runtime files. Edited or
+ambiguous completion/profile content is retained with a warning. It preserves:
 
 - provider credentials and named accounts;
 - project-bound Atlassian credentials;

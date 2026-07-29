@@ -10,6 +10,18 @@ rg -Fq 'orichum --version' "$ROOT/docs/cli-reference.md"
 rg -Fq '[Changelog](CHANGELOG.md)' "$ROOT/README.md"
 rg -Fq 'orichum sessions cleanup' \
   "$ROOT/docs/cli-reference.md" "$ROOT/docs/sessions.md"
+for completion_command in \
+    'orichum completion zsh' \
+    'orichum completion bash' \
+    'orichum completion fish'; do
+  rg -Fq "$completion_command" "$ROOT/docs/cli-reference.md"
+done
+rg -Fq '# >>> Orichum completion >>>' "$ROOT/docs/installation.md"
+if rg -Fq 'never changes the system Python, shell profiles' \
+    "$ROOT/docs/installation.md"; then
+  printf 'installation guide still denies managed profile activation\n' >&2
+  exit 1
+fi
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-smoke.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 

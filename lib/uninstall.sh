@@ -247,6 +247,209 @@ orichum_uninstall_validate_lifecycle_roots() {
   done
 }
 
+orichum_uninstall_remove_completion_file() {
+  (($# == 1)) || return 2
+  local path="$1"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  if orichum_completion_file_is_owned "$path"; then
+    rm -f -- "$path"
+    return
+  fi
+  printf 'WARNING: retained drifted Orichum completion: %s\n' "$path" >&2
+}
+
+orichum_uninstall_remove_profile_block() {
+  (($# == 2)) || return 2
+  local profile="$1"
+  local expected="$2"
+  local status=0
+  workflow_python -I -B - "$profile" "$expected" <<'PY' || status=$?
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+profile = Path(sys.argv[1])
+expected = Path(sys.argv[2]).read_bytes()
+begin = b"# >>> Orichum completion >>>"
+end = b"# <<< Orichum completion <<<"
+
+def fingerprint(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+def read_path(path):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise SystemExit(10)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid():
+            raise SystemExit(10)
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read()
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if (
+            fingerprint(before) != fingerprint(after)
+            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise SystemExit(10)
+        return current, payload
+    finally:
+        os.close(descriptor)
+
+try:
+    observed, payload = read_path(profile)
+except FileNotFoundError:
+    raise SystemExit(0)
+begin_count = payload.count(begin)
+end_count = payload.count(end)
+if begin_count == end_count == 0:
+    raise SystemExit(0)
+if begin_count != 1 or end_count != 1:
+    raise SystemExit(10)
+start = payload.index(begin)
+finish = payload.index(end, start)
+finish = payload.find(b"\n", finish)
+finish = len(payload) if finish < 0 else finish + 1
+if payload[start:finish] != expected:
+    raise SystemExit(10)
+updated = payload[:start] + payload[finish:]
+descriptor, temporary = tempfile.mkstemp(
+    prefix=".orichum-profile.", dir=profile.parent
+)
+claim = Path(temporary + ".original")
+
+def retain_or_restore_claim():
+    try:
+        os.link(claim, profile, follow_symlinks=False)
+    except FileExistsError:
+        print(
+            f"WARNING: original profile retained at conflict path: {claim}",
+            file=sys.stderr,
+        )
+    except OSError:
+        print(
+            f"WARNING: original profile retained at conflict path: {claim}",
+            file=sys.stderr,
+        )
+    else:
+        os.unlink(claim)
+
+try:
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(updated)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, stat.S_IMODE(observed.st_mode))
+    # Claim the path atomically before replacement.
+    try:
+        os.rename(profile, claim)
+    except (FileNotFoundError, OSError):
+        raise SystemExit(10)
+    try:
+        current, current_payload = read_path(claim)
+    except (OSError, SystemExit):
+        retain_or_restore_claim()
+        raise
+    if (
+        fingerprint(current) != fingerprint(observed)
+        or current_payload != payload
+    ):
+        retain_or_restore_claim()
+        raise SystemExit(10)
+    # Install without replacing a concurrent writer.
+    try:
+        os.link(temporary, profile, follow_symlinks=False)
+    except (FileExistsError, OSError):
+        retain_or_restore_claim()
+        raise SystemExit(10)
+    os.unlink(claim)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+  case "$status" in
+    0) return 0 ;;
+    10)
+      printf 'WARNING: retained drifted Orichum completion profile: %s\n' \
+        "$profile" >&2
+      return 0
+      ;;
+    *) return "$status" ;;
+  esac
+}
+
+orichum_uninstall_completions() {
+  (($# == 1)) || return 2
+  local home_root="$1"
+  local completion_root fish_path fish_record recorded_fish_path temporary
+  local record_status profile
+  completion_root="$(orichum_completion_root "$home_root")"
+  fish_path="$(orichum_fish_completion_path)"
+  fish_record="$(orichum_fish_completion_record_path "$home_root")"
+  recorded_fish_path=
+  record_status=0
+  recorded_fish_path="$(
+    orichum_recorded_fish_completion_path "$home_root"
+  )" || record_status=$?
+  case "$record_status" in
+    0) ;;
+    1) recorded_fish_path= ;;
+    *)
+      printf 'WARNING: retained unsafe Orichum fish completion record: %s\n' \
+        "$fish_record" >&2
+      recorded_fish_path=
+      ;;
+  esac
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/orichum-uninstall.XXXXXX")" || \
+    return 1
+  orichum_profile_block zsh \
+    "$completion_root/zsh" "$temporary/zsh.block"
+  orichum_profile_block bash \
+    "$completion_root/bash/orichum" "$temporary/bash.block"
+  orichum_uninstall_remove_profile_block \
+    "$HOME/.zshrc" "$temporary/zsh.block"
+  orichum_uninstall_remove_profile_block \
+    "$HOME/.bashrc" "$temporary/bash.block"
+  for profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    orichum_uninstall_remove_profile_block \
+      "$profile" "$temporary/bash.block"
+  done
+  orichum_uninstall_remove_completion_file \
+    "$completion_root/zsh/_orichum"
+  orichum_uninstall_remove_completion_file \
+    "$completion_root/bash/orichum"
+  orichum_uninstall_remove_completion_file "$fish_path"
+  if [[ -n "$recorded_fish_path" && "$recorded_fish_path" != "$fish_path" ]]; then
+    orichum_uninstall_remove_completion_file "$recorded_fish_path"
+  fi
+  if [[ "$record_status" -le 1 ]]; then
+    rm -f -- "$fish_record"
+  fi
+  rmdir "$completion_root/zsh" "$completion_root/bash" \
+    "$completion_root" \
+    >/dev/null 2>&1 || true
+  rm -rf -- "$temporary"
+}
+
 orichum_uninstall() {
   local purge="${1:-false}"
   local workflow_root="${WORKFLOW_ROOT:?}"
@@ -352,6 +555,7 @@ orichum_uninstall() {
     systemctl --user daemon-reload >/dev/null
   fi
   rm -f -- "$launcher"
+  orichum_uninstall_completions "$home_root"
 
   if [[ "$purge" == true ]]; then
     rm -rf -- "$home_root" "$data_root" "$config_root" "$cache_root"

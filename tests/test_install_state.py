@@ -69,6 +69,16 @@ class InstallStateTests(unittest.TestCase):
             + "\n",
         )
 
+    def test_completion_is_a_dedicated_install_component(self) -> None:
+        components = {"completion": _component(source="orichum:completion")}
+
+        write_manifest(self.state, "darwin:aarch64", components)
+
+        self.assertEqual(
+            load_manifest(self.state, "darwin:aarch64")["components"],
+            components,
+        )
+
     def test_missing_malformed_wrong_mode_or_platform_is_unverified(self) -> None:
         self.assertIsNone(load_manifest(self.state, "darwin:aarch64"))
 

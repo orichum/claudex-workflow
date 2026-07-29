@@ -600,6 +600,17 @@ routing_probe_sha="$(
     discover-models.sh integrations/common/model_routing.py \
     integrations/common/route_proxy.py
 )" || workflow_die "routing probe fingerprint failed"
+completion_input_sha="$(
+  install_contract_fingerprint \
+    bin/orichum bin/orichum-complete lib/workflow.sh \
+    integrations/common/orichum_cli.py \
+    integrations/common/orichum_completion.py \
+    integrations/common/project_context.py
+)" || workflow_die "completion installer input fingerprint failed"
+completion_probe_sha="$(
+  install_contract_fingerprint \
+    lib/workflow.sh integrations/common/orichum_completion.py
+)" || workflow_die "completion probe fingerprint failed"
 controller_plugin_decision=upgraded
 if [[ "$prior_install_state_verified" == true ]]; then
   controller_plugin_decision="$(
@@ -608,6 +619,42 @@ if [[ "$prior_install_state_verified" == true ]]; then
       1 orichum:controller-plugin \
       "$controller_plugin_input_sha" \
       "$controller_plugin_input_sha" "$controller_plugin_probe_sha"
+  )"
+fi
+completion_root="$(orichum_completion_root "$ORICHUM_HOME_ROOT")"
+completion_zsh_path="$completion_root/zsh/_orichum"
+completion_bash_path="$completion_root/bash/orichum"
+completion_fish_path="$(orichum_fish_completion_path)"
+completion_fish_record="$(
+  orichum_fish_completion_record_path "$ORICHUM_HOME_ROOT"
+)"
+completion_prior_fish_path=
+completion_prior_fish_status=0
+completion_prior_fish_path="$(
+  orichum_recorded_fish_completion_path "$ORICHUM_HOME_ROOT"
+)" || completion_prior_fish_status=$?
+[[ "$completion_prior_fish_status" -eq 0 ]] || completion_prior_fish_path=
+completion_zsh_profile="$HOME/.zshrc"
+completion_bash_profile="$HOME/.bashrc"
+completion_bash_login_profile="$(orichum_bash_login_profile_path)"
+completion_artifact="$empty_artifact_sha"
+if verify_orichum_completions \
+    "$WORKFLOW_ROOT" "$ORICHUM_HOME_ROOT" \
+    "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" \
+    "$completion_bash_login_profile" \
+    >/dev/null 2>&1; then
+  completion_artifact="$(
+    verified_orichum_completion_artifact "$ORICHUM_HOME_ROOT"
+  )" || workflow_die "completion artifact fingerprint failed"
+fi
+completion_decision=upgraded
+if [[ "$prior_install_state_verified" == true ]]; then
+  completion_decision="$(
+    decide_install_component \
+      "$prior_install_state" completion \
+      1 orichum:completion \
+      "$completion_artifact" \
+      "$completion_input_sha" "$completion_probe_sha"
   )"
 fi
 
@@ -636,6 +683,7 @@ attempt_verified_fast_install() (
   local cliproxy_service leanctx_service route_service
   local cliproxy_port claudex_port route_port leanctx_port
   local route_runtime routing_input routing_artifact
+  local completion_artifact
   local management_key_file management_key
   local binary_identity_file
   local binary_identity_pid
@@ -725,6 +773,14 @@ attempt_verified_fast_install() (
        "$WORKFLOW_ROOT/bin/orichum-route-proxy" ]] || return 1
   cmp -s "$WORKFLOW_ROOT/controller/settings.json" \
     "$WORKFLOW_DATA_ROOT/claude-config/settings.json" || return 1
+  verify_orichum_completions \
+    "$WORKFLOW_ROOT" "$ORICHUM_HOME_ROOT" \
+    "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" \
+    "$completion_bash_login_profile" \
+    >/dev/null 2>&1 || return 1
+  completion_artifact="$(
+    verified_orichum_completion_artifact "$ORICHUM_HOME_ROOT"
+  )" || return 1
 
   management_key_file="$WORKFLOW_DATA_ROOT/cliproxy-management.key"
   [[ -f "$management_key_file" && ! -L "$management_key_file" && \
@@ -785,12 +841,15 @@ attempt_verified_fast_install() (
     --arg leanctx_probe "$leanctx_probe_sha" \
     --arg controller_input "$controller_plugin_input_sha" \
     --arg controller_probe "$controller_plugin_probe_sha" \
+    --arg completion_artifact "$completion_artifact" \
+    --arg completion_input "$completion_input_sha" \
+    --arg completion_probe "$completion_probe_sha" \
     --arg routing_artifact "$routing_artifact" \
     --arg routing_input "$routing_input" \
     --arg routing_probe "$routing_probe_sha" '
       .components as $c |
       ($c | keys) == [
-        "claudex", "cliproxy", "controllerPlugin",
+        "claudex", "cliproxy", "completion", "controllerPlugin",
         "leanctx", "python", "routing"
       ] and
       $c.python == {
@@ -822,6 +881,13 @@ attempt_verified_fast_install() (
         inputSha256: $controller_input,
         probeSha256: $controller_probe
       } and
+      $c.completion == {
+        version: "1",
+        sourceIdentity: "orichum:completion",
+        artifactSha256: $completion_artifact,
+        inputSha256: $completion_input,
+        probeSha256: $completion_probe
+      } and
       $c.routing == {
         version: "1",
         sourceIdentity: "orichum:routing",
@@ -839,7 +905,7 @@ attempt_verified_fast_install() (
   [[ "$verification_ready" == true ]] || return 1
 
   print_component_status_table \
-    reused reused reused reused reused reused
+    reused reused reused reused reused reused reused
   printf 'Verified Orichum installation is current for %s.\n' "$platform"
   print_install_summary \
     "$WORKFLOW_ROOT" "$WORKFLOW_DATA_ROOT" "$USER_BIN_DIR" \
@@ -1912,6 +1978,22 @@ snapshot_path "$service_ports_path" "$snapshot_dir" service-ports
 snapshot_path "$USER_BIN_DIR/orichum" \
   "$snapshot_dir" orichum-launcher
 snapshot_path "$claude_settings_path" "$snapshot_dir" claude-settings
+snapshot_path "$completion_zsh_path" "$snapshot_dir" completion-zsh
+snapshot_path "$completion_bash_path" "$snapshot_dir" completion-bash
+snapshot_path "$completion_fish_path" "$snapshot_dir" completion-fish
+snapshot_path "$completion_fish_record" \
+  "$snapshot_dir" completion-fish-record
+if [[ -n "$completion_prior_fish_path" && \
+      "$completion_prior_fish_path" != "$completion_fish_path" ]]; then
+  snapshot_path "$completion_prior_fish_path" \
+    "$snapshot_dir" completion-fish-prior
+fi
+snapshot_path "$completion_zsh_profile" \
+  "$snapshot_dir" completion-zshrc
+snapshot_path "$completion_bash_profile" \
+  "$snapshot_dir" completion-bashrc
+snapshot_path "$completion_bash_login_profile" \
+  "$snapshot_dir" completion-bash-login
 cliproxy_transaction_active=false
 claudex_proxy_transaction_active=false
 claudex_proxy_runtime_mutated=false
@@ -1922,6 +2004,8 @@ leanctx_proxy_transaction_active=false
 leanctx_proxy_runtime_mutated=false
 install_state_transaction_active=false
 claude_settings_transaction_active=false
+completion_transaction_active=false
+completion_installed_snapshotted=false
 if [[ "$leanctx_binary_changed" == true ]]; then
   leanctx_transaction_active=true
 fi
@@ -2172,6 +2256,50 @@ PY
     release_endpoint_config_lock \
       "$WORKFLOW_DATA_ROOT" "$endpoint_lock_token" || rollback_ready=false
     endpoint_lock_owned=false
+  fi
+
+  if [[ "${completion_transaction_active:-false}" == true ]]; then
+    local completion_index
+    local -a completion_targets=(
+      "$completion_zsh_path"
+      "$completion_bash_path"
+      "$completion_fish_path"
+      "$completion_fish_record"
+      "$completion_zsh_profile"
+      "$completion_bash_profile"
+      "$completion_bash_login_profile"
+    )
+    local -a completion_names=(
+      completion-zsh
+      completion-bash
+      completion-fish
+      completion-fish-record
+      completion-zshrc
+      completion-bashrc
+      completion-bash-login
+    )
+    if [[ -n "$completion_prior_fish_path" && \
+          "$completion_prior_fish_path" != "$completion_fish_path" ]]; then
+      completion_targets+=("$completion_prior_fish_path")
+      completion_names+=(completion-fish-prior)
+    fi
+    for completion_index in "${!completion_targets[@]}"; do
+      if [[ "${completion_installed_snapshotted:-false}" == true ]] && \
+         ! snapshot_path_matches \
+           "${completion_targets[$completion_index]}" "$snapshot_dir" \
+           "${completion_names[$completion_index]}-installed"; then
+        printf 'WARNING: retained completion path changed during rollback: %s\n' \
+          "${completion_targets[$completion_index]}" >&2
+        rollback_ready=false
+        continue
+      fi
+      restore_snapshot \
+        "${completion_targets[$completion_index]}" "$snapshot_dir" \
+        "${completion_names[$completion_index]}" || rollback_ready=false
+      snapshot_path_matches \
+        "${completion_targets[$completion_index]}" "$snapshot_dir" \
+        "${completion_names[$completion_index]}" || rollback_ready=false
+    done
   fi
 
   if [[ "${orichum_launcher_mutated:-false}" == true ]]; then
@@ -2485,6 +2613,36 @@ for launcher in orichum; do
   orichum_launcher_mutated=true
 done
 
+completion_transaction_active=true
+reconcile_orichum_completions \
+  "$WORKFLOW_ROOT" "$ORICHUM_HOME_ROOT" \
+  "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" \
+  "$completion_bash_login_profile" || \
+  workflow_die "shell completion reconciliation failed"
+snapshot_path "$completion_zsh_path" \
+  "$snapshot_dir" completion-zsh-installed
+snapshot_path "$completion_bash_path" \
+  "$snapshot_dir" completion-bash-installed
+snapshot_path "$completion_fish_path" \
+  "$snapshot_dir" completion-fish-installed
+snapshot_path "$completion_fish_record" \
+  "$snapshot_dir" completion-fish-record-installed
+if [[ -n "$completion_prior_fish_path" && \
+      "$completion_prior_fish_path" != "$completion_fish_path" ]]; then
+  snapshot_path "$completion_prior_fish_path" \
+    "$snapshot_dir" completion-fish-prior-installed
+fi
+snapshot_path "$completion_zsh_profile" \
+  "$snapshot_dir" completion-zshrc-installed
+snapshot_path "$completion_bash_profile" \
+  "$snapshot_dir" completion-bashrc-installed
+snapshot_path "$completion_bash_login_profile" \
+  "$snapshot_dir" completion-bash-login-installed
+completion_installed_snapshotted=true
+completion_artifact="$(
+  verified_orichum_completion_artifact "$ORICHUM_HOME_ROOT"
+)" || workflow_die "installed completion artifact could not be fingerprinted"
+
 source "$WORKFLOW_ROOT/discover-models.sh"
 model_discovery_succeeded=true
 model_discovery_performed=false
@@ -2742,6 +2900,9 @@ jq -n \
   --arg leanctx_probe "$leanctx_probe_sha" \
   --arg controller_plugin_input "$controller_plugin_input_sha" \
   --arg controller_plugin_probe "$controller_plugin_probe_sha" \
+  --arg completion_artifact "$completion_artifact" \
+  --arg completion_input "$completion_input_sha" \
+  --arg completion_probe "$completion_probe_sha" \
   '$prior[0] + {
     python: {
       version: $python_version,
@@ -2779,6 +2940,13 @@ jq -n \
       artifactSha256: $controller_plugin_input,
       inputSha256: $controller_plugin_input,
       probeSha256: $controller_plugin_probe
+    },
+    completion: {
+      version: "1",
+      sourceIdentity: "orichum:completion",
+      artifactSha256: $completion_artifact,
+      inputSha256: $completion_input,
+      probeSha256: $completion_probe
     }
   }' >"$install_state_components" || \
   workflow_die "candidate installer state could not be built"
@@ -2820,7 +2988,8 @@ if [[ "$routing_action" == reused ]] && \
 fi
 print_component_status_table \
   "$python_decision" "$cliproxy_decision" "$claudex_decision" \
-  "$leanctx_decision" "$routing_action" "$controller_plugin_decision" || \
+  "$leanctx_decision" "$routing_action" "$controller_plugin_decision" \
+  "$completion_decision" || \
   workflow_die "component reconciliation status is invalid"
 printf 'Installed Orichum with Claudex %s, CLIProxyAPI %s, and LeanCTX %s for %s.\n' \
   "$claudex_version" "$cliproxy_version" "$leanctx_version" "$platform"
@@ -2880,6 +3049,7 @@ python_transaction_active=false
 config_transaction_active=false
 install_state_transaction_active=false
 claude_settings_transaction_active=false
+completion_transaction_active=false
 WORKFLOW_TRANSACTION_ACTIVE=false
 if [[ "$home_migration_active" == true ]]; then
   commit_orichum_home \

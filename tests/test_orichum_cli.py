@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -169,12 +170,71 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.3\n")
 
     def test_help_explains_top_level_commands(self) -> None:
-        help_text = orichum_cli.build_parser().format_help()
+        help_text = orichum_cli.build_parser().format_help().casefold()
 
         self.assertIn("start a project-aware session", help_text)
         self.assertIn("manage provider accounts", help_text)
-        self.assertIn("inspect and monitor LeanCTX", help_text)
+        self.assertIn("inspect and monitor leanctx", help_text)
         self.assertIn("inspect and clean sessions", help_text)
+
+    def test_every_public_command_has_complete_help_metadata(self) -> None:
+        def walk(
+            parser: argparse.ArgumentParser,
+            path: tuple[str, ...],
+        ) -> list[tuple[tuple[str, ...], argparse.ArgumentParser]]:
+            found = [(path, parser)]
+            for action in parser._actions:
+                if not isinstance(action, argparse._SubParsersAction):
+                    continue
+                for name, child in action.choices.items():
+                    found.extend(walk(child, (*path, name)))
+            return found
+
+        for path, parser in walk(orichum_cli.build_parser(), ("orichum",)):
+            with self.subTest(command=" ".join(path)):
+                self.assertTrue(parser.description)
+                for action in parser._actions:
+                    if isinstance(
+                        action,
+                        (argparse._HelpAction, argparse._SubParsersAction),
+                    ):
+                        continue
+                    self.assertNotIn(action.help, (None, argparse.SUPPRESS))
+                    if action.choices is not None:
+                        continue
+                    if action.option_strings and action.nargs == 0:
+                        continue
+                    self.assertIsNotNone(action.metavar)
+
+    def test_every_public_command_path_renders_help(self) -> None:
+        parser = orichum_cli.build_parser()
+
+        def paths(
+            current: argparse.ArgumentParser,
+            prefix: tuple[str, ...] = (),
+        ) -> list[tuple[str, ...]]:
+            found = [prefix]
+            for action in current._actions:
+                if not isinstance(action, argparse._SubParsersAction):
+                    continue
+                for name, child in action.choices.items():
+                    found.extend(paths(child, (*prefix, name)))
+            return found
+
+        for path in paths(parser):
+            with self.subTest(command=" ".join(("orichum", *path))):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(
+                    stdout
+                ), contextlib.redirect_stderr(
+                    stderr
+                ), self.assertRaises(SystemExit) as raised:
+                    parser.parse_args([*path, "--help"])
+
+                self.assertEqual(raised.exception.code, 0)
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertIn("usage:", stdout.getvalue())
 
     def test_run_and_fork_parse_leanctx_profiles(self) -> None:
         parser = orichum_cli.build_parser()
@@ -424,38 +484,47 @@ class OrichumCliTests(unittest.TestCase):
                 ["add", "/work/acme", "--pool", "shared"],
             )
 
-    def test_delegated_command_help_reaches_the_owning_helper(self) -> None:
+    def test_delegated_command_help_uses_the_unified_parser(self) -> None:
         cases = (
             (
                 ("context", "add", "--help"),
-                "orichum-context",
-                ["add", "--help"],
+                "usage: orichum context add",
+                "--model-stack STACK",
             ),
             (
                 ("context", "validate", "--help"),
-                "orichum-context",
-                ["validate", "--help"],
+                "usage: orichum context validate",
+                "Validate every configured project context.",
             ),
             (
                 ("plugin", "add", "--help"),
-                "orichum-plugin",
-                ["add", "--help"],
+                "usage: orichum plugin add",
+                "PLUGIN@MARKETPLACE",
             ),
             (
                 ("plugin", "list", "--help"),
-                "orichum-plugin",
-                ["list", "--help"],
+                "usage: orichum plugin list",
+                "List declared plugins.",
             ),
         )
-        for arguments, executable, expected in cases:
+        for arguments, usage, detail in cases:
             with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
                 with mock.patch.object(
                     orichum_cli, "_run_external", return_value=0
-                ) as run:
-                    status, stdout, stderr = self.run_cli(*arguments)
+                ) as run, contextlib.redirect_stdout(
+                    stdout
+                ), contextlib.redirect_stderr(
+                    stderr
+                ), self.assertRaises(SystemExit) as raised:
+                    orichum_cli.main(list(arguments))
 
-                self.assertEqual((status, stdout, stderr), (0, "", ""))
-                run.assert_called_once_with(executable, expected)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertIn(usage, stdout.getvalue())
+                self.assertIn(detail, stdout.getvalue())
+                run.assert_not_called()
 
     def test_runtime_service_ports_accepts_only_four_distinct_ports(
         self,

@@ -8,6 +8,10 @@ while [[ -L "$launcher_source" ]]; do
   [[ "$launcher_source" == /* ]] || launcher_source="$launcher_dir/$launcher_source"
 done
 WORKFLOW_ROOT="$(cd -P "$(dirname "$launcher_source")/.." && pwd)"
+if [[ "${1:-}" == __complete ]]; then
+  shift
+  exec "$WORKFLOW_ROOT/bin/orichum-complete" "$@"
+fi
 # shellcheck source=../lib/workflow.sh
 source "$WORKFLOW_ROOT/lib/workflow.sh"
 WORKFLOW_DATA_ROOT="$(workflow_data_dir)"
@@ -22,7 +26,7 @@ python_entrypoint=(
   "$WORKFLOW_ROOT"
 )
 case "${1:-}" in
-  -h|--help|--version|config|context|atlassian|models|stack|provider|plugin|leanctx|doctor|status|session|sessions|resume|fork|run)
+  -h|--help|--version|config|context|atlassian|models|stack|provider|plugin|leanctx|doctor|status|session|sessions|resume|fork|run|completion)
     exec "${python_entrypoint[@]}" "$@"
     ;;
   "")
