@@ -4,6 +4,38 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.4 - 2026-07-29
+
+### Added
+
+- Complete parser-owned help for every public Orichum command path, including
+  nested commands.
+- Native Bash, zsh, and fish completion generated from the CLI grammar, with
+  safe dynamic completion for local stacks, providers, accounts, plugins,
+  marketplaces, contexts, sessions, and runs.
+- Immutable LeanCTX `lean` and `full` residency profiles plus
+  `orichum leanctx economics` rolling and all-time telemetry.
+- Managed, SHA-pinned CPU ONNX Runtime provisioning for LeanCTX semantic
+  search.
+
+### Changed
+
+- LeanCTX project sessions now reuse a persistent shared model cache while
+  retaining private per-run configuration and state.
+- LeanCTX indexing remains capped at two threads, uses a 12% soft per-process
+  memory target, and lazily downloads the MiniLM semantic model when needed.
+- Install, upgrade, rollback, and uninstall now reconcile owned shell
+  completion definitions and profile blocks transactionally.
+
+### Fixed
+
+- Fresh installs, repairs, upgrades, and doctor checks now fail early when the
+  managed LeanCTX ONNX Runtime is missing or unsafe.
+- LeanCTX readiness probes now require a real dense semantic-search result and
+  reuse the shared model cache without weakening project isolation.
+- LeanCTX economics reports unavailable ROI explicitly instead of presenting
+  incomplete telemetry as savings.
+
 ## 0.1.0-rc.3 - 2026-07-28
 
 ### Added

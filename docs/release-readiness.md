@@ -1,15 +1,18 @@
 # Release readiness
 
-This report records the latest committed native release gates and the
-consolidated-home acceptance run against the current source on 2026-07-28. It
-separates observed live evidence from deterministic and isolated coverage.
+This report records the latest committed native release gates, the carried-
+forward consolidated-home acceptance baseline, and current deterministic
+validation. It separates observed live evidence from deterministic and
+isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.3` candidate passes native macOS ARM64, native Linux AMD64,
-isolated Ubuntu systemd-user, and deterministic regression coverage. WSL2 with
-systemd shares the Linux service implementation and has deterministic contract
-coverage; it has not been presented here as a native WSL acceptance run.
+The `0.1.0-rc.4` candidate passes deterministic regression coverage. Its
+native macOS ARM64 and Linux AMD64 release gates must be rerun after the
+release metadata is merged. The latest local installation and service evidence
+is carried forward from the `0.1.0-rc.3` baseline. WSL2 with systemd shares the
+Linux service implementation and has deterministic contract coverage; it has
+not been presented here as a native WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -23,7 +26,10 @@ Two intentionally excluded cases are not release blockers:
 Both were excluded at the user's request. Account selection, priority,
 validation, and rollover behavior remain covered deterministically.
 
-## Current consolidated-home acceptance
+## Latest consolidated-home acceptance baseline
+
+The following observed installation and service evidence was recorded on
+2026-07-28 for the `0.1.0-rc.3` release baseline:
 
 | Boundary | Observed result |
 |---|---|
@@ -33,12 +39,12 @@ validation, and rollover behavior remain covered deterministically.
 | Linux/systemd | Fresh and repeat installs completed in an Ubuntu 24.04 systemd-user container; the repeat completed in 7 seconds with one runtime release and no traceback |
 | Provider-free install | CLIProxyAPI remained active, the route proxy remained intentionally inactive, and the installer reported the bounded `pending-provider-login` state |
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
-| Local regression | Complete Python discovery plus installer, transaction, plugin, and smoke boundaries passed against the current source |
+| Local regression | The `0.1.0-rc.4` metadata branch passed 511 Python tests and all eight shell acceptance suites on 2026-07-29 |
 
-## 0.1.0-rc.3 native release gates
+## Latest published native baseline
 
-The native release gates passed against the `0.1.0-rc.3` runtime behavior
-commit `07ab093`:
+The latest published native release gates passed against the `0.1.0-rc.3`
+runtime behavior commit `07ab093`:
 
 | Gate | Result |
 |---|---|
@@ -52,7 +58,7 @@ independent licenses retained by integrated upstream tools.
 ## Provider-backed feature acceptance
 
 The following feature-level checks were run against the committed release
-baseline. The current consolidated-home run above revalidated installation,
+baseline. The consolidated-home baseline above revalidated installation,
 service ownership, health, and one provider-backed controller request.
 
 | Capability | Evidence | Result |
@@ -89,7 +95,7 @@ tool-payload measurements, not whole-session provider-token savings.
 | Boundary | Coverage |
 |---|---|
 | Python behavior | Complete local `unittest` discovery, including routing, accounts, sessions, hooks, tool deferral, LeanCTX isolation, and status rendering |
-| Shell behavior | All seven suites: smoke, plugin, installer, transaction, route, launcher, and uninstall |
+| Shell behavior | All eight suites: smoke, plugin, installer, transaction, route, launcher, completion, and uninstall |
 | Installer safety | Fresh install, idempotent upgrade, occupied-port selection, owned-service reuse, foreign-service preservation, and rollback |
 | Uninstall | Default and purge behavior in isolated homes; external tools and unrelated services are preserved |
 | Linux AMD64 | Native GitHub Actions acceptance plus a privileged Ubuntu systemd-user container |
