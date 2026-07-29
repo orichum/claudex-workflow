@@ -278,6 +278,80 @@ class OrichumSessionTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             session.agents[ROLES[0]] = session.controller
 
+    def test_new_logical_session_persists_leanctx_profile(self) -> None:
+        controller = self.binding("gpt-5.6-sol", "gpt", 1)
+        agents = {
+            role: self.binding("gpt-5.6-terra", "gpt", index + 2)
+            for index, role in enumerate(ROLES)
+        }
+
+        session = create_logical_session(
+            self.state,
+            project_root=Path("/work/project"),
+            stack="balanced",
+            controller=controller,
+            agents=agents,
+            leanctx_profile="lean",
+        )
+
+        binding = (
+            self.state
+            / "logical-sessions"
+            / session.id
+            / "binding.json"
+        )
+        document = json.loads(binding.read_text(encoding="utf-8"))
+        self.assertEqual(document["schemaVersion"], 2)
+        self.assertEqual(document["leanctxProfile"], "lean")
+        self.assertEqual(session.leanctx_profile, "lean")
+        self.assertEqual(
+            load_logical_session(self.state, session.id).leanctx_profile,
+            "lean",
+        )
+
+    def test_schema_v1_logical_session_loads_as_full_profile(self) -> None:
+        session = self.create()
+        binding = (
+            self.state
+            / "logical-sessions"
+            / session.id
+            / "binding.json"
+        )
+        document = json.loads(binding.read_text(encoding="utf-8"))
+        document["schemaVersion"] = 1
+        document.pop("leanctxProfile", None)
+        binding.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        binding.chmod(0o600)
+
+        loaded = load_logical_session(self.state, session.id)
+
+        self.assertEqual(loaded.leanctx_profile, "full")
+
+    def test_schema_v2_logical_session_rejects_unknown_leanctx_profile(
+        self,
+    ) -> None:
+        session = self.create()
+        binding = (
+            self.state
+            / "logical-sessions"
+            / session.id
+            / "binding.json"
+        )
+        document = json.loads(binding.read_text(encoding="utf-8"))
+        document["schemaVersion"] = 2
+        document["leanctxProfile"] = "wide"
+        binding.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        binding.chmod(0o600)
+
+        with self.assertRaisesRegex(LogicalSessionError, "profile"):
+            load_logical_session(self.state, session.id)
+
     def test_resolve_accepts_logical_or_claude_session_id(self) -> None:
         session = self.create()
         resolver = getattr(

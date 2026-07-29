@@ -23,7 +23,7 @@ Installer modes are separate from the `orichum` command:
 | Command | Purpose |
 |---|---|
 | `orichum --version` | Print the installed Orichum release identity |
-| `orichum` / `orichum run` | Start a project-aware session |
+| `orichum` / `orichum run [--leanctx-profile lean\|full]` | Start a project-aware session; new sessions default to the lean provider-residency profile |
 | `orichum config show` | Show the merged, redacted control plane |
 | `orichum config validate` | Validate focused configuration |
 | `orichum config paths` | Print the consolidated home, configuration, data, cache, and state paths |
@@ -58,6 +58,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum plugin remove PLUGIN@MARKETPLACE` | Uninstall and remove a declaration |
 | `orichum leanctx list [--limit N \| --all]` | List attached LeanCTX runs; include incompatible historical runs with `--all` |
 | `orichum leanctx stats [--run RUN]` | Show session MCP and shared wire-proxy savings |
+| `orichum leanctx economics [--session SESSION] [--hours HOURS]` | Show selected-session schema footprint, rolling ledger estimates, and LeanCTX's all-time estimate |
 | `orichum leanctx watch [--run RUN]` | Open LeanCTX's live terminal monitor |
 | `orichum leanctx dashboard [--run RUN] [--port PORT] [--open MODE]` | Open the local authenticated LeanCTX Observatory |
 | `orichum doctor` | Validate local component ownership, configuration, protocols, and service health |
@@ -68,7 +69,7 @@ Installer modes are separate from the `orichum` command:
 | `orichum sessions clear [--yes]` | Preview or remove all inactive logical sessions |
 | `orichum session routes ID` / `orichum sessions routes ID` | Inspect a session's frozen routes |
 | `orichum resume ID` | Resume by Orichum logical ID or Claude session UUID |
-| `orichum fork ID --stack STACK --handoff-file FILE` | Create a child session on another stack |
+| `orichum fork ID [--stack STACK] [--handoff-file FILE] [--leanctx-profile lean\|full]` | Create a child session; inherit the parent LeanCTX profile unless explicitly overridden |
 
 Forward ordinary Claude Code arguments after `--`, for example:
 
@@ -86,6 +87,8 @@ plane.
 orichum leanctx list
 orichum leanctx list --all
 orichum leanctx stats
+orichum leanctx economics
+orichum leanctx economics --session oc-s-0123456789abcdef --hours 48
 orichum leanctx watch --run run.mrds3ghq
 orichum leanctx dashboard --open browser
 orichum leanctx dashboard --run run.mrds3ghq --port 3341 --open none
@@ -105,6 +108,24 @@ sessions since the shared proxy started. These are optimizer counters, not
 provider billing, prompt-cache, reasoning, or output-token totals. A dash means
 that path has not observed measurable input yet.
 
+`economics` resolves a logical session from `--session` or, inside a live
+session, `ORICHUM_SESSION_ID`. It selects the newest attached physical run for
+that session's project and reports four deliberately separate sections:
+
+- the frozen `lean` or `full` provider-residency footprint;
+- global compression records from the shared savings ledger in the last 24
+  hours by default;
+- global timestamped prompt-cache records in the same rolling window;
+- LeanCTX's official all-time gain and injected-overhead estimate.
+
+`--hours` accepts `1` through `168`. Rolling dollar figures are upstream
+estimates from recorded ledger entries, not invoices. Prompt-cache records may
+not cover every provider request. Both rolling sections are shared across all
+Orichum projects rather than attributed to the selected session. The all-time
+estimate has a different scope, so Orichum does not calculate or display a
+rolling net-billing figure. ROI is shown as a dash when LeanCTX has no recorded
+tool spend from which to calculate it.
+
 `--port PORT` requests a specific loopback port. When omitted, Orichum selects
 the first available port starting at `3333`. `--open` accepts `browser`,
 `none`, or `vscode` and defaults to `browser`. The dashboard always binds to
@@ -115,3 +136,7 @@ Physical `run.*` IDs refer to one isolated LeanCTX runtime. Logical `oc-s-*`
 IDs refer to resumable Orichum sessions; use those with `resume`, `fork`, and
 `status` or `session routes`. Inside a live session, `orichum status` uses
 `ORICHUM_SESSION_ID`; from another shell, pass the logical ID explicitly.
+
+`orichum run` must receive `--leanctx-profile` before the forwarded argument
+separator. New sessions default to `lean`; `resume` retains the immutable
+stored profile, and `fork` inherits it unless an override is supplied.
