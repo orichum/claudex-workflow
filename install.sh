@@ -490,6 +490,7 @@ esac
 leanctx_release_asset_suffix="$(
   leanctx_release_suffix "$platform" "$claudex_arch"
 )"
+leanctx_release_tag=v3.9.12
 
 if [[ "$platform" == darwin ]]; then
   for command_name in launchctl plutil lsof; do
@@ -1267,6 +1268,22 @@ if [[ "$prior_install_state_verified" == true ]]; then
   fi
 fi
 
+if [[ "$INSTALL_MODE" == upgrade && \
+      "$prior_install_state_verified" == true && \
+      -n "$leanctx_recorded_version" ]]; then
+  if pinned_release_allows_recorded_version \
+      "$leanctx_recorded_version" "$leanctx_release_tag"; then
+    :
+  else
+    pin_status="$?"
+    if [[ "$pin_status" -eq 1 ]]; then
+      workflow_die \
+        "refusing to downgrade LeanCTX $leanctx_recorded_version to ${leanctx_release_tag#v}; use a newer Orichum release with a compatible LeanCTX pin"
+    fi
+    workflow_die "LeanCTX release pin could not be compared safely"
+  fi
+fi
+
 cliproxy_state="$(stage_github_binary \
   router-for-me/CLIProxyAPI 'CLIProxyAPI_' "_${cliproxy_os}_${cliproxy_arch}.tar.gz" \
   cli-proxy-api "$WORKFLOW_DATA_ROOT/bin/cli-proxy-api" \
@@ -1286,7 +1303,7 @@ leanctx_state="$(stage_github_binary \
   lean-ctx "$WORKFLOW_DATA_ROOT/bin/lean-ctx" \
   "$installer_temp/leanctx" "$leanctx_resolve_upstream" \
   "$leanctx_recorded_version" "$leanctx_recorded_source" \
-  "$leanctx_recorded_artifact")"
+  "$leanctx_recorded_artifact" "$leanctx_release_tag")"
 leanctx_version="$(jq -r '.version' <<<"$leanctx_state")"
 cliproxy_binary_changed="$(jq -r '.changed' <<<"$cliproxy_state")"
 claudex_binary_changed="$(jq -r '.changed' <<<"$claudex_state")"
