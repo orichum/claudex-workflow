@@ -31,6 +31,7 @@ if "--help" in sys.argv:
 if os.environ.get("FAKE_MCP_BROKEN") == "1":
     print("missing runtime dependency", file=sys.stderr)
     raise SystemExit(3)
+tool_call_count = 0
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -54,8 +55,15 @@ for line in sys.stdin:
             if os.environ.get("FAKE_MCP_PAGINATED") == "1":
                 result["nextCursor"] = "page-2"
     elif method == "tools/call":
+        tool_call_count += 1
         name = request.get("params", {}).get("name")
-        if os.environ.get("FAKE_MCP_CALL_ERROR") == "1":
+        ready_after = int(os.environ.get("FAKE_MCP_READY_AFTER", "0"))
+        if ready_after and tool_call_count < ready_after:
+            result = {
+                "content": [{"type": "text", "text": "index building"}],
+                "isError": False,
+            }
+        elif os.environ.get("FAKE_MCP_CALL_ERROR") == "1":
             result = {
                 "content": [{"type": "text", "text": "failed"}],
                 "isError": True,
@@ -82,6 +90,7 @@ for line in sys.stdin:
         paginated: bool = False,
         calls: tuple[dict[str, object], ...] = (),
         call_error: bool = False,
+        ready_after: int = 0,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         if broken:
@@ -90,6 +99,8 @@ for line in sys.stdin:
             environment["FAKE_MCP_PAGINATED"] = "1"
         if call_error:
             environment["FAKE_MCP_CALL_ERROR"] = "1"
+        if ready_after:
+            environment["FAKE_MCP_READY_AFTER"] = str(ready_after)
         command = [sys.executable, str(PROBE)]
         for tool in required:
             command.extend(["--require-tool", tool])
@@ -187,6 +198,95 @@ for line in sys.stdin:
             "MCP tool call omitted expected output: query_graph",
             completed.stderr,
         )
+
+    def test_retries_expected_output_while_retry_marker_is_present(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "contains": "query_graph completed",
+                    "retry_contains": "index building",
+                    "attempts": 3,
+                    "retry_delay": 0,
+                },
+            ),
+            ready_after=3,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_retry_exhaustion_still_rejects_missing_output(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "contains": "query_graph completed",
+                    "retry_contains": "index building",
+                    "attempts": 3,
+                    "retry_delay": 0,
+                },
+            ),
+            ready_after=4,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("observed: index building", completed.stderr)
+
+    def test_does_not_retry_a_different_missing_output(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "contains": "query_graph completed",
+                    "retry_contains": "different transient",
+                    "attempts": 2,
+                    "retry_delay": 0,
+                },
+            ),
+            ready_after=2,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("observed: index building", completed.stderr)
+
+    def test_rejects_an_unbounded_retry_policy(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "contains": "query_graph completed",
+                    "retry_contains": "index building",
+                    "attempts": 121,
+                    "retry_delay": 0,
+                },
+            ),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("MCP tool-call probe is invalid", completed.stderr)
+
+    def test_rejects_an_empty_retry_marker(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "contains": "query_graph completed",
+                    "retry_contains": "",
+                    "attempts": 2,
+                },
+            ),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("MCP tool-call probe is invalid", completed.stderr)
+
+    def test_rejects_retries_without_expected_output(self):
+        completed = self.run_probe(
+            calls=(
+                {
+                    "name": "query_graph",
+                    "retry_contains": "index building",
+                    "attempts": 2,
+                },
+            ),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("MCP tool-call probe is invalid", completed.stderr)
 
 
 if __name__ == "__main__":

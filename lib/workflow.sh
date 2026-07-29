@@ -4040,9 +4040,9 @@ PY
     --probe-call \
       '{"name":"ctx_overview","arguments":{"path":".","task":"Verify Orichum readiness"}}' \
     --probe-call \
-      '{"name":"ctx_search","arguments":{"action":"reindex","path":"."}}' \
+      '{"name":"ctx_search","arguments":{"action":"reindex","path":"."},"contains":"Reindexed"}' \
     --probe-call \
-      '{"name":"ctx_search","arguments":{"action":"semantic","mode":"dense","query":"function that returns the Orichum probe value","path":"."},"contains":"orichum_probe_target"}' \
+      '{"name":"ctx_search","arguments":{"action":"semantic","mode":"dense","query":"function that returns the Orichum probe value","path":"."},"contains":"orichum_probe_target","retry_contains":"BM25 index is being built in the background","attempts":6,"retry_delay":1}' \
     --probe-call \
       '{"name":"ctx_shell","arguments":{"command":"printf orichum-shell-ready","raw":true},"contains":"orichum-shell-ready"}' \
     -- env \
