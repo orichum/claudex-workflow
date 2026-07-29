@@ -90,8 +90,8 @@ printf '# user login profile\n' >"$completion_home/.bash_profile"
     "$completion_home/.bashrc")" == 1 ]]
   HOME="$completion_home" bash --noprofile --norc -c \
     'source "$HOME/.bashrc"; complete -p orichum' >/dev/null
-  HOME="$completion_home" bash -l -c \
-    'complete -p orichum' >/dev/null
+  HOME="$completion_home" bash --noprofile --norc -c \
+    'source "$HOME/.bash_profile"; complete -p orichum' >/dev/null
   if command -v zsh >/dev/null 2>&1; then
     HOME="$completion_home" zsh -f -c \
       'source "$HOME/.zshrc"; autoload -Uz compinit; compinit -d "$HOME/.zcompdump"; whence -w _orichum' \
@@ -144,7 +144,8 @@ printf '# portable profile\n' >"$profile_fallback/home/.profile"
   reconcile_orichum_completions \
     "$ROOT" "$ORICHUM_HOME" "$ORICHUM_CONFIG_HOME" "$ORICHUM_DATA_HOME"
   sh -n "$HOME/.profile"
-  HOME="$HOME" bash -l -c 'complete -p orichum' >/dev/null
+  HOME="$HOME" bash --noprofile --norc -c \
+    'source "$HOME/.profile"; complete -p orichum' >/dev/null
 )
 
 profile_race="$fixture/profile-race"
