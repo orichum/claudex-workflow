@@ -1943,6 +1943,40 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual((status, stdout), (2, ""))
         self.assertIn("logical session ID is required", stderr)
 
+    def test_leanctx_economics_renders_unavailable_roi_as_dash(self) -> None:
+        rendered = orichum_cli._leanctx_economics(
+            SimpleNamespace(leanctx_profile="lean"),
+            LeanctxToolHealth(
+                4,
+                953,
+                449,
+                1053,
+                2455,
+                0,
+                (
+                    ("ctx_read", 284, 0),
+                    ("ctx_search", 326, 0),
+                    ("ctx_tree", 135, 0),
+                    ("ctx_shell", 208, 0),
+                ),
+            ),
+            LeanctxRollingEconomics(
+                24, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0
+            ),
+            LeanctxGainSummary(
+                0, 0, 0, 0, 0.0, 0, 0, 0, 0, 0.0, 0.0, None
+            ),
+        )
+
+        row = next(
+            line
+            for line in rendered.splitlines()
+            if line.startswith("| 0")
+            and line.count("|") == 9
+            and "| —" in line
+        )
+        self.assertEqual(row.split("|")[-2].strip(), "—")
+
     def test_leanctx_economics_explicit_session_overrides_environment(
         self,
     ) -> None:

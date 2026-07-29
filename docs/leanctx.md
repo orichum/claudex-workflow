@@ -171,7 +171,8 @@ sections are shared across every Orichum project and are not selected-session
 totals. The cache section includes only timestamped ledger records and may not
 cover every provider request. The all-time summary has a different attribution
 scope and fallback pricing, so Orichum never presents it as rolling-window
-billing or combines it into a fabricated rolling net.
+billing or combines it into a fabricated rolling net. ROI is shown as a dash
+when the upstream summary has no recorded tool spend.
 
 `watch` opens the selected run's terminal observatory, and `dashboard` starts
 its authenticated local web observatory in the foreground. They use that run's

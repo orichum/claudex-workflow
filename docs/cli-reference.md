@@ -123,7 +123,8 @@ estimates from recorded ledger entries, not invoices. Prompt-cache records may
 not cover every provider request. Both rolling sections are shared across all
 Orichum projects rather than attributed to the selected session. The all-time
 estimate has a different scope, so Orichum does not calculate or display a
-rolling net-billing figure.
+rolling net-billing figure. ROI is shown as a dash when LeanCTX has no recorded
+tool spend from which to calculate it.
 
 `--port PORT` requests a specific loopback port. When omitted, Orichum selects
 the first available port starting at `3333`. `--open` accepts `browser`,

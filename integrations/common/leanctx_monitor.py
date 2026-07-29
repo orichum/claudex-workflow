@@ -108,7 +108,7 @@ class LeanctxGainSummary:
     net_tokens_saved: int
     avoided_usd: float
     tool_spend_usd: float
-    roi: float
+    roi: float | None
 
 
 def _private_json(path: Path) -> tuple[dict[str, object], os.stat_result]:
@@ -902,7 +902,13 @@ def read_gain_summary(binary: Path, run: LeanctxRun) -> LeanctxGainSummary:
             raise ValueError("invalid net_tokens_saved")
         avoided_usd = _nonnegative_finite(summary, "avoided_usd")
         tool_spend_usd = _nonnegative_finite(summary, "tool_spend_usd")
-        roi = _nonnegative_finite(summary, "roi")
+        roi_value = summary.get("roi")
+        if roi_value is None:
+            if tool_spend_usd != 0.0:
+                raise ValueError("invalid roi")
+            roi = None
+        else:
+            roi = _nonnegative_finite(summary, "roi")
         if (
             gain_rate_percent > 100.0
             or output_tokens > input_tokens

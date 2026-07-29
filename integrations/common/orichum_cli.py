@@ -754,7 +754,7 @@ def _leanctx_economics(
                 f"{gain.net_tokens_saved:,}",
                 _estimated_usd(gain.avoided_usd),
                 _estimated_usd(gain.tool_spend_usd),
-                f"{gain.roi:.3f}x",
+                "—" if gain.roi is None else f"{gain.roi:.3f}x",
             ),
         ),
     )

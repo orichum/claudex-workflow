@@ -939,6 +939,31 @@ class LeanctxMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(observed.avoided_usd, 0.249035)
         self.assertAlmostEqual(observed.tool_spend_usd, 0.450788)
         self.assertAlmostEqual(observed.roi, 0.552444)
+
+    def test_gain_summary_accepts_unavailable_roi_when_tool_spend_is_zero(
+        self,
+    ) -> None:
+        session = self.create_run(self.xebia)
+        selected = self.descriptor(session, self.xebia)
+        document = self.gain_document()
+        document["summary"] = {
+            **document["summary"],
+            "tool_spend_usd": 0.0,
+            "roi": None,
+        }
+        self.install_binary_response(
+            json.dumps(document).encode("utf-8"),
+            expected_arguments=("gain", "--json"),
+            expected_state=session.run_dir / "leanctx" / "state",
+        )
+
+        observed = leanctx_monitor.read_gain_summary(
+            self.binary,
+            selected,
+        )
+
+        self.assertEqual(observed.tool_spend_usd, 0.0)
+        self.assertIsNone(observed.roi)
     def test_managed_json_readers_reject_execution_and_size_failures(self) -> None:
         session = self.create_run(self.xebia)
         selected = self.descriptor(session, self.xebia)
