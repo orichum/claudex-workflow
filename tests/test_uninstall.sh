@@ -186,6 +186,7 @@ run_uninstall() {
   shift 2
   [[ "$platform" != darwin ]] || kernel_name=Darwin
   HOME="$fixture_root/home" \
+  ORICHUM_HOME="$fixture_root/home/.orichum" \
   XDG_CONFIG_HOME="$fixture_root/home/.config" \
   ORICHUM_DATA_HOME="$fixture_root/data" \
   ORICHUM_CONFIG_HOME="$fixture_root/config" \
