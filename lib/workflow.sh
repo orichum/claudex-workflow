@@ -4062,6 +4062,21 @@ PY
     "$leanctx_binary"
 }
 
+pinned_release_allows_recorded_version() {
+  local recorded_version="$1"
+  local requested_tag="$2"
+  local requested_version
+  [[ "$recorded_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && \
+     "$requested_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 2
+  requested_version="${requested_tag#v}"
+  jq -en \
+    --arg recorded "$recorded_version" \
+    --arg requested "$requested_version" '
+      def parts: split(".") | map(tonumber);
+      ($recorded | parts) <= ($requested | parts)
+    ' >/dev/null
+}
+
 stage_github_binary() {
   local repository="$1"
   local prefix="$2"
@@ -4073,8 +4088,15 @@ stage_github_binary() {
   local recorded_version="${8:-}"
   local source_identity="${9:-}"
   local expected_artifact_sha="${10:-}"
+  local requested_tag="${11:-}"
   local metadata archive row url digest asset tag version actual_sha staged_binary
   local expected_source_prefix expected_tag=
+
+  if [[ -n "$requested_tag" && \
+        ! "$requested_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+    workflow_die "requested GitHub release tag is unsafe"
+    return 1
+  fi
 
   if [[ "$resolve_upstream" == false ]]; then
     [[ "$recorded_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
@@ -4113,6 +4135,8 @@ stage_github_binary() {
   staged_binary="$staging_dir/$archive_binary"
   if [[ "$resolve_upstream" == false ]]; then
     fetch_github_release_tag "$repository" "$expected_tag" "$metadata"
+  elif [[ -n "$requested_tag" ]]; then
+    fetch_github_release_tag "$repository" "$requested_tag" "$metadata"
   else
     fetch_latest_github_release "$repository" "$metadata"
   fi
@@ -4126,6 +4150,11 @@ stage_github_binary() {
   version="$(jq -er '.tag_name | sub("^v"; "")' "$metadata")"
   [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || \
     workflow_die "GitHub release tag is unsafe"
+  if [[ "$resolve_upstream" == true && \
+        -n "$requested_tag" && "$tag" != "$requested_tag" ]]; then
+    workflow_die "requested GitHub release identity did not match"
+    return 1
+  fi
   if [[ "$resolve_upstream" == false && \
         ( "$tag" != "$expected_tag" || "$version" != "$recorded_version" ) ]]; then
     workflow_die "recorded GitHub release identity did not match"
@@ -4139,8 +4168,9 @@ stage_github_binary() {
   if managed_executable_is_safe "$destination" && \
      binary_reports_semver "$destination" "$version" && \
      {
-       [[ "$resolve_upstream" == true ]] || \
-         [[ "$(sha256_file "$destination")" == "$expected_artifact_sha" ]]
+       { [[ "$resolve_upstream" == true && -z "$requested_tag" ]]; } || \
+         { [[ "$resolve_upstream" == false ]] && \
+           [[ "$(sha256_file "$destination")" == "$expected_artifact_sha" ]]; }
      }; then
     jq -cn --arg version "$version" --arg tag "$tag" \
       '{version: $version, tag: $tag, changed: false, staged_path: null}'

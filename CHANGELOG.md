@@ -33,6 +33,10 @@ All notable Orichum changes are recorded here.
   managed LeanCTX ONNX Runtime is missing or unsafe.
 - LeanCTX readiness probes now require a real dense semantic-search result and
   reuse the shared model cache without weakening project isolation.
+- Fresh installs and explicit upgrades now pin LeanCTX 3.9.12 instead of
+  floating to an unvalidated newer upstream release during the RC4 lifecycle.
+- Explicit upgrades refuse to downgrade a newer recorded LeanCTX installation;
+  fast repair preserves it until Orichum ships a compatible newer pin.
 - LeanCTX economics reports unavailable ROI explicitly instead of presenting
   incomplete telemetry as savings.
 

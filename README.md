@@ -51,9 +51,9 @@ Orichum installs its runtime and all user-managed state under `~/.orichum`;
 the checkout remains source code only, so editing configuration never dirties
 the repository and moving the checkout does not break the installed command.
 Later `./install.sh` runs quickly when everything is already verified and
-healthy. Use `./install.sh --upgrade` when you want Orichum to check upstream
-releases, upgrade managed tools, and run their complete probes; the full doctor
-check follows once a provider route is available. See
+healthy. Use `./install.sh --upgrade` when you want Orichum to refresh managed
+tools within its release constraints and run their complete probes; the full
+doctor check follows once a provider route is available. See
 [Installation and upgrades](docs/installation.md) for details, locations, port
 handling, and uninstall options.
 

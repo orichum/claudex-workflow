@@ -1120,6 +1120,13 @@ GH_TOKEN= fetch_latest_github_release example/tool "$anonymous_release"
 [[ "$(jq -r .tag_name "$anonymous_release")" == v4.5.6 ]]
 unset -f gh curl
 
+pinned_release_allows_recorded_version 3.9.12 v3.9.12
+pinned_release_allows_recorded_version 3.9.11 v3.9.12
+if pinned_release_allows_recorded_version 3.9.13 v3.9.12; then
+  printf 'newer recorded release was accepted for downgrade\n' >&2
+  exit 1
+fi
+
 recorded_binary_root="$fixture/recorded-binary"
 recorded_binary="$recorded_binary_root/tool"
 recorded_release_log="$fixture/recorded-release.log"
@@ -1163,6 +1170,81 @@ printf '%s\n' \
 chmod 0755 "$repair_archive_root/tool"
 tar -czf "$repair_archive" -C "$repair_archive_root" tool
 repair_digest="$(sha256_file "$repair_archive")"
+pinned_release_log="$fixture/pinned-release.log"
+fetch_latest_github_release() {
+  printf 'unexpected latest release lookup\n' >>"$pinned_release_log"
+  return 97
+}
+fetch_github_release_tag() {
+  local repository="$1"
+  local tag="$2"
+  local output_file="$3"
+  printf '%s|%s\n' "$repository" "$tag" >>"$pinned_release_log"
+  jq -n \
+    --arg tag "$tag" \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: $tag,
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+curl() {
+  local output_file=
+  while (($# > 0)); do
+    if [[ "$1" == --output ]]; then
+      output_file="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  cp "$repair_archive" "$output_file"
+}
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "tool 1.2.3\n"' >"$fixture/pinned-installed"
+chmod 0755 "$fixture/pinned-installed"
+pinned_state="$(
+  stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$fixture/pinned-installed" "$fixture/pinned-stage" \
+    true '' '' '' v1.2.3
+)"
+[[ "$(jq -r '.version' <<<"$pinned_state")" == 1.2.3 ]]
+[[ "$(jq -r '.changed' <<<"$pinned_state")" == true ]]
+[[ "$(cat "$pinned_release_log")" == 'example/tool|v1.2.3' ]]
+binary_reports_semver "$(jq -r '.staged_path' <<<"$pinned_state")" 1.2.3
+fetch_github_release_tag() {
+  local output_file="$3"
+  jq -n \
+    --arg digest "sha256:$repair_digest" \
+    '{
+      tag_name: "v9.9.9",
+      assets: [{
+        name: "tool-1.2.3.tar.gz",
+        browser_download_url: "fixture://tool-1.2.3.tar.gz",
+        digest: $digest
+      }]
+    }' >"$output_file"
+}
+if stage_github_binary \
+    example/tool tool- .tar.gz tool \
+    "$fixture/pinned-mismatch-installed" \
+    "$fixture/pinned-mismatch-stage" \
+    true '' '' '' v1.2.3 \
+    >"$fixture/pinned-mismatch.stdout" \
+    2>"$fixture/pinned-mismatch.stderr"; then
+  printf 'mismatched requested release metadata was accepted\n' >&2
+  exit 1
+fi
+rg -Fq 'requested GitHub release identity did not match' \
+  "$fixture/pinned-mismatch.stderr"
+unset -f fetch_latest_github_release fetch_github_release_tag curl
+
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "tool 1.2.2\n"' >"$recorded_binary"

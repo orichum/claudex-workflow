@@ -84,13 +84,20 @@ Install and uninstall share one per-user lifecycle lock at
 relocated, two processes cannot concurrently replace the same launcher or user
 services. The lock directory exists only while a lifecycle operation is active.
 
-To deliberately resolve current external releases and upgrade every managed
-runtime, run:
+To deliberately refresh every managed runtime, run:
 
 ```bash
 ./install.sh --upgrade
-# Resolve releases, run complete probes, and run the full doctor.
+# Resolve permitted releases, run complete probes, and run the full doctor.
 ```
+
+Components that float resolve their current upstream release. Release-pinned
+components reconcile to the version declared by Orichum; RC4 pins LeanCTX
+3.9.12 so an upstream release cannot change the tested installer contract.
+A normal fast repair preserves a verified recorded LeanCTX version. An explicit
+upgrade refuses to downgrade a newer recorded LeanCTX because Orichum preserves
+its durable indexes and project knowledge and cannot yet prove downgrade-safe
+data compatibility.
 
 Verified state is stored at
 `~/.orichum/state/install-state.json`. The private manifest contains
