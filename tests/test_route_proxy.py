@@ -40,8 +40,9 @@ def client_tool(name: str) -> dict:
 
 
 class StaticRouteIndex:
-    def __init__(self, routes: dict[str, str]):
+    def __init__(self, routes: dict[str, str], leanctx_profile: str = "full"):
         self.routes = routes
+        self.leanctx_profile = leanctx_profile
 
     @staticmethod
     def _route(model: str, suffix: str) -> Route:
@@ -68,6 +69,11 @@ class StaticRouteIndex:
                 else None
             ),
         )
+
+    def request_policy_for(
+        self, session_id: str | None, primary_model: str
+    ) -> tuple[tuple[Route, Route | None] | None, str]:
+        return self.routes_for(session_id, primary_model), self.leanctx_profile
 
     def fallback_for(
         self, _session_id: str | None, primary_model: str
@@ -182,6 +188,7 @@ class ProxyHarness:
         cooldowns: Cooldowns | None = None,
         data_home: Path | None = None,
         catalog_port: int | None = None,
+        leanctx_profile: str = "full",
     ):
         config_arguments: dict[str, object] = {}
         if catalog_port is not None:
@@ -194,7 +201,7 @@ class ProxyHarness:
                 data_home,
                 **config_arguments,
             ),
-            route_index=StaticRouteIndex(routes),
+            route_index=StaticRouteIndex(routes, leanctx_profile),
             cooldowns=cooldowns,
         )
         self.thread = threading.Thread(
@@ -606,6 +613,7 @@ class RouteProxyTests(unittest.TestCase):
         session = SimpleNamespace(
             controller=bound,
             agents={role: bound for role in ROLES},
+            leanctx_profile="full",
         )
         with mock.patch(
             "integrations.common.orichum_sessions.load_logical_session",
@@ -621,6 +629,27 @@ class RouteProxyTests(unittest.TestCase):
         )
         self.assertIsNone(
             RouteIndex(Path("/state")).fallback_for(None, self.primary)
+        )
+
+    def test_route_index_returns_the_logical_session_leanctx_profile(self) -> None:
+        bound = self.binding(self.primary, self.fallback)
+        session = SimpleNamespace(
+            controller=bound,
+            agents={role: bound for role in ROLES},
+            leanctx_profile="lean",
+        )
+        with mock.patch(
+            "integrations.common.orichum_sessions.load_logical_session",
+            return_value=session,
+        ) as load:
+            routes, profile = RouteIndex(Path("/state")).request_policy_for(
+                "oc-s-0000000000000001", self.primary
+            )
+
+        self.assertEqual(routes, (bound.primary, bound.fallbacks[0]))
+        self.assertEqual(profile, "lean")
+        load.assert_called_once_with(
+            Path("/state"), "oc-s-0000000000000001"
         )
 
     def test_successful_primary_is_not_retried_or_rewritten(self) -> None:
@@ -653,6 +682,53 @@ class RouteProxyTests(unittest.TestCase):
             forwarded["tools"][-1]["type"],
             "tool_search_tool_regex_20251119",
         )
+
+    def test_lean_profile_defers_non_core_leanctx_tools(self) -> None:
+        leanctx_names = (
+            "ctx_read",
+            "ctx_search",
+            "ctx_tree",
+            "ctx_expand",
+            "ctx_graph",
+            "ctx_impact",
+            "ctx_callgraph",
+            "ctx_knowledge",
+            "ctx_overview",
+            "ctx_patch",
+            "ctx_shell",
+        )
+        tools = [
+            *(client_tool(f"mcp__leanctx__{name}") for name in leanctx_names),
+            client_tool("Bash"),
+        ]
+        with RecordingUpstream([(200, b"ok")]) as upstream:
+            with ProxyHarness(
+                upstream.port,
+                {},
+                leanctx_profile="lean",
+            ) as proxy:
+                status, _ = proxy.post_document(
+                    {"model": self.primary, "messages": [], "tools": tools}
+                )
+
+        self.assertEqual(status, 200)
+        by_name = {
+            tool.get("name"): tool
+            for tool in upstream.documents[0]["tools"]
+            if isinstance(tool, dict) and "name" in tool
+        }
+        resident = {
+            "mcp__leanctx__ctx_read",
+            "mcp__leanctx__ctx_search",
+            "mcp__leanctx__ctx_tree",
+            "mcp__leanctx__ctx_shell",
+        }
+        for name in resident:
+            self.assertNotIn("defer_loading", by_name[name])
+        for name in {
+            f"mcp__leanctx__{value}" for value in leanctx_names
+        } - resident:
+            self.assertIs(by_name[name].get("defer_loading"), True)
 
     def test_unknown_model_request_is_forwarded_unchanged(self) -> None:
         document = {

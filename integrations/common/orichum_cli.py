@@ -41,6 +41,11 @@ from .github_identity import GithubIdentityError, ensure_github_identity
 from .leanctx_contract import (
     AUTO_APPROVED_TOOLS as LEANCTX_AUTO_APPROVED_TOOLS,
 )
+from .leanctx_profiles import (
+    DEFAULT_LEANCTX_PROFILE,
+    LEANCTX_PROFILES,
+    resident_tool_names,
+)
 from .orichum_config import (
     ConfigError,
     ResolvedConfig,
@@ -643,6 +648,131 @@ def _leanctx_stats(
     return f"Session MCP\n{session}\nShared wire proxy\n{wire}"
 
 
+def _estimated_usd(value: float) -> str:
+    return f"${Decimal(str(value)):,.6f}"
+
+
+def _leanctx_economics(
+    session: LogicalSession,
+    health: leanctx_monitor.LeanctxToolHealth,
+    rolling: leanctx_monitor.LeanctxRollingEconomics,
+    gain: leanctx_monitor.LeanctxGainSummary,
+) -> str:
+    resident = {
+        name.removeprefix("mcp__leanctx__")
+        for name in resident_tool_names(session.leanctx_profile)
+    }
+    schema_by_tool = {name: tokens for name, tokens, _ in health.tools}
+    if not resident <= schema_by_tool.keys():
+        raise CliError(
+            "LeanCTX tool health is incompatible with the selected profile"
+        )
+    resident_schema = sum(schema_by_tool[name] for name in resident)
+    deferred_tools = health.advertised_tools - len(resident)
+    removed_schema = health.tool_schema_tokens - resident_schema
+    if deferred_tools < 0 or removed_schema < 0:
+        raise CliError(
+            "LeanCTX tool health is incompatible with the selected profile"
+        )
+    footprint = _render_table(
+        (
+            "PROFILE",
+            "ADVERTISED",
+            "RESIDENT",
+            "DEFERRED",
+            "RESIDENT SCHEMA",
+            "REMOVED PREFIX",
+            "RECORDED CALLS",
+        ),
+        (
+            (
+                session.leanctx_profile,
+                f"{health.advertised_tools:,}",
+                f"{len(resident):,}",
+                f"{deferred_tools:,}",
+                f"{resident_schema:,}",
+                f"{removed_schema:,}",
+                f"{health.total_recorded_calls:,}",
+            ),
+        ),
+    )
+    reduction = (
+        f"{Decimal(str(rolling.compression_percent)).quantize(
+            Decimal('0.1'),
+            rounding=ROUND_HALF_UP,
+        )}%"
+        if rolling.source_tokens
+        else "—"
+    )
+    compression = _render_table(
+        (
+            "EVENTS",
+            "SOURCE",
+            "RETURNED",
+            "SAVED",
+            "REDUCTION",
+            "EST. USD AVOIDED",
+        ),
+        (
+            (
+                f"{rolling.compression_events:,}",
+                f"{rolling.source_tokens:,}",
+                f"{rolling.returned_tokens:,}",
+                f"{rolling.saved_tokens:,}",
+                reduction,
+                _estimated_usd(rolling.compression_saved_usd),
+            ),
+        ),
+    )
+    caching = _render_table(
+        ("RECORDED REQUESTS", "CACHE-READ TOKENS", "EST. CACHE DISCOUNT"),
+        (
+            (
+                f"{rolling.caching_events:,}",
+                f"{rolling.cache_read_tokens:,}",
+                _estimated_usd(rolling.cache_saved_usd),
+            ),
+        ),
+    )
+    all_time = _render_table(
+        (
+            "COMMANDS",
+            "TURNS",
+            "GROSS SAVED",
+            "INJECTED OVERHEAD",
+            "NET ESTIMATE",
+            "EST. USD AVOIDED",
+            "TOOL SPEND",
+            "ROI",
+        ),
+        (
+            (
+                f"{gain.total_commands:,}",
+                f"{gain.turns:,}",
+                f"{gain.tokens_saved:,}",
+                f"{gain.injected_overhead_total_tokens:,}",
+                f"{gain.net_tokens_saved:,}",
+                _estimated_usd(gain.avoided_usd),
+                _estimated_usd(gain.tool_spend_usd),
+                f"{gain.roi:.3f}x",
+            ),
+        ),
+    )
+    return (
+        f"Selected-session provider footprint\n{footprint}\n"
+        f"Shared rolling compression (last {rolling.hours} hours)\n"
+        f"{compression}\n"
+        "Shared rolling recorded prompt-cache estimates "
+        f"(last {rolling.hours} hours)\n{caching}"
+        "Rolling ledger records are shared across all Orichum projects; "
+        "they are not selected-session totals.\n"
+        "Ledger cache records are estimates and not complete provider billing.\n\n"
+        f"LeanCTX all-time upstream estimate\n{all_time}"
+        "All-time figures use upstream attribution and are not "
+        "rolling-window billing.\n"
+    )
+
+
 def _session_routes(
     session: LogicalSession, accounts: Sequence[Account]
 ) -> str:
@@ -855,6 +985,7 @@ def _prepare_new_session(
     config: ResolvedConfig,
     *,
     launch_dir: Path,
+    leanctx_profile: str = DEFAULT_LEANCTX_PROFILE,
 ) -> PreparedLaunch:
     _verify_runtime(paths)
     context = resolve_control_plane_context(
@@ -902,6 +1033,7 @@ def _prepare_new_session(
         stack=plan.stack,
         controller=plan.controller,
         agents=plan.agents,
+        leanctx_profile=leanctx_profile,
     )
     return PreparedLaunch(logical, physical)
 
@@ -1004,6 +1136,7 @@ def _prepare_fork(
     launch_dir: Path,
     requested_stack: str | None,
     handoff_file: Path | None,
+    leanctx_profile: str | None = None,
 ) -> tuple[PreparedLaunch, str]:
     _verify_runtime(paths)
     parent = load_logical_session(paths["state"], identifier)
@@ -1077,6 +1210,7 @@ def _prepare_fork(
         controller=controller,
         agents=agents,
         parent_id=parent.id,
+        leanctx_profile=leanctx_profile,
     )
     return PreparedLaunch(logical, physical), handoff
 
@@ -2229,6 +2363,13 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _economics_hours(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 168:
+        raise argparse.ArgumentTypeError("value must be between 1 and 168")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orichum")
     parser.add_argument(
@@ -2240,6 +2381,12 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser(
         "run",
         help="start a project-aware session",
+    )
+    run.add_argument(
+        "--leanctx-profile",
+        choices=LEANCTX_PROFILES,
+        default=DEFAULT_LEANCTX_PROFILE,
+        help="resident LeanCTX tool profile (default: lean)",
     )
     run.add_argument("arguments", nargs=argparse.REMAINDER)
 
@@ -2414,6 +2561,17 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         command = leanctx_action.add_parser(name, help=help_text)
         command.add_argument("--run")
+    economics = leanctx_action.add_parser(
+        "economics",
+        help="show profile footprint and savings estimates",
+    )
+    economics.add_argument("--session")
+    economics.add_argument(
+        "--hours",
+        type=_economics_hours,
+        default=24,
+        help="rolling ledger window from 1 through 168 hours (default: 24)",
+    )
     dashboard = leanctx_action.add_parser(
         "dashboard",
         help="open the local authenticated Observatory",
@@ -2519,6 +2677,11 @@ def build_parser() -> argparse.ArgumentParser:
     fork.add_argument("session_id")
     fork.add_argument("--stack")
     fork.add_argument("--handoff-file", type=Path)
+    fork.add_argument(
+        "--leanctx-profile",
+        choices=LEANCTX_PROFILES,
+        help="override the parent LeanCTX tool profile",
+    )
     return parser
 
 
@@ -2583,6 +2746,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.command == "provider" and parsed.provider_command == "login":
             return _run_external("orichum-login", list(parsed.arguments))
         if parsed.command == "leanctx":
+            if parsed.leanctx_command == "economics":
+                identifier = parsed.session or os.environ.get(
+                    "ORICHUM_SESSION_ID"
+                )
+                if not identifier:
+                    raise CliError(
+                        "a logical session ID is required; run "
+                        "orichum leanctx economics --session <session-id>"
+                    )
+                logical = resolve_logical_session(paths["state"], identifier)
+                attached_runs = tuple(
+                    run
+                    for run in leanctx_monitor.discover_runs(
+                        WORKFLOW_ROOT,
+                        paths["data"],
+                    )
+                    if run.attached
+                )
+                selected = leanctx_monitor.select_run(
+                    attached_runs,
+                    logical.project_root,
+                    None,
+                )
+                binary = leanctx_monitor.managed_binary(paths["data"])
+                health = leanctx_monitor.read_tool_health(binary, selected)
+                rolling = leanctx_monitor.read_rolling_economics(
+                    paths["data"],
+                    parsed.hours,
+                )
+                gain = leanctx_monitor.read_gain_summary(binary, selected)
+                print(
+                    _leanctx_economics(logical, health, rolling, gain),
+                    end="",
+                )
+                return 0
             runs = leanctx_monitor.discover_runs(
                 WORKFLOW_ROOT,
                 paths["data"],
@@ -2663,7 +2861,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if parsed.command == "run":
             prepared = _prepare_new_session(
-                paths, config, launch_dir=Path.cwd()
+                paths,
+                config,
+                launch_dir=Path.cwd(),
+                leanctx_profile=parsed.leanctx_profile,
             )
             _launch_session(
                 prepared,
@@ -2791,6 +2992,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 launch_dir=Path.cwd(),
                 requested_stack=parsed.stack,
                 handoff_file=parsed.handoff_file,
+                leanctx_profile=parsed.leanctx_profile,
             )
             _launch_session(
                 prepared,

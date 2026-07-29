@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shlex
 import socket
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -88,6 +91,184 @@ class LeanctxMonitorTests(unittest.TestCase):
             created_at="2026-07-27T10:00:00Z",
             has_activity=False,
         )
+
+    def write_ledger(self, *rows: dict[str, object]) -> Path:
+        ledger = (
+            self.data_root
+            / "leanctx"
+            / "lean-ctx"
+            / "savings"
+            / "ledger.jsonl"
+        )
+        ledger.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        ledger.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        ledger.chmod(0o600)
+        return ledger
+
+    def install_binary_response(
+        self,
+        payload: bytes,
+        *,
+        expected_arguments: tuple[str, ...],
+        expected_state: Path,
+        exit_status: int = 0,
+        delay_seconds: float = 0.0,
+    ) -> None:
+        output = self.root / "leanctx-command-output"
+        output.write_bytes(payload)
+        lines = [
+            "#!/bin/sh",
+            f'[ "$#" -eq {len(expected_arguments)} ] || exit 91',
+        ]
+        lines.extend(
+            f'[ "${index}" = {shlex.quote(argument)} ] || exit 92'
+            for index, argument in enumerate(expected_arguments, start=1)
+        )
+        lines.append(
+            '[ "$LEAN_CTX_STATE_DIR" = '
+            f'{shlex.quote(str(expected_state))} ] || exit 93'
+        )
+        if delay_seconds:
+            lines.append(f"exec sleep {delay_seconds}")
+        else:
+            lines.extend(
+                (
+                    f"cat {shlex.quote(str(output))}",
+                    f"exit {exit_status}",
+                )
+            )
+        self.binary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.binary.chmod(0o755)
+
+    @staticmethod
+    def ledger_row(
+        timestamp: str,
+        mechanism: str,
+        *,
+        baseline: int,
+        actual: int,
+        saved: int,
+        saved_usd: float,
+    ) -> dict[str, object]:
+        return {
+            "ts": timestamp,
+            "tool": "proxy_cache" if mechanism == "caching" else "ctx_read",
+            "mechanism": mechanism,
+            "model_id": "test-model",
+            "tokenizer": "o200k_base",
+            "baseline_tokens": baseline,
+            "actual_tokens": actual,
+            "saved_tokens": saved,
+            "bounce_adjustment": 0,
+            "unit_price_per_m_usd": 2.5,
+            "saved_usd": saved_usd,
+            "repo_hash": "a" * 16,
+            "agent_id": "local",
+            "prev_hash": "b" * 64,
+            "entry_hash": "c" * 64,
+            "version": "3.9.12",
+        }
+
+    @staticmethod
+    def tool_health_document() -> dict[str, object]:
+        return {
+            "tool_profile": "custom",
+            "advertised_tools": 2,
+            "tool_schema_tokens": 610,
+            "instruction_tokens": 449,
+            "rules_tokens": 1053,
+            "fixed_total_tokens": 2112,
+            "has_usage_data": True,
+            "total_recorded_calls": 7,
+            "unused_tools": 1,
+            "unused_tool_tokens": 326,
+            "disable_candidates": ["ctx_search"],
+            "reclaimable_tokens": 326,
+            "disable_action": "test",
+            "footprint_note": None,
+            "tools": [
+                {
+                    "name": "ctx_read",
+                    "schema_tokens": 284,
+                    "calls": 7,
+                    "last_used": "2026-07-28T20:01:26+00:00",
+                    "status": "active",
+                    "action": "",
+                    "value_per_1k_tokens": 24.6,
+                },
+                {
+                    "name": "ctx_search",
+                    "schema_tokens": 326,
+                    "calls": 0,
+                    "last_used": None,
+                    "status": "unused",
+                    "action": "test",
+                    "value_per_1k_tokens": 0.0,
+                },
+            ],
+            "rules": [],
+            "duplicate_clients": [],
+            "knowledge": {
+                "total_facts": 0,
+                "active_facts": 0,
+                "stale_facts": 0,
+                "action": "",
+            },
+        }
+
+    @staticmethod
+    def gain_document() -> dict[str, object]:
+        return {
+            "bridge": {
+                "engagement": "engaged",
+                "proxy_running": True,
+                "total_requests": 682,
+                "tool_count": 81,
+            },
+            "summary": {
+                "model": {
+                    "model_key": "fallback-blended",
+                    "cost": {
+                        "input_per_m": 2.5,
+                        "output_per_m": 10.0,
+                        "cache_write_per_m": 2.5,
+                        "cache_read_per_m": 2.5,
+                    },
+                    "match_kind": "Fallback",
+                },
+                "total_commands": 323,
+                "input_tokens": 534803,
+                "output_tokens": 435189,
+                "tokens_saved": 99614,
+                "gain_rate_pct": 18.626,
+                "injected_overhead_tokens_per_turn": 3233,
+                "turns": 680,
+                "injected_overhead_total_tokens": 2198440,
+                "net_tokens_saved": -2098826,
+                "injected_overhead_budget_tokens": 8000,
+                "over_budget": False,
+                "avoided_usd": 0.249035,
+                "energy_wh": 11.068,
+                "co2_grams": 5.257,
+                "tool_spend_usd": 0.450788,
+                "roi": 0.552444,
+                "score": {
+                    "total": 19,
+                    "compression": 19,
+                    "cost_efficiency": 6,
+                    "quality": 44,
+                    "consistency": 14,
+                    "navigability": 0,
+                    "trend": "Rising",
+                },
+                "daemon_hint": "test",
+            },
+            "tasks": [],
+            "heatmap": [],
+        }
 
     def test_discovers_only_verified_leanctx_runs(self) -> None:
         session = self.create_run(self.xebia)
@@ -527,6 +708,330 @@ class LeanctxMonitorTests(unittest.TestCase):
         stats = read_stats(self.binary, run)
 
         self.assertEqual(stats, leanctx_monitor.LeanctxStats(0, 0, 0, 0, 0.0))
+
+    def test_rolling_economics_uses_inclusive_window_and_separates_mechanisms(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        cutoff = now - timedelta(hours=24)
+        self.write_ledger(
+            self.ledger_row(
+                (cutoff - timedelta(microseconds=1)).isoformat(),
+                "compression",
+                baseline=900,
+                actual=100,
+                saved=800,
+                saved_usd=2.0,
+            ),
+            self.ledger_row(
+                cutoff.isoformat(),
+                "compression",
+                baseline=100,
+                actual=60,
+                saved=40,
+                saved_usd=0.1,
+            ),
+            self.ledger_row(
+                now.isoformat().replace("+00:00", "Z"),
+                "caching",
+                baseline=1000,
+                actual=1000,
+                saved=0,
+                saved_usd=0.2,
+            ),
+            self.ledger_row(
+                (now + timedelta(microseconds=1)).isoformat(),
+                "caching",
+                baseline=2000,
+                actual=2000,
+                saved=0,
+                saved_usd=0.4,
+            ),
+        )
+
+        observed = leanctx_monitor.read_rolling_economics(
+            self.data_root,
+            24,
+            now=now,
+        )
+
+        self.assertEqual(observed.hours, 24)
+        self.assertEqual(observed.compression_events, 1)
+        self.assertEqual(observed.caching_events, 1)
+        self.assertEqual(observed.source_tokens, 100)
+        self.assertEqual(observed.returned_tokens, 60)
+        self.assertEqual(observed.saved_tokens, 40)
+        self.assertEqual(observed.cache_read_tokens, 1000)
+        self.assertAlmostEqual(observed.compression_saved_usd, 0.1)
+        self.assertAlmostEqual(observed.cache_saved_usd, 0.2)
+        self.assertAlmostEqual(observed.compression_percent, 40.0)
+
+    def test_rolling_economics_zero_source_and_hour_bounds(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        self.write_ledger()
+
+        observed = leanctx_monitor.read_rolling_economics(
+            self.data_root,
+            1,
+            now=now,
+        )
+
+        self.assertEqual(observed.compression_percent, 0.0)
+        for hours in (0, 169, True):
+            with self.subTest(hours=hours), self.assertRaisesRegex(
+                LeanctxMonitorError,
+                "hours must be between 1 and 168",
+            ):
+                leanctx_monitor.read_rolling_economics(
+                    self.data_root,
+                    hours,
+                    now=now,
+                )
+
+    def test_rolling_economics_rejects_missing_and_unsafe_ledgers(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(LeanctxMonitorError, "ledger is unavailable"):
+            leanctx_monitor.read_rolling_economics(
+                self.data_root,
+                24,
+                now=now,
+            )
+
+        outside = self.root / "ledger.jsonl"
+        outside.write_text("", encoding="utf-8")
+        ledger = self.write_ledger()
+        ledger.unlink()
+        ledger.symlink_to(outside)
+        with self.assertRaisesRegex(LeanctxMonitorError, "ledger is unsafe"):
+            leanctx_monitor.read_rolling_economics(
+                self.data_root,
+                24,
+                now=now,
+            )
+
+        ledger.unlink()
+        ledger = self.write_ledger()
+        ledger.chmod(0o620)
+        with self.assertRaisesRegex(LeanctxMonitorError, "ledger is unsafe"):
+            leanctx_monitor.read_rolling_economics(
+                self.data_root,
+                24,
+                now=now,
+            )
+
+    def test_rolling_economics_rejects_invalid_rows(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        valid = self.ledger_row(
+            now.isoformat(),
+            "compression",
+            baseline=100,
+            actual=60,
+            saved=40,
+            saved_usd=0.1,
+        )
+        invalid_rows = (
+            b"{\n",
+            (json.dumps({**valid, "ts": "not-a-time"}) + "\n").encode(),
+            (json.dumps({**valid, "ts": "2026-07-29T00:00:00"}) + "\n").encode(),
+            (json.dumps({**valid, "saved_tokens": -1}) + "\n").encode(),
+            (json.dumps({**valid, "saved_usd": float("nan")}) + "\n").encode(),
+            (
+                json.dumps(
+                    {**valid, "unit_price_per_m_usd": float("inf")}
+                )
+                + "\n"
+            ).encode(),
+            (json.dumps({**valid, "actual_tokens": 59}) + "\n").encode(),
+            (
+                json.dumps(
+                    {
+                        **valid,
+                        "mechanism": "caching",
+                        "actual_tokens": 100,
+                        "saved_tokens": 1,
+                    }
+                )
+                + "\n"
+            ).encode(),
+            (json.dumps({**valid, "mechanism": "unknown"}) + "\n").encode(),
+        )
+        for payload in invalid_rows:
+            with self.subTest(payload=payload[:40]):
+                ledger = self.write_ledger()
+                ledger.write_bytes(payload)
+                ledger.chmod(0o600)
+                with self.assertRaisesRegex(
+                    LeanctxMonitorError,
+                    "ledger is invalid",
+                ):
+                    leanctx_monitor.read_rolling_economics(
+                        self.data_root,
+                        24,
+                        now=now,
+                    )
+
+    def test_rolling_economics_rejects_oversized_ledger(self) -> None:
+        ledger = self.write_ledger()
+        with ledger.open("r+b") as stream:
+            stream.truncate(64 * 1024 * 1024 + 1)
+
+        with self.assertRaisesRegex(LeanctxMonitorError, "ledger is too large"):
+            leanctx_monitor.read_rolling_economics(
+                self.data_root,
+                24,
+                now=datetime(2026, 7, 29, tzinfo=timezone.utc),
+            )
+
+    def test_reads_tool_health_with_selected_run_environment(self) -> None:
+        session = self.create_run(self.xebia)
+        selected = self.descriptor(session, self.xebia)
+        payload = json.dumps(self.tool_health_document()).encode("utf-8")
+        self.install_binary_response(
+            payload,
+            expected_arguments=("tools", "health", "--json"),
+            expected_state=session.run_dir / "leanctx" / "state",
+        )
+        with mock.patch.object(
+            leanctx_monitor.subprocess,
+            "run",
+            side_effect=AssertionError("bounded reader must not use run()"),
+        ):
+            observed = leanctx_monitor.read_tool_health(self.binary, selected)
+
+        self.assertEqual(observed.advertised_tools, 2)
+        self.assertEqual(observed.tool_schema_tokens, 610)
+        self.assertEqual(observed.instruction_tokens, 449)
+        self.assertEqual(observed.rules_tokens, 1053)
+        self.assertEqual(observed.fixed_total_tokens, 2112)
+        self.assertEqual(observed.total_recorded_calls, 7)
+        self.assertEqual(
+            observed.tools,
+            (("ctx_read", 284, 7), ("ctx_search", 326, 0)),
+        )
+    def test_reads_gain_summary_without_conflating_signed_net_tokens(self) -> None:
+        session = self.create_run(self.xebia)
+        selected = self.descriptor(session, self.xebia)
+        payload = json.dumps(self.gain_document()).encode("utf-8")
+        self.install_binary_response(
+            payload,
+            expected_arguments=("gain", "--json"),
+            expected_state=session.run_dir / "leanctx" / "state",
+        )
+        with mock.patch.object(
+            leanctx_monitor.subprocess,
+            "run",
+            side_effect=AssertionError("bounded reader must not use run()"),
+        ):
+            observed = leanctx_monitor.read_gain_summary(
+                self.binary,
+                selected,
+            )
+
+        self.assertEqual(observed.total_commands, 323)
+        self.assertEqual(observed.input_tokens, 534803)
+        self.assertEqual(observed.output_tokens, 435189)
+        self.assertEqual(observed.tokens_saved, 99614)
+        self.assertAlmostEqual(observed.gain_rate_percent, 18.626)
+        self.assertEqual(observed.injected_overhead_tokens_per_turn, 3233)
+        self.assertEqual(observed.turns, 680)
+        self.assertEqual(observed.injected_overhead_total_tokens, 2198440)
+        self.assertEqual(observed.net_tokens_saved, -2098826)
+        self.assertAlmostEqual(observed.avoided_usd, 0.249035)
+        self.assertAlmostEqual(observed.tool_spend_usd, 0.450788)
+        self.assertAlmostEqual(observed.roi, 0.552444)
+    def test_managed_json_readers_reject_execution_and_size_failures(self) -> None:
+        session = self.create_run(self.xebia)
+        selected = self.descriptor(session, self.xebia)
+        readers = (
+            (
+                leanctx_monitor.read_tool_health,
+                ("tools", "health", "--json"),
+            ),
+            (leanctx_monitor.read_gain_summary, ("gain", "--json")),
+        )
+        for reader, arguments in readers:
+            for label, payload, exit_status in (
+                ("status", b"{}", 7),
+                ("size", b"x" * (1024 * 1024 + 1), 0),
+            ):
+                self.install_binary_response(
+                    payload,
+                    expected_arguments=arguments,
+                    expected_state=session.run_dir / "leanctx" / "state",
+                    exit_status=exit_status,
+                )
+                with self.subTest(reader=reader.__name__, failure=label), self.assertRaisesRegex(
+                    LeanctxMonitorError,
+                    "is unavailable",
+                ):
+                    reader(self.binary, selected)
+            self.install_binary_response(
+                b"",
+                expected_arguments=arguments,
+                expected_state=session.run_dir / "leanctx" / "state",
+                delay_seconds=1.0,
+            )
+            with (
+                self.subTest(reader=reader.__name__, failure="timeout"),
+                mock.patch.object(
+                    leanctx_monitor,
+                    "_COMMAND_TIMEOUT_SECONDS",
+                    0.05,
+                ),
+                self.assertRaisesRegex(LeanctxMonitorError, "is unavailable"),
+            ):
+                reader(self.binary, selected)
+
+    def test_managed_json_readers_reject_invalid_schemas(self) -> None:
+        session = self.create_run(self.xebia)
+        selected = self.descriptor(session, self.xebia)
+        health = self.tool_health_document()
+        gain = self.gain_document()
+        health_invalid = (
+            b"{",
+            json.dumps({**health, "advertised_tools": True}).encode(),
+            json.dumps({**health, "total_recorded_calls": -1}).encode(),
+            json.dumps({key: value for key, value in health.items() if key != "tools"}).encode(),
+            json.dumps(
+                {
+                    **health,
+                    "tools": [
+                        {**health["tools"][0], "schema_tokens": float("nan")}
+                    ],
+                }
+            ).encode(),
+        )
+        gain_summary = gain["summary"]
+        gain_invalid = (
+            b"{",
+            json.dumps({**gain, "summary": {**gain_summary, "turns": True}}).encode(),
+            json.dumps({**gain, "summary": {**gain_summary, "tokens_saved": -1}}).encode(),
+            json.dumps({**gain, "summary": {**gain_summary, "roi": float("inf")}}).encode(),
+            json.dumps({"bridge": {}, "tasks": [], "heatmap": []}).encode(),
+        )
+        for reader, arguments, payloads in (
+            (
+                leanctx_monitor.read_tool_health,
+                ("tools", "health", "--json"),
+                health_invalid,
+            ),
+            (
+                leanctx_monitor.read_gain_summary,
+                ("gain", "--json"),
+                gain_invalid,
+            ),
+        ):
+            for payload in payloads:
+                self.install_binary_response(
+                    payload,
+                    expected_arguments=arguments,
+                    expected_state=session.run_dir / "leanctx" / "state",
+                )
+                with (
+                    self.subTest(reader=reader.__name__, payload=payload[:30]),
+                    self.assertRaisesRegex(LeanctxMonitorError, "is invalid"),
+                ):
+                    reader(self.binary, selected)
 
     def test_reads_authenticated_shared_proxy_statistics(self) -> None:
         status = {

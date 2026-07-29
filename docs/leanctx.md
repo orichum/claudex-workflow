@@ -34,6 +34,32 @@ task overview, and read-only knowledge recall under the production storage
 topology. Missing tools or failures in those representative code-intelligence
 and memory paths fail readiness instead of silently changing model behavior.
 
+The MCP surface and the provider-resident surface are intentionally different.
+Every bounded tool above remains available, while each logical session freezes
+one provider-residency profile:
+
+- `lean` is the default and keeps `ctx_read`, `ctx_search`, `ctx_tree`, and
+  `ctx_shell` resident in every provider request;
+- `full` keeps the previous nine-tool resident set by also retaining
+  `ctx_graph`, `ctx_impact`, `ctx_callgraph`, `ctx_expand`, and `ctx_patch`.
+
+`ctx_knowledge` and `ctx_overview` are deferred in both profiles. Other tools
+outside the selected resident set remain discoverable through provider-native
+tool search; they are not disabled. This reduces the always-present schema
+prefix without changing LeanCTX configuration, indexing, semantic search,
+cache paths, or the eleven-tool security contract.
+
+Select a profile when starting or forking:
+
+```bash
+orichum run --leanctx-profile lean
+orichum fork oc-s-0123456789abcdef --leanctx-profile full
+```
+
+New sessions default to `lean`. Resume retains the stored immutable profile.
+Fork inherits its parent profile unless explicitly overridden. Historical
+logical sessions created before profile persistence retain `full` behavior.
+
 The process is pinned to the active Git repository. A launch from a configured
 multi-repository parent is pinned to that verified parent. Graphs, knowledge,
 archives, and aggregate statistics use one Orichum-owned shared LeanCTX data
@@ -105,6 +131,7 @@ From a project:
 
 ```bash
 orichum leanctx stats
+orichum leanctx economics
 orichum leanctx watch
 orichum leanctx dashboard
 ```
@@ -115,6 +142,36 @@ orichum leanctx dashboard
   physical run.
 - **Shared wire proxy** shows cumulative requests, bytes, and estimated tokens
   removed across all Orichum sessions since that shared proxy started.
+
+`economics` reports four scopes without combining them:
+
+- **Selected-session provider footprint** derives resident and deferred schema
+  tokens from the logical session's frozen profile and LeanCTX tool health.
+- **Shared rolling compression** aggregates timestamped source, returned,
+  saved-token, and estimated avoided-USD records from the global savings
+  ledger.
+- **Shared rolling recorded prompt-cache estimates** aggregates cache-read
+  volume and the upstream estimated cache discount recorded in that ledger.
+- **LeanCTX all-time upstream estimate** shows gross saved tokens, injected
+  overhead, net token estimate, turns, tool spend, and ROI from `lean-ctx gain`.
+
+The rolling window defaults to 24 hours and can be set from 1 through 168:
+
+```bash
+orichum leanctx economics --hours 48
+orichum leanctx economics --session oc-s-0123456789abcdef
+```
+
+Inside a live session, the logical ID defaults from `ORICHUM_SESSION_ID`.
+Outside one, pass `--session`. Orichum uses the newest attached physical run for
+that logical session's project to obtain the isolated LeanCTX environment.
+
+All dollar values are upstream estimates, not provider invoices. The rolling
+sections are shared across every Orichum project and are not selected-session
+totals. The cache section includes only timestamped ledger records and may not
+cover every provider request. The all-time summary has a different attribution
+scope and fallback pricing, so Orichum never presents it as rolling-window
+billing or combines it into a fabricated rolling net.
 
 `watch` opens the selected run's terminal observatory, and `dashboard` starts
 its authenticated local web observatory in the foreground. They use that run's

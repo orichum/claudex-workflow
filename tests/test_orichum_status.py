@@ -50,6 +50,7 @@ class OrichumStatusTests(unittest.TestCase):
             stack="balanced",
             controller=binding,
             agents={role: binding for role in ROLES},
+            leanctx_profile="full",
             created_at="2026-07-27T00:00:00+00:00",
         )
         accounts = (

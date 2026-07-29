@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Collection
 from dataclasses import dataclass
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,10 @@ from typing import Callable, Mapping
 from urllib.parse import parse_qsl, urlsplit
 
 from .model_routing import ROLES
+from .leanctx_profiles import (
+    LEANCTX_PROFILE_FULL,
+    resident_tool_names,
+)
 from .orichum_sessions import LogicalSessionError
 from .route_selection import Route
 from .route_status import RouteStatusStore
@@ -74,8 +79,13 @@ class RouteIndex:
     def routes_for(
         self, session_id: str | None, primary_model: str
     ) -> tuple[Route, Route | None] | None:
+        return self.request_policy_for(session_id, primary_model)[0]
+
+    def request_policy_for(
+        self, session_id: str | None, primary_model: str
+    ) -> tuple[tuple[Route, Route | None] | None, str]:
         if session_id is None:
-            return None
+            return None, LEANCTX_PROFILE_FULL
         from .orichum_sessions import load_logical_session
 
         session = load_logical_session(self.state_home, session_id)
@@ -91,7 +101,8 @@ class RouteIndex:
             for binding in bindings
             if binding.primary.upstream_model == primary_model
         }
-        return next(iter(matches)) if len(matches) == 1 else None
+        routes = next(iter(matches)) if len(matches) == 1 else None
+        return routes, session.leanctx_profile
 
     def fallback_for(
         self, session_id: str | None, primary_model: str
@@ -335,9 +346,11 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             raise
 
     def _candidate_upstream(
-        self, original: bytes
+        self,
+        original: bytes,
+        resident_names: Collection[str],
     ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
-        candidate = transform_request(original)
+        candidate = transform_request(original, resident_names)
         connection, response = self._upstream(candidate.body)
         if candidate.transformed and response.status in {400, 422}:
             connection.close()
@@ -548,11 +561,12 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
             index: RouteIndex = self.server.route_index
             cooldowns: Cooldowns = self.server.cooldowns
             status_store: RouteStatusStore = self.server.route_status_store
-            routes = (
-                index.routes_for(session_id, primary)
+            routes, leanctx_profile = (
+                index.request_policy_for(session_id, primary)
                 if primary is not None
-                else None
+                else (None, LEANCTX_PROFILE_FULL)
             )
+            leanctx_resident_names = resident_tool_names(leanctx_profile)
             primary_route = None if routes is None else routes[0]
             fallback_route = None if routes is None else routes[1]
             fallback = (
@@ -572,7 +586,10 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                     reason="cooldown",
                 )
                 fallback_body = _replace_model(body, primary, fallback)
-                connection, response = self._candidate_upstream(fallback_body)
+                connection, response = self._candidate_upstream(
+                    fallback_body,
+                    leanctx_resident_names,
+                )
                 status_store.complete(session_id, response.status)
                 self._send_response(connection, response)
                 return
@@ -584,7 +601,10 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                     route_state="primary",
                     reason="primary",
                 )
-            connection, response = self._candidate_upstream(body)
+            connection, response = self._candidate_upstream(
+                body,
+                leanctx_resident_names,
+            )
             if (
                 primary is not None
                 and fallback is not None
@@ -599,7 +619,10 @@ class RouteProxyHandler(BaseHTTPRequestHandler):
                     reason="retry",
                 )
                 fallback_body = _replace_model(body, primary, fallback)
-                connection, response = self._candidate_upstream(fallback_body)
+                connection, response = self._candidate_upstream(
+                    fallback_body,
+                    leanctx_resident_names,
+                )
             elif primary is not None and response.status < 400:
                 cooldowns.clear(primary)
             if session_id is not None and primary_route is not None:

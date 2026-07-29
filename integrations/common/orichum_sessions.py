@@ -18,6 +18,11 @@ from types import MappingProxyType
 import uuid
 
 from .account_registry import Account
+from .leanctx_profiles import (
+    DEFAULT_LEANCTX_PROFILE,
+    LEANCTX_PROFILE_FULL,
+    validate_leanctx_profile,
+)
 from .model_routing import (
     EffectiveStack,
     ROLES,
@@ -65,6 +70,7 @@ class LogicalSession:
     stack: str
     controller: RouteBinding
     agents: Mapping[str, RouteBinding]
+    leanctx_profile: str
     created_at: str
 
 
@@ -237,7 +243,7 @@ def _parse_binding(value: object) -> RouteBinding:
 
 def _session_json(session: LogicalSession) -> dict[str, object]:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "id": session.id,
         "claudeSessionId": session.claude_session_id,
         "parentId": session.parent_id,
@@ -247,12 +253,13 @@ def _session_json(session: LogicalSession) -> dict[str, object]:
         "agents": {
             role: _binding_json(session.agents[role]) for role in ROLES
         },
+        "leanctxProfile": session.leanctx_profile,
         "createdAt": session.created_at,
     }
 
 
 def _parse_session(value: object) -> LogicalSession:
-    keys = {
+    base_keys = {
         "schemaVersion",
         "id",
         "claudeSessionId",
@@ -263,10 +270,23 @@ def _parse_session(value: object) -> LogicalSession:
         "agents",
         "createdAt",
     }
-    if not isinstance(value, dict) or set(value) != keys:
+    if not isinstance(value, dict):
         raise LogicalSessionError("logical session has invalid fields")
-    if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
-        raise LogicalSessionError("logical session schemaVersion must be exactly 1")
+    schema = value.get("schemaVersion")
+    if type(schema) is not int or schema not in {1, 2}:
+        raise LogicalSessionError(
+            "logical session schemaVersion must be exactly 1 or 2"
+        )
+    expected_keys = base_keys if schema == 1 else base_keys | {"leanctxProfile"}
+    if set(value) != expected_keys:
+        raise LogicalSessionError("logical session has invalid fields")
+    if schema == 1:
+        leanctx_profile = LEANCTX_PROFILE_FULL
+    else:
+        try:
+            leanctx_profile = validate_leanctx_profile(value["leanctxProfile"])
+        except ValueError as failure:
+            raise LogicalSessionError("logical session LeanCTX profile is invalid") from failure
     identifier = value["id"]
     parent = value["parentId"]
     if not isinstance(identifier, str) or not _SESSION_ID.fullmatch(identifier):
@@ -312,6 +332,7 @@ def _parse_session(value: object) -> LogicalSession:
         agents=MappingProxyType(
             {role: _parse_binding(agents[role]) for role in ROLES}
         ),
+        leanctx_profile=leanctx_profile,
         created_at=created_at,
     )
 
@@ -507,16 +528,30 @@ def create_logical_session(
     controller: RouteBinding,
     agents: Mapping[str, RouteBinding],
     parent_id: str | None = None,
+    leanctx_profile: str | None = None,
 ) -> LogicalSession:
     root = _session_root(state_home)
     staging = _staging_root(state_home)
     canonical_project = Path(project_root).resolve(strict=False)
+    parent = None
     if parent_id is not None:
         parent = load_logical_session(state_home, parent_id)
         if parent.project_root != canonical_project:
             raise LogicalSessionError(
                 "forked logical session must stay in its parent project"
             )
+    try:
+        selected_leanctx_profile = validate_leanctx_profile(
+            leanctx_profile
+            if leanctx_profile is not None
+            else (
+                parent.leanctx_profile
+                if parent is not None
+                else DEFAULT_LEANCTX_PROFILE
+            )
+        )
+    except ValueError as failure:
+        raise LogicalSessionError("logical session LeanCTX profile is invalid") from failure
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
     )
@@ -524,7 +559,7 @@ def create_logical_session(
         identifier = f"oc-s-{secrets.token_hex(8)}"
         session = _parse_session(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "id": identifier,
                 "claudeSessionId": str(uuid.uuid4()),
                 "parentId": parent_id,
@@ -534,6 +569,7 @@ def create_logical_session(
                 "agents": {
                     role: _binding_json(agents[role]) for role in agents
                 },
+                "leanctxProfile": selected_leanctx_profile,
                 "createdAt": now,
             }
         )

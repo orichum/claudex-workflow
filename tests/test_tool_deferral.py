@@ -134,6 +134,115 @@ class ToolDeferralTests(unittest.TestCase):
         self.assertTrue(by_name["Read"]["defer_loading"])
         self.assertEqual(document["tools"][-1]["type"], TOOL_SEARCH_TYPE)
 
+    def test_lean_profile_keeps_only_core_leanctx_tools_resident(self) -> None:
+        lean_resident = frozenset(
+            {
+                "mcp__leanctx__ctx_read",
+                "mcp__leanctx__ctx_search",
+                "mcp__leanctx__ctx_tree",
+                "mcp__leanctx__ctx_shell",
+            }
+        )
+        leanctx_names = (
+            "ctx_read",
+            "ctx_search",
+            "ctx_tree",
+            "ctx_expand",
+            "ctx_graph",
+            "ctx_impact",
+            "ctx_callgraph",
+            "ctx_knowledge",
+            "ctx_overview",
+            "ctx_patch",
+            "ctx_shell",
+        )
+        tools = [
+            *(client_tool(f"mcp__leanctx__{name}") for name in leanctx_names),
+            client_tool("Bash"),
+        ]
+
+        result = transform_request(
+            request("gpt-5.6-sol", tools),
+            resident_names=lean_resident,
+        )
+
+        document = json.loads(result.body)
+        by_name = {
+            tool.get("name"): tool
+            for tool in document["tools"]
+            if isinstance(tool, dict) and "name" in tool
+        }
+        self.assertTrue(result.transformed)
+        for name in lean_resident:
+            self.assertNotIn("defer_loading", by_name[name])
+        for name in set(by_name) - lean_resident - {TOOL_SEARCH_NAME}:
+            self.assertIs(by_name[name].get("defer_loading"), True)
+
+    def test_lean_profile_moves_cache_control_to_last_core_tool(self) -> None:
+        lean_resident = frozenset(
+            {
+                "mcp__leanctx__ctx_read",
+                "mcp__leanctx__ctx_search",
+                "mcp__leanctx__ctx_tree",
+                "mcp__leanctx__ctx_shell",
+            }
+        )
+        tools = [
+            client_tool("mcp__leanctx__ctx_read"),
+            client_tool("mcp__leanctx__ctx_expand"),
+            client_tool("mcp__leanctx__ctx_shell"),
+            *client_tools(9),
+        ]
+        tools[1]["cache_control"] = {"type": "ephemeral"}
+
+        document = json.loads(
+            transform_request(
+                request("gpt-5.6-sol", tools),
+                resident_names=lean_resident,
+            ).body
+        )
+        by_name = {
+            tool.get("name"): tool
+            for tool in document["tools"]
+            if isinstance(tool, dict) and "name" in tool
+        }
+        self.assertNotIn("cache_control", by_name["mcp__leanctx__ctx_expand"])
+        self.assertEqual(
+            by_name["mcp__leanctx__ctx_shell"]["cache_control"],
+            {"type": "ephemeral"},
+        )
+
+    def test_lean_profile_defers_known_nonresident_only_tool_sets(self) -> None:
+        lean_resident = frozenset(
+            {
+                "mcp__leanctx__ctx_read",
+                "mcp__leanctx__ctx_search",
+                "mcp__leanctx__ctx_tree",
+                "mcp__leanctx__ctx_shell",
+            }
+        )
+        for name in (
+            "mcp__leanctx__ctx_graph",
+            "mcp__leanctx__ctx_knowledge",
+            "mcp__leanctx__ctx_overview",
+        ):
+            with self.subTest(name=name):
+                tools = [client_tool(name), *client_tools(11)]
+
+                result = transform_request(
+                    request("gpt-5.6-sol", tools),
+                    resident_names=lean_resident,
+                )
+
+                self.assertTrue(result.transformed)
+                document = json.loads(result.body)
+                selected = next(
+                    tool
+                    for tool in document["tools"]
+                    if tool.get("name") == name
+                )
+                self.assertIs(selected["defer_loading"], True)
+
     def test_server_tool_is_never_deferred(self) -> None:
         tools = client_tools(12)
         tools.append({"type": "web_search_20250305", "name": "web_search"})

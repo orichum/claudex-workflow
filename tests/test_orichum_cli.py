@@ -17,9 +17,12 @@ from unittest import mock
 from integrations.common import orichum_cli
 from integrations.common import stack_bindings
 from integrations.common.leanctx_monitor import (
+    LeanctxGainSummary,
     LeanctxProxyStats,
+    LeanctxRollingEconomics,
     LeanctxRun,
     LeanctxStats,
+    LeanctxToolHealth,
 )
 from integrations.common.stack_bindings import (
     StackBindingError,
@@ -172,6 +175,31 @@ class OrichumCliTests(unittest.TestCase):
         self.assertIn("manage provider accounts", help_text)
         self.assertIn("inspect and monitor LeanCTX", help_text)
         self.assertIn("inspect and clean sessions", help_text)
+
+    def test_run_and_fork_parse_leanctx_profiles(self) -> None:
+        parser = orichum_cli.build_parser()
+
+        default_run = parser.parse_args(["run"])
+        full_run = parser.parse_args(
+            ["run", "--leanctx-profile", "full", "review", "this"]
+        )
+        inherited_fork = parser.parse_args(
+            ["fork", "oc-s-0000000000000001"]
+        )
+        lean_fork = parser.parse_args(
+            [
+                "fork",
+                "oc-s-0000000000000001",
+                "--leanctx-profile",
+                "lean",
+            ]
+        )
+
+        self.assertEqual(default_run.leanctx_profile, "lean")
+        self.assertEqual(full_run.leanctx_profile, "full")
+        self.assertEqual(full_run.arguments, ["review", "this"])
+        self.assertIsNone(inherited_fork.leanctx_profile)
+        self.assertEqual(lean_fork.leanctx_profile, "lean")
 
 
     def test_context_models_provider_and_plugin_read_only_commands(self) -> None:
@@ -1119,6 +1147,9 @@ class OrichumCliTests(unittest.TestCase):
         ):
             self.run_cli("run", "review", "this")
         prepare.assert_called_once()
+        self.assertEqual(
+            prepare.call_args.kwargs["leanctx_profile"], "lean"
+        )
         self.assertFalse(launch.call_args.kwargs["resume"])
         self.assertEqual(
             launch.call_args.kwargs["arguments"], ["review", "this"]
@@ -1444,6 +1475,28 @@ class OrichumCliTests(unittest.TestCase):
             parser.parse_args(["leanctx", "list", "--limit", "7"]).limit,
             7,
         )
+        economics = parser.parse_args(
+            [
+                "leanctx",
+                "economics",
+                "--session",
+                "oc-s-0000000000000001",
+                "--hours",
+                "48",
+            ]
+        )
+        self.assertEqual(economics.leanctx_command, "economics")
+        self.assertEqual(economics.session, "oc-s-0000000000000001")
+        self.assertEqual(economics.hours, 48)
+        self.assertEqual(
+            parser.parse_args(["leanctx", "economics"]).hours,
+            24,
+        )
+        for hours in ("0", "169"):
+            with self.subTest(hours=hours), self.assertRaises(SystemExit):
+                parser.parse_args(
+                    ["leanctx", "economics", "--hours", hours]
+                )
 
     def test_leanctx_project_root_prefers_repository_over_parent(self) -> None:
         parent = self.root / "parent"
@@ -1700,6 +1753,220 @@ class OrichumCliTests(unittest.TestCase):
         )
         self.assertEqual(row.split("|")[-2].strip(), "—")
 
+    def test_leanctx_economics_renders_separate_scopes_and_profile_footprint(
+        self,
+    ) -> None:
+        logical = SimpleNamespace(leanctx_profile="lean")
+        health = LeanctxToolHealth(
+            advertised_tools=5,
+            tool_schema_tokens=1300,
+            instruction_tokens=449,
+            rules_tokens=1053,
+            fixed_total_tokens=2802,
+            total_recorded_calls=12,
+            tools=(
+                ("ctx_read", 284, 5),
+                ("ctx_search", 326, 1),
+                ("ctx_tree", 135, 2),
+                ("ctx_shell", 208, 4),
+                ("ctx_graph", 347, 0),
+            ),
+        )
+        rolling = LeanctxRollingEconomics(
+            hours=24,
+            compression_events=3,
+            caching_events=7,
+            source_tokens=10000,
+            returned_tokens=2500,
+            saved_tokens=7500,
+            cache_read_tokens=108032,
+            compression_saved_usd=0.01875,
+            cache_saved_usd=0.486144,
+            compression_percent=75.0,
+        )
+        gain = LeanctxGainSummary(
+            total_commands=323,
+            input_tokens=534803,
+            output_tokens=435189,
+            tokens_saved=99614,
+            gain_rate_percent=18.626,
+            injected_overhead_tokens_per_turn=3233,
+            turns=680,
+            injected_overhead_total_tokens=2198440,
+            net_tokens_saved=-2098826,
+            avoided_usd=0.249035,
+            tool_spend_usd=0.450788,
+            roi=0.552444,
+        )
+
+        rendered = orichum_cli._leanctx_economics(
+            logical,
+            health,
+            rolling,
+            gain,
+        )
+
+        self.assertIn("Selected-session provider footprint", rendered)
+        self.assertIn("lean", rendered)
+        self.assertIn("RESIDENT", rendered)
+        self.assertIn("DEFERRED", rendered)
+        self.assertIn("953", rendered)
+        self.assertIn("347", rendered)
+        self.assertIn("Shared rolling compression (last 24 hours)", rendered)
+        self.assertIn("10,000", rendered)
+        self.assertIn("7,500", rendered)
+        self.assertIn("75.0%", rendered)
+        self.assertIn(
+            "Shared rolling recorded prompt-cache estimates (last 24 hours)",
+            rendered,
+        )
+        self.assertIn("108,032", rendered)
+        self.assertIn("LeanCTX all-time upstream estimate", rendered)
+        self.assertIn("-2,098,826", rendered)
+        self.assertIn("shared across all Orichum projects", rendered)
+        self.assertIn("not complete provider billing", rendered)
+        self.assertIn("not rolling-window billing", rendered)
+        self.assertNotIn("rolling net", rendered.lower())
+        self.assertTrue(
+            orichum_cli._estimated_usd(1e100).endswith(".000000")
+        )
+
+    def test_leanctx_economics_resolves_session_and_newest_attached_project_run(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        attached = LeanctxRun(
+            "run.attached",
+            self.root / "data" / "state" / "sessions" / "run.attached",
+            project,
+            "2026-07-27T10:00:00Z",
+            True,
+        )
+        historical = LeanctxRun(
+            "run.historical",
+            self.root / "data" / "state" / "sessions" / "run.historical",
+            project,
+            "2026-07-28T10:00:00Z",
+            False,
+            attached=False,
+        )
+        logical = SimpleNamespace(
+            id="oc-s-0000000000000001",
+            project_root=project,
+            leanctx_profile="lean",
+        )
+        health = LeanctxToolHealth(
+            4,
+            953,
+            449,
+            1053,
+            2455,
+            12,
+            (
+                ("ctx_read", 284, 5),
+                ("ctx_search", 326, 1),
+                ("ctx_tree", 135, 2),
+                ("ctx_shell", 208, 4),
+            ),
+        )
+        rolling = LeanctxRollingEconomics(
+            48, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0
+        )
+        gain = LeanctxGainSummary(
+            0, 0, 0, 0, 0.0, 0, 0, 0, 0, 0.0, 0.0, 0.0
+        )
+        binary = self.root / "data" / "bin" / "lean-ctx"
+        self.environment["ORICHUM_SESSION_ID"] = logical.id
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "resolve_logical_session",
+                return_value=logical,
+            ) as resolve,
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "discover_runs",
+                return_value=(historical, attached),
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "select_run",
+                return_value=attached,
+            ) as select,
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "managed_binary",
+                return_value=binary,
+            ),
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "read_tool_health",
+                return_value=health,
+            ) as read_health,
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "read_rolling_economics",
+                return_value=rolling,
+            ) as read_rolling,
+            mock.patch.object(
+                orichum_cli.leanctx_monitor,
+                "read_gain_summary",
+                return_value=gain,
+            ) as read_gain,
+        ):
+            status, stdout, stderr = self.run_cli(
+                "leanctx",
+                "economics",
+                "--hours",
+                "48",
+            )
+
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn("Selected-session provider footprint", stdout)
+        resolve.assert_called_once_with(
+            self.root / "data" / "state",
+            logical.id,
+        )
+        self.assertEqual(select.call_args.args[0], (attached,))
+        self.assertEqual(select.call_args.args[1], project)
+        read_health.assert_called_once_with(binary, attached)
+        read_rolling.assert_called_once_with(
+            self.root / "data",
+            48,
+        )
+        read_gain.assert_called_once_with(binary, attached)
+
+    def test_leanctx_economics_requires_a_logical_session(self) -> None:
+        status, stdout, stderr = self.run_cli("leanctx", "economics")
+
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertIn("logical session ID is required", stderr)
+
+    def test_leanctx_economics_explicit_session_overrides_environment(
+        self,
+    ) -> None:
+        self.environment["ORICHUM_SESSION_ID"] = "oc-s-0000000000000001"
+        explicit = "oc-s-0000000000000002"
+        with mock.patch.object(
+            orichum_cli,
+            "resolve_logical_session",
+            side_effect=orichum_cli.LogicalSessionError("stop after resolve"),
+        ) as resolve:
+            status, stdout, stderr = self.run_cli(
+                "leanctx",
+                "economics",
+                "--session",
+                explicit,
+            )
+
+        self.assertEqual((status, stdout), (2, ""))
+        self.assertIn("stop after resolve", stderr)
+        resolve.assert_called_once_with(
+            self.root / "data" / "state",
+            explicit,
+        )
+
     def test_leanctx_dashboard_propagates_selected_options_and_status(
         self,
     ) -> None:
@@ -1859,6 +2126,7 @@ class OrichumCliTests(unittest.TestCase):
             "oc-s-0000000000000001",
         )
         self.assertEqual(prepare.call_args.kwargs["requested_stack"], "balanced")
+        self.assertIsNone(prepare.call_args.kwargs["leanctx_profile"])
         self.assertFalse(launch.call_args.kwargs["resume"])
         self.assertEqual(launch.call_args.kwargs["handoff"], "bounded handoff")
 

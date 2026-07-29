@@ -1,7 +1,10 @@
 """Pure request transformer for deferring non-resident client tools."""
 
+from collections.abc import Collection
 from dataclasses import dataclass
 import json
+
+from .leanctx_profiles import ALL_LEANCTX_NAMES, FULL_RESIDENT_NAMES
 
 
 TOOL_SEARCH_TYPE = "tool_search_tool_regex_20251119"
@@ -17,19 +20,7 @@ VERIFIED_MODELS = frozenset(
         "claude-opus-4-6-thinking",
     }
 )
-RESIDENT_NAMES = frozenset(
-    {
-        "mcp__leanctx__ctx_read",
-        "mcp__leanctx__ctx_search",
-        "mcp__leanctx__ctx_tree",
-        "mcp__leanctx__ctx_graph",
-        "mcp__leanctx__ctx_impact",
-        "mcp__leanctx__ctx_callgraph",
-        "mcp__leanctx__ctx_patch",
-        "mcp__leanctx__ctx_shell",
-        "mcp__leanctx__ctx_expand",
-    }
-)
+RESIDENT_NAMES = FULL_RESIDENT_NAMES
 
 
 @dataclass(frozen=True)
@@ -78,7 +69,9 @@ def _eligible_client_tool(tool: object) -> bool:
     return not isinstance(tool.get("type"), str)
 
 
-def _preserve_cache_breakpoint(tools: list[object]) -> bool:
+def _preserve_cache_breakpoint(
+    tools: list[object], resident_names: Collection[str]
+) -> bool:
     if any(
         isinstance(tool, dict)
         and "cache_control" in tool
@@ -102,7 +95,7 @@ def _preserve_cache_breakpoint(tools: list[object]) -> bool:
             tool
             for tool in reversed(tools)
             if _eligible_client_tool(tool)
-            and tool.get("name") in RESIDENT_NAMES
+            and tool.get("name") in resident_names
         ),
         None,
     )
@@ -112,7 +105,10 @@ def _preserve_cache_breakpoint(tools: list[object]) -> bool:
     return True
 
 
-def transform_request(body: bytes) -> TransformResult:
+def transform_request(
+    body: bytes,
+    resident_names: Collection[str] = FULL_RESIDENT_NAMES,
+) -> TransformResult:
     try:
         document = json.loads(body)
     except (UnicodeError, json.JSONDecodeError, RecursionError):
@@ -129,7 +125,7 @@ def transform_request(body: bytes) -> TransformResult:
     if any(_is_tool_search(tool) or _is_deferred(tool) for tool in tools):
         return TransformResult(body, False)
     if not any(
-        isinstance(tool, dict) and tool.get("name") in RESIDENT_NAMES
+        isinstance(tool, dict) and tool.get("name") in ALL_LEANCTX_NAMES
         for tool in tools
     ):
         return TransformResult(body, False)
@@ -137,7 +133,10 @@ def transform_request(body: bytes) -> TransformResult:
     transformed = []
     for tool in tools:
         copied = dict(tool) if isinstance(tool, dict) else tool
-        if _eligible_client_tool(copied) and copied.get("name") not in RESIDENT_NAMES:
+        if (
+            _eligible_client_tool(copied)
+            and copied.get("name") not in resident_names
+        ):
             copied["defer_loading"] = True
         transformed.append(copied)
     if not any(
@@ -145,7 +144,7 @@ def transform_request(body: bytes) -> TransformResult:
         for tool in transformed
     ):
         return TransformResult(body, False)
-    if not _preserve_cache_breakpoint(transformed):
+    if not _preserve_cache_breakpoint(transformed, resident_names):
         return TransformResult(body, False)
     transformed.append({"type": TOOL_SEARCH_TYPE, "name": TOOL_SEARCH_NAME})
     document["tools"] = transformed
