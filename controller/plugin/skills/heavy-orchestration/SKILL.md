@@ -23,6 +23,12 @@ Set highRisk true only for security, authentication, concurrency, migration,
 irreversible architecture, or conflicting evidence with material impact.
 Otherwise set it false.
 
+Before invoking a workflow, the controller must collect live cloud or
+remote-service evidence with its own authorized tools and pass a bounded
+summary in the workflow subject/question and scope. Do not ask repository
+agents to collect live evidence; they are intentionally restricted to supplied
+material and repository reads.
+
 Never call Workflow by inline script, name, external path, generated path, or
 user-supplied path. Never launch both scripts for one task. Never place a
 writer in a Workflow. After the result returns, the main model synthesizes it
