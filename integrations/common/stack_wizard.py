@@ -17,6 +17,10 @@ from typing import Callable, Mapping, Protocol, Sequence, TextIO
 import tty
 
 from .account_registry import Account, load_accounts, validate_account_bindings
+from .cliproxy_management import (
+    attest_owned_connection,
+    load_management_endpoint,
+)
 from .model_routing import ROLES, RoutingError, validate_stack_name
 from .orichum_config import (
     ResolvedConfig,
@@ -1486,11 +1490,20 @@ class TerminalWizardIO:
 
 
 def _runtime_catalog_port(paths: Mapping[str, Path]) -> int:
-    # Kept at the CLI boundary to reuse its owned-runtime verification.
-    from .orichum_cli import _runtime_service_ports, _verify_runtime
+    return load_management_endpoint(Path(paths["data"])).port
 
-    _verify_runtime(paths)
-    return _runtime_service_ports(paths)["cliproxyPort"]
+
+def _runtime_catalog_attester(
+    paths: Mapping[str, Path],
+    expected_port: int,
+) -> Callable[[int], None]:
+    def attest(client_port: int) -> None:
+        endpoint = load_management_endpoint(Path(paths["data"]))
+        if endpoint.port != expected_port:
+            raise RoutingError("CLIProxyAPI port changed during discovery")
+        attest_owned_connection(endpoint, client_port)
+
+    return attest
 
 
 def _matched_context(
@@ -1645,6 +1658,7 @@ def create_recommended_stack(
     model_path = config_root / "model-stacks.json"
     binding_path = config_root / "stack-bindings.json"
     port = _runtime_catalog_port(paths)
+    attest = _runtime_catalog_attester(paths, port)
     stack_name = "recommended"
     with control_plane_transaction(config_root):
         with stack_binding_transaction(binding_path):
@@ -1668,7 +1682,7 @@ def create_recommended_stack(
                 if account.state == "active" and account.pool in pools
             )
             catalog = project_live_catalog(
-                fetch_live_catalog(port),
+                fetch_live_catalog(port, attest=attest),
                 eligible,
                 snapshot.stacks.models,
                 current.documents["providers"],
@@ -1726,12 +1740,13 @@ def run_stack_wizard(
     accounts = load_accounts(config_root / "accounts.json")
     validate_account_bindings(accounts, config.documents["providers"])
     port = _runtime_catalog_port(paths)
+    attest = _runtime_catalog_attester(paths, port)
     latest: LiveCatalog | None = None
 
     def refresh() -> LiveCatalog:
         nonlocal latest
         latest = project_live_catalog(
-            fetch_live_catalog(port),
+            fetch_live_catalog(port, attest=attest),
             accounts,
             snapshot.stacks.models,
             config.documents["providers"],
@@ -1782,7 +1797,7 @@ def run_stack_wizard(
                 validate_control_plane(proposed)
                 if result.stack_name in result.stacks.stacks:
                     current_catalog = project_live_catalog(
-                        fetch_live_catalog(port),
+                        fetch_live_catalog(port, attest=attest),
                         current_accounts,
                         result.stacks.models,
                         current.documents["providers"],

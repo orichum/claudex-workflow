@@ -266,6 +266,30 @@ class StackCatalogTests(unittest.TestCase):
             with self.assertRaises(CatalogError):
                 fetch_live_catalog(8317)
 
+    def test_fetch_can_attest_the_exact_loopback_connection(self) -> None:
+        payload = b'{"object":"list","data":[]}'
+        response = SimpleNamespace(
+            status=200,
+            read=mock.Mock(return_value=payload),
+        )
+        connection = mock.MagicMock()
+        connection.sock.getsockname.return_value = (
+            "127.0.0.1",
+            45678,
+        )
+        connection.getresponse.return_value = response
+        attest = mock.Mock()
+
+        with mock.patch(
+            "integrations.common.stack_catalog.http.client.HTTPConnection",
+            return_value=connection,
+        ):
+            document = fetch_live_catalog(8317, attest=attest)
+
+        attest.assert_called_once_with(45678)
+        connection.request.assert_called_once_with("GET", "/v1/models")
+        self.assertEqual(document, {"object": "list", "data": []})
+
     def test_fetch_rejects_redirects_oversize_and_invalid_ports(self) -> None:
         response = SimpleNamespace(
             status=302,

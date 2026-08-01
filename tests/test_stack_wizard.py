@@ -11,11 +11,12 @@ from pathlib import Path
 import pty
 import shutil
 import struct
+import sys
 import termios
 import tempfile
 import threading
 import traceback
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import Callable
 import unittest
 from unittest import mock
@@ -482,10 +483,24 @@ class StackWizardTests(unittest.TestCase):
         calls: list[str] = []
         paths = {"config": Path("/private/config"), "data": Path("/data")}
 
+        endpoint = mock.Mock(port=8317)
         with (
             mock.patch.object(
-                stack_wizard, "_runtime_catalog_port", return_value=8317
-            ),
+                stack_wizard,
+                "load_management_endpoint",
+                return_value=endpoint,
+                create=True,
+            ) as load_endpoint,
+            mock.patch.object(
+                stack_wizard,
+                "attest_owned_connection",
+                create=True,
+            ) as attest,
+            mock.patch.object(
+                stack_wizard,
+                "fetch_live_catalog",
+                return_value={"object": "list", "data": []},
+            ) as fetch,
             mock.patch.object(
                 stack_wizard,
                 "control_plane_transaction",
@@ -510,11 +525,6 @@ class StackWizardTests(unittest.TestCase):
                 return_value=(self.accounts[0],),
             ),
             mock.patch.object(stack_wizard, "validate_account_bindings"),
-            mock.patch.object(
-                stack_wizard,
-                "fetch_live_catalog",
-                return_value={"object": "list", "data": []},
-            ),
             mock.patch.object(
                 stack_wizard,
                 "project_live_catalog",
@@ -544,6 +554,7 @@ class StackWizardTests(unittest.TestCase):
             name = stack_wizard.create_recommended_stack(
                 paths, config, project
             )
+            fetch.call_args.kwargs["attest"](45678)
 
         self.assertEqual(name, "recommended")
         self.assertEqual(
@@ -553,6 +564,35 @@ class StackWizardTests(unittest.TestCase):
         self.assertIn("recommended", saved.stacks)
         self.assertIs(save.call_args.args[2], self.snapshot.bindings)
         self.assertEqual(assign.call_args.args[2], "recommended")
+        self.assertEqual(
+            load_endpoint.call_args_list,
+            [mock.call(paths["data"]), mock.call(paths["data"])],
+        )
+        fetch.assert_called_once_with(8317, attest=mock.ANY)
+        attest.assert_called_once_with(endpoint, 45678)
+
+    def test_stack_bootstrap_does_not_reload_the_cli_module(self) -> None:
+        endpoint = mock.Mock(port=8317)
+        poison = ModuleType("integrations.common.orichum_cli")
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {"integrations.common.orichum_cli": poison},
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "load_management_endpoint",
+                return_value=endpoint,
+            ),
+        ):
+            try:
+                port = stack_wizard._runtime_catalog_port(
+                    {"data": Path("/private/data")}
+                )
+            except (AttributeError, ImportError) as error:
+                self.fail(f"stack bootstrap reloaded the CLI module: {error}")
+
+        self.assertEqual(port, 8317)
 
     def test_clone_select_review_save_and_assign(self) -> None:
         io_adapter = ScriptedIO(
@@ -2083,7 +2123,7 @@ class StackWizardTests(unittest.TestCase):
                 mock.patch.object(
                     stack_wizard,
                     "fetch_live_catalog",
-                    side_effect=lambda *_args: current_catalog[0],
+                    side_effect=lambda *_args, **_kwargs: current_catalog[0],
                 ),
                 mock.patch.object(
                     stack_wizard,

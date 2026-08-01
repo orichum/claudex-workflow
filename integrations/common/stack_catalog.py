@@ -9,7 +9,7 @@ import io
 import json
 import math
 import time
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .account_registry import Account
 from .model_routing import RoutingError, validate_model_id
@@ -109,7 +109,12 @@ class _DeadlineSocket:
         self._sock.close()
 
 
-def fetch_live_catalog(port: int, timeout: float = 4.0) -> object:
+def fetch_live_catalog(
+    port: int,
+    timeout: float = 4.0,
+    *,
+    attest: Callable[[int], None] | None = None,
+) -> object:
     """Fetch one bounded model list from a loopback CLIProxyAPI port."""
     if type(port) is not int or port < 1024 or port > 65535:
         raise CatalogError("CLIProxyAPI port is invalid")
@@ -129,6 +134,13 @@ def fetch_live_catalog(port: int, timeout: float = 4.0) -> object:
         connection.connect()
         if connection.sock is None:
             raise CatalogError("CLIProxyAPI connection is unavailable")
+        if attest is not None:
+            client_host, client_port = connection.sock.getsockname()
+            if client_host != "127.0.0.1" or type(client_port) is not int:
+                raise CatalogError(
+                    "CLIProxyAPI connection is not loopback"
+                )
+            attest(client_port)
         _remaining(deadline)
         connection.sock = _DeadlineSocket(connection.sock, deadline)
         connection.request("GET", "/v1/models")
