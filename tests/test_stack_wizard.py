@@ -37,6 +37,7 @@ from integrations.common.stack_wizard import (
     TerminalWizardIO,
     WizardCancelled,
     WizardResult,
+    build_recommended_stack,
     run_stack_wizard,
 )
 
@@ -284,6 +285,274 @@ class StackWizardTests(unittest.TestCase):
             ),
             unclassified=(),
         )
+
+    def test_recommended_openai_stack_uses_role_specific_models(self) -> None:
+        openai_catalog = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider == "openai"
+            ),
+            unclassified=(),
+        )
+
+        updated = build_recommended_stack(self.snapshot, openai_catalog)
+
+        stack = updated.stacks["recommended"]
+        self.assertEqual(stack.controller[0].model, "gpt-5.6-sol")
+        self.assertEqual(
+            stack.agents["repository-explorer"][0].model,
+            "gpt-5.6-terra",
+        )
+        self.assertEqual(
+            stack.agents["repository-verifier"][0].model,
+            "gpt-5.6-terra",
+        )
+        self.assertEqual(
+            stack.agents["correctness-critic"][0].model,
+            "gpt-5.6-terra",
+        )
+        self.assertEqual(
+            stack.agents["architecture-advisor"][0].model,
+            "gpt-5.6-sol",
+        )
+        self.assertEqual(
+            stack.agents["implementation-worker"][0].model,
+            "gpt-5.6-sol",
+        )
+        for candidates in (stack.controller, *stack.agents.values()):
+            self.assertEqual(candidates[0].providers, ("openai",))
+
+    def test_recommended_stack_supports_one_unfamiliar_live_model(self) -> None:
+        catalog = LiveCatalog(
+            choices=(
+                LiveModelChoice(
+                    "kimi",
+                    "kimi",
+                    "kimi-for-coding",
+                    ("oc-a-dddddddddddddddd",),
+                    ("Personal Kimi",),
+                ),
+            ),
+            unclassified=(),
+        )
+
+        updated = build_recommended_stack(self.snapshot, catalog)
+
+        definition = updated.models["kimi-for-coding"]
+        self.assertEqual(definition.family, "kimi")
+        self.assertEqual(dict(definition.routes), {"kimi": "kimi-for-coding"})
+        stack = updated.stacks["recommended"]
+        for candidates in (stack.controller, *stack.agents.values()):
+            self.assertEqual(candidates[0].model, "kimi-for-coding")
+            self.assertEqual(candidates[0].providers, ("kimi",))
+
+    def test_recommended_stack_reuses_identical_definition(self) -> None:
+        openai_catalog = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider == "openai"
+            ),
+            unclassified=(),
+        )
+        first = build_recommended_stack(self.snapshot, openai_catalog)
+        snapshot = replace(self.snapshot, stacks=first)
+
+        second = build_recommended_stack(snapshot, openai_catalog)
+
+        self.assertIs(second, first)
+
+    def test_recommended_stack_reuses_different_live_compatible_definition(
+        self,
+    ) -> None:
+        openai_catalog = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider == "openai"
+            ),
+            unclassified=(),
+        )
+        document = stack_wizard.serialize_model_stacks(self.snapshot.stacks)
+        terra = {
+            "id": "",
+            "model": "gpt-5.6-terra",
+            "providers": ["openai"],
+        }
+        document["stacks"]["recommended"] = {
+            "controller": [
+                {
+                    **terra,
+                    "id": stack_wizard.candidate_id(
+                        "recommended", "controller", 0, terra["model"]
+                    ),
+                }
+            ],
+            "agents": {
+                role: [
+                    {
+                        **terra,
+                        "id": stack_wizard.candidate_id(
+                            "recommended", role, 0, terra["model"]
+                        ),
+                    }
+                ]
+                for role in stack_wizard.ROLES
+            },
+        }
+        existing = normalize_model_stacks(document)
+        snapshot = replace(self.snapshot, stacks=existing)
+
+        reused = build_recommended_stack(snapshot, openai_catalog)
+
+        self.assertIs(reused, existing)
+
+    def test_recommended_stack_does_not_overwrite_name_collision(self) -> None:
+        document = stack_wizard.serialize_model_stacks(self.snapshot.stacks)
+        collision = json.loads(
+            json.dumps(document["stacks"]["balanced"])
+        )
+        collision["controller"][0]["id"] = stack_wizard.candidate_id(
+            "recommended", "controller", 0, "gpt-5.6-sol"
+        )
+        for role, candidates in collision["agents"].items():
+            for ordinal, candidate in enumerate(candidates):
+                candidate["id"] = stack_wizard.candidate_id(
+                    "recommended", role, ordinal, candidate["model"]
+                )
+        document["stacks"]["recommended"] = collision
+        snapshot = replace(
+            self.snapshot,
+            stacks=normalize_model_stacks(document),
+        )
+        openai_catalog = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider == "openai"
+            ),
+            unclassified=(),
+        )
+
+        with self.assertRaisesRegex(
+            stack_wizard.RoutingError,
+            "recommended already exists",
+        ):
+            build_recommended_stack(snapshot, openai_catalog)
+
+    def test_recommended_stack_commit_validates_saves_and_assigns(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        project = Path(temporary.name).resolve() / "project"
+        project.mkdir()
+        projects = {
+            "schemaVersion": 1,
+            "contexts": [
+                {
+                    "root": str(project),
+                    "atlassian": None,
+                    "modelStack": None,
+                    "accountPools": ["shared"],
+                }
+            ],
+        }
+        config = ResolvedConfig(
+            documents={
+                "model-stacks": stack_wizard.serialize_model_stacks(
+                    self.snapshot.stacks
+                ),
+                "projects": projects,
+                "providers": {
+                    "providers": {
+                        "openai": {"families": ["gpt"]},
+                    }
+                },
+            },
+            sources={},
+        )
+        openai_catalog = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider == "openai"
+            ),
+            unclassified=(),
+        )
+        calls: list[str] = []
+        paths = {"config": Path("/private/config"), "data": Path("/data")}
+
+        with (
+            mock.patch.object(
+                stack_wizard, "_runtime_catalog_port", return_value=8317
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "control_plane_transaction",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "stack_binding_transaction",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(
+                stack_wizard, "load_control_plane", return_value=config
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "load_stack_snapshot",
+                return_value=self.snapshot,
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "load_accounts",
+                return_value=(self.accounts[0],),
+            ),
+            mock.patch.object(stack_wizard, "validate_account_bindings"),
+            mock.patch.object(
+                stack_wizard,
+                "fetch_live_catalog",
+                return_value={"object": "list", "data": []},
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "project_live_catalog",
+                return_value=openai_catalog,
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "validate_control_plane",
+                side_effect=lambda *_args: calls.append("control-plane"),
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "validate_stack_assignment",
+                side_effect=lambda *_args: calls.append("assignment"),
+            ),
+            mock.patch.object(
+                stack_wizard,
+                "save_stack",
+                side_effect=lambda *_args: calls.append("save"),
+            ) as save,
+            mock.patch.object(
+                stack_wizard,
+                "assign_stack_to_context",
+                side_effect=lambda *_args: calls.append("assign"),
+            ) as assign,
+        ):
+            name = stack_wizard.create_recommended_stack(
+                paths, config, project
+            )
+
+        self.assertEqual(name, "recommended")
+        self.assertEqual(
+            calls, ["control-plane", "assignment", "save", "assign"]
+        )
+        saved = save.call_args.args[1]
+        self.assertIn("recommended", saved.stacks)
+        self.assertIs(save.call_args.args[2], self.snapshot.bindings)
+        self.assertEqual(assign.call_args.args[2], "recommended")
 
     def test_clone_select_review_save_and_assign(self) -> None:
         io_adapter = ScriptedIO(

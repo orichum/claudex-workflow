@@ -57,6 +57,46 @@ _INTERNAL_ID = re.compile(
     r"(?<![A-Za-z0-9])oc-(?:a|c|r)-[a-f0-9]{16}(?![A-Za-z0-9])"
 )
 
+_RECOMMENDED_MODELS = {
+    "controller": (
+        "gpt-5.6-sol",
+        "claude-opus-5",
+        "claude-opus-4-6-thinking",
+        "claude-sonnet-5",
+        "gpt-5.6-terra",
+    ),
+    "repository-explorer": (
+        "gpt-5.6-terra",
+        "claude-sonnet-5",
+        "gpt-5.6-sol",
+        "claude-opus-5",
+    ),
+    "repository-verifier": (
+        "gpt-5.6-terra",
+        "claude-sonnet-5",
+        "gpt-5.6-sol",
+        "claude-opus-5",
+    ),
+    "correctness-critic": (
+        "claude-sonnet-5",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "claude-opus-5",
+    ),
+    "architecture-advisor": (
+        "claude-opus-5",
+        "claude-opus-4-6-thinking",
+        "gpt-5.6-sol",
+        "claude-sonnet-5",
+    ),
+    "implementation-worker": (
+        "gpt-5.6-sol",
+        "claude-sonnet-5",
+        "claude-opus-5",
+        "gpt-5.6-terra",
+    ),
+}
+
 
 class WizardCancelled(RuntimeError):
     """The user or terminal ended the wizard without mutation."""
@@ -1475,6 +1515,193 @@ def _matched_context(
         if root == matched:
             return context
     raise RoutingError("matched project context disappeared")
+
+
+def _logical_live_model(
+    snapshot: StackSnapshot,
+    choice: LiveModelChoice,
+) -> str:
+    for model, definition in snapshot.stacks.models.items():
+        if (
+            definition.family == choice.family
+            and definition.routes.get(choice.provider) == choice.upstream
+        ):
+            return model
+    return choice.upstream
+
+
+def _recommended_choice(
+    snapshot: StackSnapshot,
+    catalog: LiveCatalog,
+    scope: str,
+) -> LiveModelChoice:
+    preferences = _RECOMMENDED_MODELS[scope]
+
+    def rank(choice: LiveModelChoice) -> tuple[int, str, str]:
+        model = _logical_live_model(snapshot, choice)
+        try:
+            preferred = preferences.index(model)
+        except ValueError:
+            try:
+                preferred = preferences.index(choice.upstream)
+            except ValueError:
+                preferred = len(preferences)
+        return preferred, choice.provider, choice.upstream
+
+    if not catalog.choices:
+        raise RoutingError("no compatible live model is available")
+    return min(catalog.choices, key=rank)
+
+
+def _stack_is_live_compatible(
+    snapshot: StackSnapshot,
+    catalog: LiveCatalog,
+    stack_name: str,
+) -> bool:
+    stack = snapshot.stacks.stacks[stack_name]
+
+    def candidate_is_live(candidate: StackCandidate) -> bool:
+        definition = snapshot.stacks.models.get(candidate.model)
+        if definition is None:
+            return False
+        return any(
+            choice.family == definition.family
+            and choice.provider in candidate.providers
+            and definition.routes.get(choice.provider) == choice.upstream
+            for choice in catalog.choices
+        )
+
+    return all(
+        any(candidate_is_live(candidate) for candidate in candidates)
+        for candidates in (stack.controller, *stack.agents.values())
+    )
+
+
+def build_recommended_stack(
+    snapshot: StackSnapshot,
+    catalog: LiveCatalog,
+    stack_name: str = "recommended",
+) -> NormalizedStacks:
+    """Build one deterministic live-compatible stack without account pins."""
+    document = serialize_model_stacks(snapshot.stacks)
+    raw_models = document["models"]
+    raw_stacks = document["stacks"]
+    if not isinstance(raw_models, dict) or not isinstance(raw_stacks, dict):
+        raise RoutingError("model stack configuration is invalid")
+    existing = snapshot.stacks.stacks.get(stack_name)
+    if existing is not None:
+        if _stack_is_live_compatible(snapshot, catalog, stack_name):
+            return snapshot.stacks
+        raise RoutingError(
+            f"stack {stack_name} already exists with another definition"
+        )
+
+    def candidate(scope: str) -> dict[str, object]:
+        choice = _recommended_choice(snapshot, catalog, scope)
+        model = _logical_live_model(snapshot, choice)
+        definition = raw_models.get(model)
+        if definition is None:
+            raw_models[model] = {
+                "family": choice.family,
+                "routes": {choice.provider: choice.upstream},
+            }
+        else:
+            if (
+                not isinstance(definition, dict)
+                or definition.get("family") != choice.family
+                or not isinstance(definition.get("routes"), dict)
+            ):
+                raise RoutingError(
+                    f"model {model} conflicts with live family"
+                )
+            definition["routes"].setdefault(
+                choice.provider, choice.upstream
+            )
+        return {
+            "id": candidate_id(stack_name, scope, 0, model),
+            "model": model,
+            "providers": [choice.provider],
+        }
+
+    raw_stacks[stack_name] = {
+        "controller": [candidate("controller")],
+        "agents": {
+            role: [candidate(role)]
+            for role in ROLES
+        },
+    }
+    updated = normalize_model_stacks(document)
+    return updated
+
+
+def create_recommended_stack(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    launch_dir: Path,
+) -> str:
+    """Persist and assign a recommended stack for one configured context."""
+    del config
+    config_root = Path(paths["config"])
+    model_path = config_root / "model-stacks.json"
+    binding_path = config_root / "stack-bindings.json"
+    port = _runtime_catalog_port(paths)
+    stack_name = "recommended"
+    with control_plane_transaction(config_root):
+        with stack_binding_transaction(binding_path):
+            current = load_control_plane(default_config_paths(config_root))
+            snapshot = load_stack_snapshot(model_path, binding_path)
+            accounts = load_accounts(config_root / "accounts.json")
+            validate_account_bindings(
+                accounts, current.documents["providers"]
+            )
+            context = _matched_context(
+                current.documents["projects"], Path(launch_dir)
+            )
+            pools = context.get("accountPools")
+            if not isinstance(pools, list) or not all(
+                isinstance(pool, str) for pool in pools
+            ):
+                raise RoutingError("project account pools are invalid")
+            eligible = tuple(
+                account
+                for account in accounts
+                if account.state == "active" and account.pool in pools
+            )
+            catalog = project_live_catalog(
+                fetch_live_catalog(port),
+                eligible,
+                snapshot.stacks.models,
+                current.documents["providers"],
+            )
+            updated = build_recommended_stack(
+                snapshot, catalog, stack_name
+            )
+            proposed = ResolvedConfig(
+                documents={
+                    **current.documents,
+                    "model-stacks": serialize_model_stacks(updated),
+                },
+                sources=current.sources,
+            )
+            validate_control_plane(proposed)
+            validate_stack_assignment(
+                stack_name,
+                context,
+                updated,
+                snapshot.bindings,
+                accounts,
+                current.documents["providers"],
+                catalog,
+            )
+            if updated is not snapshot.stacks:
+                save_stack(snapshot, updated, snapshot.bindings)
+            assign_stack_to_context(
+                config_root / "projects.json",
+                Path(launch_dir),
+                stack_name,
+                updated.stacks,
+            )
+    return stack_name
 
 
 def run_stack_wizard(

@@ -270,6 +270,30 @@ class InstallControlPlaneTests(unittest.TestCase):
         self._rollback(journal)
         self.assertEqual(installed_policy.read_bytes(), stale)
 
+    def test_stage_preserves_existing_custom_account_pools(self) -> None:
+        providers_path = self.installed / "providers.json"
+        providers = json.loads(providers_path.read_text(encoding="utf-8"))
+        providers["accountPools"]["client"] = {
+            "providers": ["anthropic", "openai"]
+        }
+        providers_path.write_text(
+            json.dumps(providers),
+            encoding="utf-8",
+        )
+        providers_path.chmod(0o600)
+        shutil.rmtree(self.candidate)
+
+        stage(self.repository, self.installed, self.candidate)
+
+        staged = json.loads(
+            (self.candidate / "providers.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("client", staged["accountPools"])
+        self.assertEqual(
+            staged["accountPools"]["client"]["providers"],
+            ["anthropic", "openai"],
+        )
+
     def test_activation_normalizes_and_rollback_restores_projects(self) -> None:
         projects_path = self.installed / "projects.json"
         project_root = self.root / "project"

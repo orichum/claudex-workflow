@@ -8,19 +8,33 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 export ORICHUM_INSTALL_BOOTSTRAP=true
 
 install_usage() {
-  printf 'Usage: ./install.sh [--upgrade | --uninstall [--purge]]\n' >&2
+  printf 'Usage: ./install.sh [--verbose] [--upgrade | --uninstall [--purge]]\n' >&2
 }
 
-INSTALL_MODE="$(parse_install_mode "$@")" || {
+install_arguments="$(parse_install_arguments "$@")" || {
   install_usage
   exit 2
 }
+IFS=$'\t' read -r INSTALL_MODE INSTALL_VERBOSE <<<"$install_arguments"
+INSTALL_OUTPUT_ACTIVE=false
+INSTALL_LOG_PATH=
+ORICHUM_COMPLETION_OPTIONAL_SHELL=
+
+install_cleanup() {
+  local status="${1:-0}"
+  if [[ "$INSTALL_OUTPUT_ACTIVE" == true && "$status" -ne 0 ]]; then
+    printf '\nInstallation stopped.\n\n' >&4
+    printf 'Run:\n  ./install.sh\n\n' >&4
+    printf 'Details:\n  ./install.sh --verbose\n' >&4
+  fi
+  workflow_cleanup "$status"
+}
 
 workflow_cleanup_init
-trap 'workflow_cleanup "$?"' EXIT
-trap 'workflow_cleanup 129' HUP
-trap 'workflow_cleanup 130' INT
-trap 'workflow_cleanup 143' TERM
+trap 'install_cleanup "$?"' EXIT
+trap 'install_cleanup 129' HUP
+trap 'install_cleanup 130' INT
+trap 'install_cleanup 143' TERM
 lifecycle_lock_path="$(orichum_lifecycle_lock_path)" || \
   workflow_die "refusing unsafe Orichum lifecycle lock"
 acquire_workflow_lock "$lifecycle_lock_path"
@@ -395,6 +409,17 @@ case "$ORICHUM_CONFIG_ROOT" in
   /*) ;;
   *) workflow_die "ORICHUM_CONFIG_HOME must be an absolute path" ;;
 esac
+INSTALL_LOG_PATH="$(
+  create_install_diagnostic_log "$WORKFLOW_DATA_ROOT"
+)" || workflow_die "private installer diagnostics are unavailable"
+exec 3>&1 4>&2
+if [[ "$INSTALL_VERBOSE" == true ]]; then
+  exec > >(tee -a "$INSTALL_LOG_PATH" >&3) \
+    2> >(tee -a "$INSTALL_LOG_PATH" >&4)
+else
+  exec >>"$INSTALL_LOG_PATH" 2>&1
+fi
+INSTALL_OUTPUT_ACTIVE=true
 SERVICE_LABEL="io.orichum.cliproxy"
 runtime_transaction_active=false
 runtime_release=
@@ -932,6 +957,8 @@ if attempt_verified_fast_install; then
   prune_orichum_runtime \
     "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" "$runtime_release" || \
     printf 'WARNING: obsolete Orichum runtime releases could not be removed.\n' >&2
+  print_install_outcome false "$ORICHUM_COMPLETION_OPTIONAL_SHELL" \
+    "$INSTALL_LOG_PATH" >&3
   exit 0
 fi
 
@@ -3076,3 +3103,10 @@ fi
 prune_orichum_runtime \
   "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" "$runtime_release" || \
   printf 'WARNING: obsolete Orichum runtime releases could not be removed.\n' >&2
+provider_pending=false
+if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
+  provider_pending=true
+fi
+print_install_outcome \
+  "$provider_pending" "$ORICHUM_COMPLETION_OPTIONAL_SHELL" \
+  "$INSTALL_LOG_PATH" >&3

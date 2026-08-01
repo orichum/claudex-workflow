@@ -41,8 +41,8 @@ The first run performs the complete installation. It:
 8. installs or reconciles the shared loopback services;
 9. installs native zsh, Bash, and fish completion and bounded shell activation;
 10. preserves valid configuration and authentication;
-11. runs `orichum doctor` and reports the final locations and ports once a
-   provider route is available.
+11. runs `orichum doctor` once a provider route is available and records full
+   technical diagnostics privately under `~/.orichum/logs/`.
 
 ONNX Runtime provisioning is eager and idempotent, so a verified runtime is
 available before the first project session and repeat installations reuse it.
@@ -57,11 +57,16 @@ prints one next command:
 orichum setup
 ```
 
-The setup wizard authenticates and registers a provider account, invokes the
-active runtime's normal idempotent installer path to publish models and
-reconcile services, configures a usable stack and project mapping, and runs the
-final doctor check. Re-running it resumes from durable state instead of
-duplicating accounts or contexts.
+Setup asks for provider, account name, and projects folder (default
+`~/projects`). The first account is automatically Primary in the internal
+`shared` group. Setup invokes the active runtime's normal idempotent installer
+path, creates a compatible recommended stack without a separate wizard, maps
+the projects folder, and runs the final doctor check. Re-running it resumes from
+durable state instead of duplicating completed phases.
+
+Normal installer and setup output contains only progress, outcomes, and required
+actions. Use `./install.sh --verbose` or `orichum setup --verbose` to stream the
+technical output that is also retained in private diagnostic logs.
 
 ## Fast reconciliation or explicit upgrade
 

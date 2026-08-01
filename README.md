@@ -52,10 +52,11 @@ command:
 orichum setup
 ```
 
-That resumable wizard combines provider authentication, named-account
-registration, model and service reconciliation, stack configuration, project
-mapping, and the final health check. Orichum installs its runtime and all
-user-managed state under `~/.orichum`;
+That resumable setup asks for the provider, account name, and projects folder
+(default `~/projects`). It registers the first account as Primary in Orichum's
+internal `shared` group, creates a compatible recommended model stack, maps the
+projects folder, reconciles services, and runs the final health check. Orichum
+installs its runtime and all user-managed state under `~/.orichum`;
 the checkout remains source code only, so editing configuration never dirties
 the repository and moving the checkout does not break the installed command.
 Later `./install.sh` runs quickly when everything is already verified and
@@ -81,17 +82,18 @@ remove Orichum's saved configuration and data.
 
 ## Your first Orichum session
 
-Run the guided setup after installation. Pass a project or parent directory,
-or omit it and confirm the directory in the prompt:
+Run the guided setup after installation:
 
 ```bash
-orichum setup ~/projects
+orichum setup
 ```
 
-The wizard asks only for user choices. It hides credential filenames and the
-internal distinction between the Codex login type and the OpenAI provider
-adapter. If setup is interrupted, run the same command again; completed
-account, runtime, project, and usable-stack phases are reused.
+Setup asks only for provider, account name, and projects folder. It hides
+credential filenames, account groups, priorities, and the internal distinction
+between the Codex login type and the OpenAI provider adapter. If setup is
+interrupted, run the same command again; completed phases are shown as already
+configured and are not repeated. Use `orichum setup --verbose` only when you
+need live technical diagnostics; normal setup remains concise.
 
 When setup reports readiness, enter a repository below the configured parent
 and launch:
