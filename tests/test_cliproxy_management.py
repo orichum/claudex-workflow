@@ -19,6 +19,7 @@ from integrations.common.cliproxy_management import (
     oauth_status,
     patch_auth_fields,
     start_oauth,
+    submit_oauth_callback,
 )
 
 
@@ -208,6 +209,56 @@ class CliProxyManagementTests(unittest.TestCase):
                 "/v0/management/oauth-session?state=state-123",
             ),
         )
+
+    def test_oauth_callback_submission_is_loopback_and_state_bound(
+        self,
+    ) -> None:
+        endpoint = load_management_endpoint(self.data)
+        connection = _Connection()
+        callback = (
+            "http://localhost:1455/auth/callback?"
+            "code=secret-code&state=state-123"
+        )
+        with mock.patch(
+            "integrations.common.cliproxy_management._open_attested_connection",
+            return_value=connection,
+        ):
+            submit_oauth_callback(endpoint, "state-123", callback)
+
+        arguments, keywords = connection.request_args
+        self.assertEqual(
+            arguments[:2],
+            ("POST", "/v0/management/oauth-callback"),
+        )
+        self.assertEqual(
+            json.loads(keywords["body"]),
+            {"redirect_url": callback, "state": "state-123"},
+        )
+        self.assertEqual(
+            keywords["headers"]["X-Management-Key"],
+            "a" * 48,
+        )
+        self.assertTrue(connection.closed)
+
+    def test_oauth_callback_submission_rejects_unsafe_or_wrong_state_urls(
+        self,
+    ) -> None:
+        endpoint = load_management_endpoint(self.data)
+        callbacks = (
+            "https://example.com/callback?code=x&state=state-123",
+            "http://localhost:1455/auth/callback?code=x&state=other",
+            "http://localhost:1455/auth/callback?state=state-123",
+        )
+        for callback in callbacks:
+            with (
+                self.subTest(callback=callback),
+                mock.patch(
+                    "integrations.common.cliproxy_management._open_attested_connection"
+                ) as opened,
+                self.assertRaises(ManagementError),
+            ):
+                submit_oauth_callback(endpoint, "state-123", callback)
+            opened.assert_not_called()
 
     def test_oauth_management_rejects_malformed_or_failed_responses(
         self,

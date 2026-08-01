@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -706,6 +707,8 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(
             stdout.getvalue(),
             "OpenAI authentication\n"
+            "  Open this URL:\n"
+            f"    {session.url}\n"
             "  Opening your browser…\n"
             "  Waiting for authentication…\n"
             "  ✓ Signed in\n",
@@ -729,6 +732,10 @@ class OrichumCliTests(unittest.TestCase):
             state="secret-state",
         )
         stdout = io.StringIO()
+        callback = (
+            "http://localhost:1455/auth/callback?"
+            "code=secret-code&state=secret-state"
+        )
         with (
             mock.patch.object(
                 orichum_cli,
@@ -743,8 +750,12 @@ class OrichumCliTests(unittest.TestCase):
             ),
             mock.patch.object(orichum_cli, "cancel_oauth") as cancel,
             mock.patch.object(
+                orichum_cli, "submit_oauth_callback"
+            ) as submit,
+            mock.patch.object(
                 orichum_cli.webbrowser, "open", return_value=False
             ),
+            mock.patch("builtins.input", return_value=callback),
             mock.patch.object(orichum_cli.time, "sleep"),
             contextlib.redirect_stdout(stdout),
         ):
@@ -764,10 +775,12 @@ class OrichumCliTests(unittest.TestCase):
             output.index(session.url),
             output.index("  Waiting for authentication…"),
         )
+        submit.assert_called_once_with(endpoint, session.state, callback)
         cancel.assert_not_called()
         logged = diagnostics.path.read_text(encoding="utf-8")
         self.assertNotIn(session.url, logged)
         self.assertNotIn(session.state, logged)
+        self.assertNotIn(callback, logged)
 
     def test_managed_provider_login_recovers_from_browser_launcher_errors(
         self,
@@ -792,6 +805,10 @@ class OrichumCliTests(unittest.TestCase):
                     state="secret-state",
                 )
                 stdout = io.StringIO()
+                callback = (
+                    "http://localhost:1455/auth/callback?"
+                    "code=secret-code&state=secret-state"
+                )
                 with (
                     mock.patch.object(
                         orichum_cli,
@@ -810,10 +827,14 @@ class OrichumCliTests(unittest.TestCase):
                         orichum_cli, "cancel_oauth"
                     ) as cancel,
                     mock.patch.object(
+                        orichum_cli, "submit_oauth_callback"
+                    ) as submit,
+                    mock.patch.object(
                         orichum_cli.webbrowser,
                         "open",
                         side_effect=browser_error,
                     ),
+                    mock.patch("builtins.input", return_value=callback),
                     mock.patch.object(orichum_cli.time, "sleep"),
                     contextlib.redirect_stdout(stdout),
                 ):
@@ -829,10 +850,77 @@ class OrichumCliTests(unittest.TestCase):
                 output = stdout.getvalue()
                 self.assertIn(session.url, output)
                 self.assertIn("  Waiting for authentication…", output)
+                submit.assert_called_once_with(
+                    endpoint,
+                    session.state,
+                    callback,
+                )
                 cancel.assert_not_called()
                 logged = diagnostics.path.read_text(encoding="utf-8")
                 self.assertNotIn(session.url, logged)
                 self.assertNotIn(session.state, logged)
+                self.assertNotIn(callback, logged)
+
+    def test_managed_provider_login_uses_callback_paste_over_ssh(
+        self,
+    ) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+        endpoint = object()
+        session = SimpleNamespace(
+            url="https://auth.openai.com/oauth?state=secret-state",
+            state="secret-state",
+        )
+        callback = (
+            "http://localhost:1455/auth/callback?"
+            "code=secret-code&state=secret-state"
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"SSH_CONNECTION": "client 1 server 22"},
+                clear=False,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "load_management_endpoint",
+                return_value=endpoint,
+            ),
+            mock.patch.object(
+                orichum_cli, "start_oauth", return_value=session
+            ),
+            mock.patch.object(
+                orichum_cli, "oauth_status", return_value="ok"
+            ),
+            mock.patch.object(
+                orichum_cli, "submit_oauth_callback"
+            ) as submit,
+            mock.patch.object(orichum_cli.webbrowser, "open") as browser,
+            mock.patch("builtins.input", return_value=callback),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = orichum_cli._managed_provider_login(
+                {"data": data},
+                "codex",
+                "OpenAI",
+                diagnostics,
+            )
+        diagnostics.close()
+
+        self.assertEqual(status, 0)
+        browser.assert_not_called()
+        submit.assert_called_once_with(endpoint, session.state, callback)
+        output = stdout.getvalue()
+        self.assertIn(session.url, output)
+        self.assertIn("SSH session detected", output)
+        logged = diagnostics.path.read_text(encoding="utf-8")
+        self.assertNotIn(session.url, logged)
+        self.assertNotIn(callback, logged)
 
     def test_managed_provider_login_cancels_when_browser_launch_is_cancelled(
         self,
@@ -1562,7 +1650,7 @@ class OrichumCliTests(unittest.TestCase):
 
         def authenticate(*_arguments, **_kwargs):
             credential.write_text(credential_document, encoding="utf-8")
-            credential.chmod(0o600)
+            credential.chmod(0o644)
             return 0
 
         with (
@@ -1601,6 +1689,7 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(account["pool"], "shared")
         self.assertEqual(account["priority"], 100)
         self.assertEqual(account["state"], "active")
+        self.assertEqual(stat.S_IMODE(credential.stat().st_mode), 0o600)
         self.assertIn("Provider account ready: Work Claude", stdout)
         self.assertNotIn(credential.name, stdout)
         self.assertNotIn("work@example.com", stdout)
@@ -1610,6 +1699,7 @@ class OrichumCliTests(unittest.TestCase):
         self,
     ) -> None:
         config_home, credential = self.provision_account_runtime()
+        credential.chmod(0o644)
         stdout = io.StringIO()
 
         with (
@@ -1632,6 +1722,7 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(account["credentialRef"], credential.name)
         self.assertEqual(account["pool"], "shared")
         self.assertEqual(account["priority"], 100)
+        self.assertEqual(stat.S_IMODE(credential.stat().st_mode), 0o600)
         output = stdout.getvalue()
         self.assertNotIn("Choose where this account is available", output)
         self.assertNotIn("Choose account priority", output)
