@@ -13,6 +13,7 @@ from integrations.common.runtime_bundle import (
     RuntimeBundleError,
     activate,
     build,
+    prune,
     rollback_activation,
     rollback_attempt,
     validate,
@@ -176,6 +177,23 @@ class RuntimeBundleTests(unittest.TestCase):
         )
         self.assertEqual(first_manifest, second_manifest)
         self.assertEqual(first_manifest["digest"], first.name)
+
+    def test_installed_runtime_rebuild_preserves_identity(self) -> None:
+        source, _ = self.git_source()
+        staged = build(source, self.stage / "initial")
+        installed, _ = activate(staged, self.home)
+
+        rebuilt = build(installed, self.stage / "rebuild")
+
+        self.assertEqual(rebuilt.name, installed.name)
+        self.assertEqual(
+            self.build_identity(rebuilt),
+            self.build_identity(installed),
+        )
+        reconciled, _ = activate(rebuilt, self.home)
+        prune(self.home, (reconciled,))
+        self.assertEqual(reconciled, installed)
+        self.assertTrue(installed.is_dir())
 
     def test_validate_rejects_modified_release(self) -> None:
         release = build(REPOSITORY_ROOT, self.stage)

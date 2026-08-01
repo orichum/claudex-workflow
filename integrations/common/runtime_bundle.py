@@ -229,6 +229,63 @@ def _source_identity(
     return identity
 
 
+def _validated_embedded_identity(
+    source_root: Path,
+) -> dict[str, object] | None:
+    try:
+        validate(source_root)
+        document = json.loads(
+            _safe_source_file(
+                source_root, Path(BUILD_IDENTITY_NAME)
+            ).read_text(encoding="utf-8")
+        )
+        version = _safe_source_file(
+            source_root, Path("VERSION")
+        ).read_text(encoding="ascii").strip()
+    except (
+        RuntimeBundleError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+    if (
+        type(document) is not dict
+        or set(document) != {
+            "schemaVersion",
+            "version",
+            "sourceKind",
+            "sourceCommit",
+            "dirty",
+            "exactTag",
+        }
+        or type(document["schemaVersion"]) is not int
+        or document["schemaVersion"] != BUILD_IDENTITY_SCHEMA_VERSION
+        or document["version"] != version
+        or type(document["dirty"]) is not bool
+        or type(document["exactTag"]) is not bool
+    ):
+        return None
+    source_kind = document["sourceKind"]
+    commit = document["sourceCommit"]
+    if source_kind == "source":
+        return (
+            document
+            if commit is None
+            and not document["dirty"]
+            and not document["exactTag"]
+            else None
+        )
+    if (
+        source_kind != "git"
+        or type(commit) is not str
+        or len(commit) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        return None
+    return document
+
+
 def build(source_root: Path, staging_root: Path) -> Path:
     """Copy the declared runtime payload into a content-addressed staging tree."""
     source_root = source_root.resolve(strict=True)
@@ -255,7 +312,10 @@ def build(source_root: Path, staging_root: Path) -> Path:
             destination.chmod(mode)
         identity_path = candidate / BUILD_IDENTITY_NAME
         identity_path.write_bytes(
-            _canonical(_source_identity(source_root, relative_paths))
+            _canonical(
+                _validated_embedded_identity(source_root)
+                or _source_identity(source_root, relative_paths)
+            )
         )
         identity_path.chmod(0o644)
         _set_private_directory_modes(candidate)
