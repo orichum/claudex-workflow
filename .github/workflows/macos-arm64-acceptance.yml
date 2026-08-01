@@ -178,23 +178,6 @@ jobs:
             ' >/dev/null
           orichum doctor
 
-      - name: Verify guided setup and resumability
-        shell: bash
-        run: |
-          set -euo pipefail
-          script -q "$RUNNER_TEMP/orichum-setup-first.log" \
-            orichum setup "$GITHUB_WORKSPACE"
-          script -q "$RUNNER_TEMP/orichum-setup-repeat.log" \
-            orichum setup "$GITHUB_WORKSPACE"
-          jq -e '(.accounts | length) == 2' \
-            "$ORICHUM_CONFIG_HOME/accounts.json" >/dev/null
-          jq --arg root "$GITHUB_WORKSPACE" -e '
-            (.contexts | length) == 1 and
-            .contexts[0].root == $root and
-            .contexts[0].accountPools == ["shared"]
-          ' "$ORICHUM_CONFIG_HOME/projects.json" >/dev/null
-          orichum doctor
-
       - name: Verify LeanCTX code-intelligence contract
         shell: bash
         run: |
@@ -287,6 +270,23 @@ jobs:
             "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
             "$leanctx_ort_dylib_path" \
             "$ORICHUM_DATA_HOME/leanctx/cache"
+
+      - name: Verify guided setup and resumability
+        shell: bash
+        run: |
+          set -euo pipefail
+          script -q "$RUNNER_TEMP/orichum-setup-first.log" \
+            orichum setup "$GITHUB_WORKSPACE"
+          script -q "$RUNNER_TEMP/orichum-setup-repeat.log" \
+            orichum setup "$GITHUB_WORKSPACE"
+          jq -e '(.accounts | length) == 2' \
+            "$ORICHUM_CONFIG_HOME/accounts.json" >/dev/null
+          jq --arg root "$GITHUB_WORKSPACE" -e '
+            (.contexts | length) == 1 and
+            .contexts[0].root == $root and
+            .contexts[0].accountPools == ["shared"]
+          ' "$ORICHUM_CONFIG_HOME/projects.json" >/dev/null
+          orichum doctor
 
       - name: Verify uninstall lifecycle
         shell: bash
