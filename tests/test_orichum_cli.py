@@ -2945,7 +2945,12 @@ class OrichumCliTests(unittest.TestCase):
             run_id="run-1",
         )
         prepared = SimpleNamespace(
-            logical=SimpleNamespace(id="oc-s-0000000000000001"),
+            logical=SimpleNamespace(
+                id="oc-s-0000000000000001",
+                controller=SimpleNamespace(
+                    primary=SimpleNamespace(family="gpt")
+                ),
+            ),
             physical=physical,
         )
         physical.run_dir.mkdir(mode=0o700)
@@ -3032,7 +3037,12 @@ class OrichumCliTests(unittest.TestCase):
             run_id="run-1",
         )
         prepared = SimpleNamespace(
-            logical=SimpleNamespace(id="oc-s-0000000000000001"),
+            logical=SimpleNamespace(
+                id="oc-s-0000000000000001",
+                controller=SimpleNamespace(
+                    primary=SimpleNamespace(family="claude")
+                ),
+            ),
             physical=physical,
         )
         physical.run_dir.mkdir(mode=0o700)
@@ -3079,6 +3089,73 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(
             environment["GH_CONFIG_DIR"], "/caller/github-config"
         )
+
+    def test_session_environment_context_headroom_is_model_aware(self) -> None:
+        paths = {
+            "state": self.root / "state",
+            "config": self.root / "config",
+            "data": self.root / "data",
+        }
+        runtime = {
+            "maxToolUseConcurrency": 3,
+            "maxSubagentsPerSession": 24,
+        }
+        cases = (
+            ("gpt", "400000", "60"),
+            ("claude", "1000000", "82"),
+        )
+
+        for family, expected_window, expected_threshold in cases:
+            physical = SimpleNamespace(
+                mcp_file=self.root / f"mcp-{family}.json",
+                run_dir=self.root / f"run-{family}",
+                context_file=self.root / f"context-{family}.json",
+                context_sha256="a" * 64,
+                effective_models_file=self.root / f"models-{family}.json",
+                run_id=f"run-{family}",
+            )
+            physical.run_dir.mkdir(mode=0o700)
+            with (
+                self.subTest(family=family),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+                        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "82",
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(
+                    orichum_cli,
+                    "_managed_python_entrypoint",
+                    return_value="/orichum/python",
+                ),
+            ):
+                prepared = SimpleNamespace(
+                    logical=SimpleNamespace(
+                        id="oc-s-0000000000000001",
+                        controller=SimpleNamespace(
+                            primary=SimpleNamespace(family=family)
+                        ),
+                    ),
+                    physical=physical,
+                )
+                environment = orichum_cli._session_environment(
+                    prepared,
+                    paths,
+                    runtime,
+                    None,
+                    self.root / "claudex.toml",
+                )
+
+            self.assertEqual(
+                environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+                expected_window,
+            )
+            self.assertEqual(
+                environment["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"],
+                expected_threshold,
+            )
 
 
 
