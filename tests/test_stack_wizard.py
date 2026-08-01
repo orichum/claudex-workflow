@@ -23,6 +23,7 @@ from unittest import mock
 
 from integrations.common import stack_wizard
 from integrations.common.account_registry import Account, update_accounts
+from integrations.common.model_routing import resolve_effective
 from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.stack_bindings import StackBindings
 from integrations.common.stack_catalog import LiveCatalog, LiveModelChoice
@@ -324,6 +325,30 @@ class StackWizardTests(unittest.TestCase):
         for candidates in (stack.controller, *stack.agents.values()):
             self.assertEqual(candidates[0].providers, ("openai",))
 
+    def test_recommended_stack_replaces_an_unusable_default(self) -> None:
+        openai_catalog = LiveCatalog(
+            choices=tuple(
+                choice
+                for choice in self.catalog.choices
+                if choice.provider == "openai"
+            ),
+            unclassified=(),
+        )
+
+        updated = build_recommended_stack(self.snapshot, openai_catalog)
+
+        self.assertEqual(updated.default_stack, "recommended")
+        effective = resolve_effective(
+            updated,
+            tuple(choice.upstream for choice in openai_catalog.choices),
+        )
+        self.assertEqual(effective.stack_name, "recommended")
+
+    def test_recommended_stack_preserves_a_usable_default(self) -> None:
+        updated = build_recommended_stack(self.snapshot, self.catalog)
+
+        self.assertEqual(updated.default_stack, "balanced")
+
     def test_recommended_stack_supports_one_unfamiliar_live_model(self) -> None:
         catalog = LiveCatalog(
             choices=(
@@ -407,7 +432,11 @@ class StackWizardTests(unittest.TestCase):
 
         reused = build_recommended_stack(snapshot, openai_catalog)
 
-        self.assertIs(reused, existing)
+        self.assertEqual(
+            reused.stacks["recommended"],
+            existing.stacks["recommended"],
+        )
+        self.assertEqual(reused.default_stack, "recommended")
 
     def test_recommended_stack_does_not_overwrite_name_collision(self) -> None:
         document = stack_wizard.serialize_model_stacks(self.snapshot.stacks)
