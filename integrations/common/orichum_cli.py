@@ -19,7 +19,10 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Mapping, Sequence, TextIO
+import webbrowser
 
 from . import leanctx_monitor
 from .account_registry import (
@@ -35,8 +38,11 @@ from .account_registry import (
 )
 from .cliproxy_management import (
     ManagementError,
+    cancel_oauth,
     load_management_endpoint,
+    oauth_status,
     patch_auth_fields,
+    start_oauth,
 )
 from .github_identity import GithubIdentityError, ensure_github_identity
 from .leanctx_contract import (
@@ -102,7 +108,7 @@ from .stack_catalog import (
     project_live_catalog,
 )
 from .stack_store import StackStoreError
-from .stack_wizard import run_stack_wizard
+from .stack_wizard import create_recommended_stack, run_stack_wizard
 from .session_config import (
     SessionError,
     SessionPaths,
@@ -111,10 +117,156 @@ from .session_config import (
 
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[2]
+_PROVIDER_LABELS = {
+    "anthropic": "Anthropic",
+    "antigravity": "Antigravity",
+    "kimi": "Kimi",
+    "openai": "OpenAI",
+}
 
 
 class CliError(RuntimeError):
     """An Orichum command cannot be completed safely."""
+
+
+_CALLBACK_URL = re.compile(
+    r"https?://[^\s\"']*(?:callback|oauth-callback)[^\s\"']*",
+    re.IGNORECASE,
+)
+_QUERY_SECRET = re.compile(
+    r"([?&](?:code|state|token|access_token|refresh_token|id_token)=)"
+    r"[^&\s\"']+",
+    re.IGNORECASE,
+)
+_SECRET_KEY = (
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|code|"
+    r"api[_-]?key|client[_-]?secret)"
+)
+_JSON_SECRET = re.compile(
+    rf'("{_SECRET_KEY}"\s*:\s*")' r'[^\"]*',
+    re.IGNORECASE,
+)
+_ASSIGNED_SECRET = re.compile(
+    rf"(^|\s)({_SECRET_KEY}\s*=\s*)[^\s\"']+",
+    re.IGNORECASE | re.MULTILINE,
+)
+_AUTHORIZATION_SECRET = re.compile(
+    r"(Authorization\s*:\s*(?:Bearer|Token|Basic)\s+)[^\s\"']+",
+    re.IGNORECASE,
+)
+_MAX_SETUP_TECHNICAL_BYTES = 1024 * 1024
+_SETUP_TRUNCATION_MARKER = "\n[technical diagnostics truncated]\n"
+
+
+def _redact_diagnostics(value: str) -> str:
+    redacted = _CALLBACK_URL.sub("[REDACTED_CALLBACK_URL]", value)
+    redacted = _QUERY_SECRET.sub(r"\1[REDACTED]", redacted)
+    redacted = _JSON_SECRET.sub(r"\1[REDACTED]", redacted)
+    redacted = _ASSIGNED_SECRET.sub(
+        r"\1\2[REDACTED]", redacted
+    )
+    return _AUTHORIZATION_SECRET.sub(r"\1[REDACTED]", redacted)
+
+
+@dataclass
+class SetupDiagnostics:
+    path: Path
+    verbose: bool
+    _handle: TextIO
+    _technical_bytes: int = 0
+    _technical_truncated: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        paths: Mapping[str, Path],
+        *,
+        verbose: bool,
+    ) -> "SetupDiagnostics":
+        data_root = Path(paths["data"])
+        data_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log_dir = data_root / "logs"
+        try:
+            log_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        details = os.lstat(log_dir)
+        if (
+            stat.S_ISLNK(details.st_mode)
+            or not stat.S_ISDIR(details.st_mode)
+            or details.st_uid != os.getuid()
+            or stat.S_IMODE(details.st_mode) != 0o700
+        ):
+            raise CliError("Orichum diagnostic log directory is unsafe")
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix="setup-",
+            suffix=".log",
+            dir=log_dir,
+            text=True,
+        )
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        return cls(Path(raw_path), verbose, handle)
+
+    def close(self) -> None:
+        if not self._handle.closed:
+            self._handle.close()
+
+    def emit(self, value: str = "") -> None:
+        print(value)
+        redacted = _redact_diagnostics(value + "\n")
+        self._handle.write(redacted)
+        self._handle.flush()
+
+    def technical(self, value: str) -> None:
+        if self._technical_truncated:
+            return
+        redacted = _redact_diagnostics(value)
+        encoded = redacted.encode("utf-8")
+        remaining = max(
+            0, _MAX_SETUP_TECHNICAL_BYTES - self._technical_bytes
+        )
+        visible = encoded[:remaining].decode("utf-8", errors="ignore")
+        self._technical_bytes += len(visible.encode("utf-8"))
+        self._handle.write(visible)
+        if len(encoded) > remaining:
+            self._technical_truncated = True
+            self._handle.write(_SETUP_TRUNCATION_MARKER)
+        self._handle.flush()
+        if self.verbose:
+            print(visible, end="")
+            if self._technical_truncated:
+                print(_SETUP_TRUNCATION_MARKER, end="")
+
+    def run_command(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str] | None = None,
+    ) -> int:
+        child_environment = os.environ.copy()
+        if environment is not None:
+            child_environment.update(environment)
+        process = subprocess.Popen(
+            list(command),
+            cwd=str(cwd),
+            env=child_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+        )
+        if process.stdout is None:
+            process.kill()
+            raise CliError("diagnostic capture is unavailable")
+        try:
+            while chunk := process.stdout.read(8192):
+                self.technical(chunk)
+        finally:
+            process.stdout.close()
+        return process.wait()
 
 
 def _base_release_version() -> str:
@@ -1666,9 +1818,58 @@ def _prompt_input(prompt: str) -> str:
         raise CliError("setup cancelled") from error
 
 
+def _managed_provider_login(
+    paths: Mapping[str, Path],
+    login_type: str,
+    provider_label: str,
+    diagnostics: SetupDiagnostics,
+) -> int:
+    endpoint = load_management_endpoint(paths["data"])
+    session = start_oauth(endpoint, login_type)
+    diagnostics.emit(f"{provider_label} authentication")
+    diagnostics.emit("  Opening your browser…")
+    if not webbrowser.open(session.url, new=2):
+        try:
+            cancel_oauth(endpoint, session.state)
+        except ManagementError:
+            pass
+        raise CliError(
+            "browser authentication could not be opened; run "
+            f"'orichum provider login {login_type}'"
+        )
+    diagnostics.emit("  Waiting for authentication…")
+    deadline = time.monotonic() + 30 * 60
+    try:
+        while time.monotonic() < deadline:
+            if oauth_status(endpoint, session.state) == "ok":
+                diagnostics.emit("  ✓ Signed in")
+                return 0
+            time.sleep(1)
+    except ManagementError:
+        try:
+            cancel_oauth(endpoint, session.state)
+        except ManagementError:
+            pass
+        raise
+    except KeyboardInterrupt as error:
+        try:
+            cancel_oauth(endpoint, session.state)
+        except ManagementError:
+            pass
+        raise CliError("setup cancelled") from error
+    try:
+        cancel_oauth(endpoint, session.state)
+    except ManagementError:
+        pass
+    raise CliError("provider authentication timed out")
+
+
 def _provider_configure(
     paths: Mapping[str, Path],
     config: ResolvedConfig,
+    *,
+    onboarding: bool = False,
+    diagnostics: SetupDiagnostics | None = None,
 ) -> int:
     provider_document = config.documents["providers"]
     providers = provider_document["providers"]
@@ -1700,33 +1901,55 @@ def _provider_configure(
     )
     credential = None
     if existing:
-        selected_ref = _prompt_choice(
-            "Use an existing authentication or sign in again:",
-            (
-                *(
-                    (
-                        f"Existing {provider_name.title()} authentication "
-                        f"{index}",
-                        item.path.name,
-                    )
-                    for index, item in enumerate(existing, start=1)
+        if onboarding:
+            if len(existing) != 1:
+                raise CliError(
+                    "multiple unregistered authentications are available; "
+                    "run 'orichum provider configure' to choose one"
+                )
+            credential = existing[0]
+        else:
+            selected_ref = _prompt_choice(
+                "Use an existing authentication or sign in again:",
+                (
+                    *(
+                        (
+                            f"Existing {provider_name.title()} "
+                            f"authentication {index}",
+                            item.path.name,
+                        )
+                        for index, item in enumerate(existing, start=1)
+                    ),
+                    ("Authenticate another account", "__login__"),
                 ),
-                ("Authenticate another account", "__login__"),
-            ),
-        )
-        if selected_ref != "__login__":
-            credential = next(
-                item for item in existing if item.path.name == selected_ref
             )
+            if selected_ref != "__login__":
+                credential = next(
+                    item
+                    for item in existing
+                    if item.path.name == selected_ref
+                )
 
     if credential is None:
-        login_status = _run_external(
-            "orichum-login",
-            [provider["authType"]],
-            environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
-        )
+        if onboarding and diagnostics is not None:
+            login_status = _managed_provider_login(
+                paths,
+                provider["authType"],
+                _PROVIDER_LABELS.get(provider_name, provider_name.title()),
+                diagnostics,
+            )
+        else:
+            login_status = _run_external(
+                "orichum-login",
+                [provider["authType"]],
+                environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
+            )
         if login_status != 0:
             return login_status
+    elif onboarding and diagnostics is not None:
+        label = _PROVIDER_LABELS.get(provider_name, provider_name.title())
+        diagnostics.emit(f"{label} authentication")
+        diagnostics.emit("  ✓ Already configured")
 
     compatible = tuple(
         credential
@@ -1764,6 +1987,11 @@ def _provider_configure(
         )
         if len(new_credentials) == 1:
             credential = new_credentials[0]
+        elif onboarding:
+            raise CliError(
+                "authentication completed, but its credential could not be "
+                "identified uniquely; run 'orichum provider configure'"
+            )
         else:
             selected_ref = _prompt_choice(
                 "Choose the authenticated account:",
@@ -1781,35 +2009,39 @@ def _provider_configure(
             )
     default_name = f"{provider_name.title()} account"
     name = _prompt_text("Account name", default_name)
-    pools = tuple(
-        pool_name
-        for pool_name, details in provider_document["accountPools"].items()
-        if provider_name in details["providers"]
-    )
-    default_pool = pools.index("shared") if "shared" in pools else 0
-    pool = _prompt_choice(
-        "Choose where this account is available:",
-        tuple((pool_name, pool_name) for pool_name in pools),
-        default=default_pool,
-    )
-    priority = _prompt_choice(
-        "Choose account priority:",
-        (
-            ("Primary", "primary"),
-            ("Secondary", "secondary"),
-            ("Reserve", "reserve"),
-        ),
-    )
-    print(
-        "\nAccount summary:\n"
-        f"  Name:     {name}\n"
-        f"  Provider: {provider_name}\n"
-        f"  Pool:     {pool}\n"
-        f"  Priority: {priority}"
-    )
-    if not _prompt_confirm():
-        print("No account was registered.")
-        return 0
+    if onboarding:
+        pool = "shared"
+        priority = "primary"
+    else:
+        pools = tuple(
+            pool_name
+            for pool_name, details in provider_document["accountPools"].items()
+            if provider_name in details["providers"]
+        )
+        default_pool = pools.index("shared") if "shared" in pools else 0
+        pool = _prompt_choice(
+            "Choose where this account is available:",
+            tuple((pool_name, pool_name) for pool_name in pools),
+            default=default_pool,
+        )
+        priority = _prompt_choice(
+            "Choose account priority:",
+            (
+                ("Primary", "primary"),
+                ("Secondary", "secondary"),
+                ("Reserve", "reserve"),
+            ),
+        )
+        print(
+            "\nAccount summary:\n"
+            f"  Name:     {name}\n"
+            f"  Provider: {provider_name}\n"
+            f"  Pool:     {pool}\n"
+            f"  Priority: {priority}"
+        )
+        if not _prompt_confirm():
+            print("No account was registered.")
+            return 0
     _mutate_account(
         argparse.Namespace(
             account_command="add",
@@ -1822,7 +2054,8 @@ def _provider_configure(
         paths,
         config,
     )
-    print(f"Provider account ready: {name}")
+    if not onboarding:
+        print(f"Provider account ready: {name}")
     return 0
 
 
@@ -1843,10 +2076,17 @@ def _runtime_ready(paths: Mapping[str, Path]) -> bool:
     return True
 
 
-def _reconcile_runtime() -> int:
+def _reconcile_runtime(
+    diagnostics: SetupDiagnostics | None = None,
+) -> int:
     installer = WORKFLOW_ROOT / "install.sh"
     if not installer.is_file() or installer.is_symlink():
         raise CliError("active runtime installer is unavailable")
+    if diagnostics is not None:
+        return diagnostics.run_command(
+            [str(installer), "--verbose"],
+            cwd=WORKFLOW_ROOT,
+        )
     completed = subprocess.run(
         [str(installer)],
         cwd=str(WORKFLOW_ROOT),
@@ -1856,7 +2096,12 @@ def _reconcile_runtime() -> int:
 
 
 def _setup_project_path(requested: str | None) -> Path:
-    raw = requested or _prompt_text("Project root", str(Path.cwd()))
+    raw = requested or _prompt_text("Projects folder", "~/projects")
+    if requested is None:
+        try:
+            Path(raw).expanduser().mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise CliError("project root is unavailable") from error
     try:
         project = Path(raw).expanduser().resolve(strict=True)
     except OSError as error:
@@ -1864,6 +2109,15 @@ def _setup_project_path(requested: str | None) -> Path:
     if not project.is_dir():
         raise CliError("project root must be a directory")
     return project
+
+
+def _display_setup_path(path: Path) -> str:
+    path = Path(path)
+    try:
+        relative = path.relative_to(Path.home())
+    except ValueError:
+        return str(path)
+    return "~" if not relative.parts else f"~/{relative}"
 
 
 def _project_context_mapped(config: ResolvedConfig, project: Path) -> bool:
@@ -1927,71 +2181,148 @@ def _setup(
     paths: Mapping[str, Path],
     config: ResolvedConfig,
     requested_project: str | None,
+    *,
+    verbose: bool = False,
 ) -> int:
-    active_accounts = _active_provider_accounts(paths, config)
-    if not active_accounts:
-        status = _provider_configure(paths, config)
-        if status != 0:
-            return status
-        paths, config = _load()
+    try:
+        diagnostics = SetupDiagnostics.create(paths, verbose=verbose)
+    except (CliError, OSError) as error:
+        print("Setup stopped while preparing private diagnostics.")
+        if verbose:
+            print(f"  {_redact_diagnostics(str(error))}")
+        print("\nRun:\n  orichum setup\n\nDetails:\n  orichum doctor")
+        return 2
+
+    def stopped(action: str, status: int) -> int:
+        diagnostics.emit(f"Setup stopped while {action}.")
+        diagnostics.emit("")
+        diagnostics.emit("Run:")
+        diagnostics.emit("  orichum setup")
+        diagnostics.emit("")
+        diagnostics.emit("Details:")
+        diagnostics.emit("  orichum doctor")
+        return status
+
+    diagnostics.emit("Setting up Orichum…")
+    diagnostics.emit("")
+    try:
         active_accounts = _active_provider_accounts(paths, config)
+        account_reused = bool(active_accounts)
         if not active_accounts:
-            raise CliError(
-                "setup stopped before a provider account was registered"
+            status = _provider_configure(
+                paths,
+                config,
+                onboarding=True,
+                diagnostics=diagnostics,
             )
+            if status != 0:
+                return stopped("configuring the provider account", status)
+            paths, config = _load()
+            active_accounts = _active_provider_accounts(paths, config)
+            if not active_accounts:
+                raise CliError(
+                    "setup stopped before a provider account was registered"
+                )
+        else:
+            diagnostics.emit("Authentication")
+            diagnostics.emit("  ✓ Already configured")
 
-    if not _runtime_ready(paths):
-        status = _reconcile_runtime()
-        if status != 0:
-            return status
-        paths, config = _load()
+        account = sorted(
+            active_accounts,
+            key=lambda current: (-current.priority, current.name),
+        )[0]
+        diagnostics.emit("")
+        diagnostics.emit("Account")
+        diagnostics.emit(f"  Name: {account.name}")
+        diagnostics.emit(
+            "  ✓ Already configured"
+            if account_reused
+            else "  ✓ Registered as primary"
+        )
 
-    project = _setup_project_path(requested_project)
-    if not _project_context_mapped(config, project):
-        pools = tuple(
-            dict.fromkeys(
-                account.pool
-                for account in sorted(
-                    active_accounts,
-                    key=lambda account: -account.priority,
+        if not _runtime_ready(paths):
+            status = _reconcile_runtime(diagnostics)
+            if status != 0:
+                return stopped("starting Orichum services", status)
+            paths, config = _load()
+
+        project = _setup_project_path(requested_project)
+        context_reused = _project_context_mapped(config, project)
+        if not context_reused:
+            pools = tuple(
+                dict.fromkeys(
+                    current.pool
+                    for current in sorted(
+                        active_accounts,
+                        key=lambda current: -current.priority,
+                    )
                 )
             )
-        )
-        context_arguments = ["add", str(project)]
-        for pool in pools:
-            context_arguments.extend(("--pool", pool))
-        status = _run_external(
-            "orichum-context",
-            context_arguments,
-        )
-        if status != 0:
-            return status
-        paths, config = _load()
-
-    if not _setup_project_ready(paths, config, project):
-        print(f"Configure a model stack for {project}.")
-        status = run_stack_wizard(
-            paths,
-            config,
-            launch_dir=project,
-            assignment_default=True,
-        )
-        if status != 0:
-            return status
-        paths, config = _load()
-        if not _setup_project_ready(paths, config, project):
-            raise CliError(
-                "setup is incomplete: the project has no usable model stack"
+            context_arguments = ["add", str(project)]
+            for pool in pools:
+                context_arguments.extend(("--pool", pool))
+            status = _run_external(
+                "orichum-context",
+                context_arguments,
+                diagnostics=diagnostics,
             )
+            if status != 0:
+                return stopped("configuring the projects folder", status)
+            paths, config = _load()
+        diagnostics.emit("")
+        diagnostics.emit("Projects")
+        diagnostics.emit(f"  Folder: {_display_setup_path(project)}")
+        diagnostics.emit(
+            "  ✓ Already configured"
+            if context_reused
+            else "  ✓ Configured"
+        )
 
-    status = _run_external("orichum-doctor", [])
-    if status != 0:
-        return status
-    print(f"Orichum is ready for {project}.")
-    print("Next:")
-    print(f"  cd {shlex.quote(str(project))}")
-    print("  orichum")
-    return 0
+        stack_reused = _setup_project_ready(paths, config, project)
+        if not stack_reused:
+            create_recommended_stack(paths, config, launch_dir=project)
+            paths, config = _load()
+            if not _setup_project_ready(paths, config, project):
+                raise CliError(
+                    "setup is incomplete: the project has no usable model stack"
+                )
+        diagnostics.emit("")
+        diagnostics.emit("Models")
+        diagnostics.emit(
+            "  ✓ Already configured"
+            if stack_reused
+            else "  ✓ Recommended stack created"
+        )
+
+        status = _run_external(
+            "orichum-doctor", [], diagnostics=diagnostics
+        )
+        if status != 0:
+            return stopped("verifying Orichum services", status)
+        diagnostics.emit("")
+        diagnostics.emit("Services")
+        diagnostics.emit("  ✓ Ready")
+        diagnostics.emit("")
+        diagnostics.emit("Orichum is ready.")
+        return 0
+    except (
+        AccountError,
+        CatalogError,
+        CliError,
+        ConfigError,
+        ContextError,
+        CredentialError,
+        ManagementError,
+        OSError,
+        RouteError,
+        RoutingError,
+        StackBindingError,
+        StackStoreError,
+    ) as error:
+        diagnostics.technical(f"ERROR: {error}\n")
+        return stopped("configuring Orichum", 2)
+    finally:
+        diagnostics.close()
 
 
 def _run_external(
@@ -1999,6 +2330,7 @@ def _run_external(
     arguments: list[str],
     *,
     environment: Mapping[str, str] | None = None,
+    diagnostics: SetupDiagnostics | None = None,
 ) -> int:
     candidate = WORKFLOW_ROOT / "bin" / name
     executable = str(candidate) if candidate.is_file() else shutil.which(name)
@@ -2007,6 +2339,12 @@ def _run_external(
     child_environment = os.environ.copy()
     if environment is not None:
         child_environment.update(environment)
+    if diagnostics is not None:
+        return diagnostics.run_command(
+            [executable, *arguments],
+            cwd=WORKFLOW_ROOT,
+            environment=environment,
+        )
     completed = subprocess.run(
         [executable, *arguments],
         check=False,
@@ -2746,6 +3084,11 @@ def build_parser() -> argparse.ArgumentParser:
             "prepare a model stack, map a project, and verify readiness."
         ),
     )
+    setup.add_argument(
+        "--verbose",
+        action="store_true",
+        help="stream technical diagnostics while retaining the private log",
+    )
     set_completion(
         setup.add_argument(
             "project",
@@ -3370,7 +3713,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise CliError("logical session ID is invalid")
         paths, config = _load()
         if parsed.command == "setup":
-            return _setup(paths, config, parsed.project)
+            return _setup(
+                paths,
+                config,
+                parsed.project,
+                verbose=parsed.verbose,
+            )
         if parsed.command == "status":
             print(_session_status(paths, session_id), end="")
             return 0

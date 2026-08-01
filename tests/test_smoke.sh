@@ -53,7 +53,7 @@ for status_health_contract in \
   rg -Fq "$status_health_contract" "$ROOT/doctor.sh"
 done
 rg -Fq \
-  'Usage: ./install.sh [--upgrade | --uninstall [--purge]]' \
+  'Usage: ./install.sh [--verbose] [--upgrade | --uninstall [--purge]]' \
   "$ROOT/install.sh"
 
 install -d \
@@ -367,11 +367,12 @@ for required_contract in \
     'repeat_started="$(python3 -c' \
     'test "$repeat_ms" -lt 15000' \
     'orichum-fast.log' \
-    'Fast readiness checks passed.' \
-    '^Controller plugin[[:space:]]+reused' \
-    './install.sh --upgrade' \
+    "grep -Fxq 'Orichum is ready.'" \
+    './install.sh --upgrade --verbose' \
     'orichum-upgrade.log' \
     '^Controller plugin[[:space:]]+upgraded' \
+    'orichum setup --verbose' \
+    'setup-*.log' \
     '.components.routing | not' \
     'Running Orichum doctor'; do
   rg -Fq -- "$required_contract" "$amd64_workflow"
@@ -424,11 +425,12 @@ for required_contract in \
     'repeat_started="$(python3 -c' \
     'test "$repeat_ms" -lt 15000' \
     'orichum-fast.log' \
-    'Fast readiness checks passed.' \
-    '^Controller plugin[[:space:]]+reused' \
-    './install.sh --upgrade' \
+    "grep -Fxq 'Orichum is ready.'" \
+    './install.sh --upgrade --verbose' \
     'orichum-upgrade.log' \
     '^Controller plugin[[:space:]]+upgraded' \
+    'orichum setup --verbose' \
+    'setup-*.log' \
     '.components.routing | not' \
     'Running Orichum doctor' \
     'Clean up launch agents'; do

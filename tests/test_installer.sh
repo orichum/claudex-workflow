@@ -235,6 +235,24 @@ if parse_install_mode --purge >/dev/null 2>&1; then
   printf 'standalone --purge was accepted\n' >&2
   exit 1
 fi
+[[ "$(parse_install_arguments)" == $'fast\tfalse' ]]
+[[ "$(parse_install_arguments --verbose)" == $'fast\ttrue' ]]
+[[ "$(parse_install_arguments --upgrade --verbose)" == $'upgrade\ttrue' ]]
+[[ "$(parse_install_arguments --verbose --upgrade)" == $'upgrade\ttrue' ]]
+if parse_install_arguments --verbose --verbose >/dev/null 2>&1; then
+  printf 'duplicate verbose mode was accepted\n' >&2
+  exit 1
+fi
+
+diagnostic_root="$fixture/installer-diagnostics"
+install -d -m 0700 "$diagnostic_root"
+diagnostic_log="$(create_install_diagnostic_log "$diagnostic_root")"
+[[ -f "$diagnostic_log" && ! -L "$diagnostic_log" ]]
+[[ "$(path_mode "$diagnostic_log")" == 600 ]]
+[[ "$(path_mode "$(dirname "$diagnostic_log")")" == 700 ]]
+
+[[ "$(print_install_outcome true '' /private/install.log)" == $'Orichum is installed.\nNext: orichum setup' ]]
+[[ "$(print_install_outcome false zsh /private/install.log)" == $'Orichum is ready.\n\nOptional next step\n  Review zsh completion setup: /private/install.log' ]]
 
 workflow_cleanup_init
 mode_lock="$fixture/mode-lock"

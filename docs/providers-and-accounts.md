@@ -13,7 +13,10 @@ orichum setup
 ```
 
 It combines authentication, account registration, runtime reconciliation,
-stack configuration, project mapping, and final verification.
+automatic compatible-stack creation, projects-folder mapping, and final
+verification. First-run setup asks only for provider, account name, and projects
+folder. It assigns the first account Primary priority in the internal `shared`
+pool without exposing pool or priority choices.
 
 To add another account to an already configured installation, use the focused
 provider wizard:

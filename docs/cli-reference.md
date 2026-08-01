@@ -8,6 +8,7 @@ Installer modes are separate from the `orichum` command:
 
 ```bash
 ./install.sh
+./install.sh --verbose
 # Install completely when fresh; otherwise reconcile verified local state.
 
 ./install.sh --upgrade
@@ -29,7 +30,7 @@ file differed from that commit. Builds without Git metadata add
 |---|---|
 | `orichum --version` | Print the installed Orichum release identity |
 | `orichum completion zsh\|bash\|fish` | Print the native completion definition for one shell |
-| `orichum setup [PROJECT]` | Resume first-run provider, runtime, stack, project, and readiness setup |
+| `orichum setup [--verbose] [PROJECT]` | Resume first-run provider, runtime, automatic stack, projects-folder, and readiness setup |
 | `orichum` / `orichum run [--leanctx-profile lean\|full]` | Start a project-aware session; new sessions default to the lean provider-residency profile |
 | `orichum config show` | Show the merged, redacted control plane |
 | `orichum config validate` | Validate focused configuration |

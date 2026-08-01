@@ -61,6 +61,21 @@ jobs:
           }
           trap report_acceptance_failure ERR
           ./install.sh | tee "$RUNNER_TEMP/orichum-fresh.log"
+          grep -Fxq 'Orichum is installed.' \
+            "$RUNNER_TEMP/orichum-fresh.log"
+          grep -Fxq 'Next: orichum setup' \
+            "$RUNNER_TEMP/orichum-fresh.log"
+          if grep -Eq 'COMPONENT|127\.0\.0\.1|Runtime release:' \
+              "$RUNNER_TEMP/orichum-fresh.log"; then
+            exit 1
+          fi
+          fresh_install_log="$(
+            find "$ORICHUM_DATA_HOME/logs" -type f -name 'install.*.log' |
+              sort | tail -1
+          )"
+          test -n "$fresh_install_log"
+          test "$(stat -f %Lp "$ORICHUM_DATA_HOME/logs")" = 700
+          test "$(stat -f %Lp "$fresh_install_log")" = 600
           managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
           test -x "$managed_python"
           test -x "$ORICHUM_DATA_HOME/bin/lean-ctx"
@@ -219,34 +234,14 @@ jobs:
           test "$before_python_target" = "$(
             readlink "$ORICHUM_DATA_HOME/bin/orichum-python"
           )"
-          for component in \
-              Python CLIProxyAPI Claudex LeanCTX; do
-            grep -Eq \
-              "^${component}[[:space:]]+reused[[:space:]]*$" \
-              "$RUNNER_TEMP/orichum-fast.log"
-          done
-          grep -Eq \
-            '^Routing[[:space:]]+reused[[:space:]]*$' \
+          grep -Fxq 'Orichum is ready.' \
             "$RUNNER_TEMP/orichum-fast.log"
-          grep -Eq \
-            '^Controller plugin[[:space:]]+reused[[:space:]]*$' \
-            "$RUNNER_TEMP/orichum-fast.log"
-          grep -Fq 'Fast readiness checks passed.' \
-            "$RUNNER_TEMP/orichum-fast.log"
-          if grep -Fq 'Running Orichum doctor' \
+          if grep -Eq 'COMPONENT|127\.0\.0\.1|Runtime release:' \
               "$RUNNER_TEMP/orichum-fast.log"; then
             exit 1
           fi
-          grep -Fq \
-            "  Claudex runtime:   $ORICHUM_DATA_HOME/bin/claudex" \
-            "$RUNNER_TEMP/orichum-fast.log"
-          grep -Fq \
-            "  CLIProxyAPI:       $ORICHUM_DATA_HOME/bin/cli-proxy-api" \
-            "$RUNNER_TEMP/orichum-fast.log"
-          grep -Fq \
-            "  LeanCTX:           $ORICHUM_DATA_HOME/bin/lean-ctx" \
-            "$RUNNER_TEMP/orichum-fast.log"
-          ./install.sh --upgrade | tee "$RUNNER_TEMP/orichum-upgrade.log"
+          ./install.sh --upgrade --verbose | \
+            tee "$RUNNER_TEMP/orichum-upgrade.log"
           for component in \
               Python CLIProxyAPI Claudex LeanCTX Routing; do
             grep -Eq \
@@ -279,6 +274,24 @@ jobs:
             orichum setup "$GITHUB_WORKSPACE"
           script -q "$RUNNER_TEMP/orichum-setup-repeat.log" \
             orichum setup "$GITHUB_WORKSPACE"
+          grep -Fq 'Orichum is ready.' \
+            "$RUNNER_TEMP/orichum-setup-first.log"
+          grep -Fq '✓ Already configured' \
+            "$RUNNER_TEMP/orichum-setup-repeat.log"
+          if grep -Eq '127\.0\.0\.1|Runtime release:|\.plist' \
+              "$RUNNER_TEMP/orichum-setup-repeat.log"; then
+            exit 1
+          fi
+          script -q "$RUNNER_TEMP/orichum-setup-verbose.log" \
+            orichum setup --verbose "$GITHUB_WORKSPACE"
+          grep -Fq 'Orichum local components are ready.' \
+            "$RUNNER_TEMP/orichum-setup-verbose.log"
+          setup_log="$(
+            find "$ORICHUM_DATA_HOME/logs" -type f -name 'setup-*.log' |
+              sort | tail -1
+          )"
+          test -n "$setup_log"
+          test "$(stat -f %Lp "$setup_log")" = 600
           jq -e '(.accounts | length) == 2' \
             "$ORICHUM_CONFIG_HOME/accounts.json" >/dev/null
           jq --arg root "$GITHUB_WORKSPACE" -e '

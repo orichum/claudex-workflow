@@ -13,12 +13,21 @@ import socket
 import stat
 import subprocess
 from typing import Mapping
+from urllib.parse import urlparse
 
 
 _KEY = re.compile(r"[A-Za-z0-9._~-]{32,256}")
 _CREDENTIAL_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}\.json")
 _PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _ALLOWED_FIELDS = {"prefix", "priority"}
+_OAUTH_STATE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_OAUTH_PROVIDERS = {
+    "claude": "anthropic",
+    "codex": "codex",
+    "antigravity": "antigravity",
+    "kimi": "kimi",
+}
+_MAX_MANAGEMENT_RESPONSE = 64 * 1024
 
 
 class ManagementError(RuntimeError):
@@ -30,6 +39,13 @@ class ManagementEndpoint:
     port: int
     data_home: Path
     key: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class OAuthSession:
+    provider: str
+    url: str = field(repr=False)
+    state: str = field(repr=False)
 
 
 def _private_file(path: Path, label: str) -> bytes:
@@ -242,3 +258,106 @@ def patch_auth_fields(
     finally:
         if connection is not None:
             connection.close()
+
+
+def _management_json(
+    endpoint: ManagementEndpoint,
+    method: str,
+    path: str,
+) -> dict[str, object]:
+    connection = None
+    try:
+        connection = _open_attested_connection(endpoint)
+        connection.request(
+            method,
+            path,
+            headers={"X-Management-Key": endpoint.key},
+        )
+        response = connection.getresponse()
+        payload = response.read(_MAX_MANAGEMENT_RESPONSE + 1)
+        if response.status != 200:
+            raise ManagementError("CLIProxyAPI rejected management request")
+        if len(payload) > _MAX_MANAGEMENT_RESPONSE:
+            raise ManagementError("CLIProxyAPI management response is too large")
+        document = json.loads(payload.decode("utf-8"))
+    except ManagementError:
+        raise
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        http.client.HTTPException,
+        TimeoutError,
+        OSError,
+    ) as failure:
+        raise ManagementError(
+            "CLIProxyAPI management request failed"
+        ) from failure
+    finally:
+        if connection is not None:
+            connection.close()
+    if not isinstance(document, dict):
+        raise ManagementError("CLIProxyAPI management response is invalid")
+    return document
+
+
+def _oauth_state(value: object) -> str:
+    if not isinstance(value, str) or not _OAUTH_STATE.fullmatch(value):
+        raise ManagementError("CLIProxyAPI OAuth state is invalid")
+    return value
+
+
+def start_oauth(
+    endpoint: ManagementEndpoint,
+    provider: str,
+) -> OAuthSession:
+    route = _OAUTH_PROVIDERS.get(provider)
+    if route is None:
+        raise ManagementError("provider does not support managed OAuth")
+    document = _management_json(
+        endpoint,
+        "GET",
+        f"/v0/management/{route}-auth-url?is_webui=true",
+    )
+    if document.get("status") != "ok":
+        raise ManagementError("provider authentication could not start")
+    url = document.get("url")
+    if not isinstance(url, str):
+        raise ManagementError("provider authorization URL is invalid")
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ManagementError("provider authorization URL is invalid")
+    return OAuthSession(
+        provider=provider,
+        url=url,
+        state=_oauth_state(document.get("state")),
+    )
+
+
+def oauth_status(endpoint: ManagementEndpoint, state: str) -> str:
+    state = _oauth_state(state)
+    document = _management_json(
+        endpoint,
+        "GET",
+        f"/v0/management/get-auth-status?state={state}",
+    )
+    status = document.get("status")
+    if status == "wait":
+        return "wait"
+    if status == "ok":
+        return "ok"
+    raise ManagementError("provider authentication failed")
+
+
+def cancel_oauth(endpoint: ManagementEndpoint, state: str) -> bool:
+    state = _oauth_state(state)
+    document = _management_json(
+        endpoint,
+        "DELETE",
+        f"/v0/management/oauth-session?state={state}",
+    )
+    if document.get("status") != "ok" or type(
+        document.get("cancelled")
+    ) is not bool:
+        raise ManagementError("provider authentication cancellation failed")
+    return bool(document["cancelled"])

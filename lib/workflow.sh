@@ -23,6 +23,65 @@ parse_install_mode() {
   esac
 }
 
+parse_install_arguments() {
+  local verbose=false
+  local -a mode_arguments=()
+  local argument
+  for argument in "$@"; do
+    if [[ "$argument" == --verbose ]]; then
+      [[ "$verbose" == false ]] || return 2
+      verbose=true
+    else
+      mode_arguments+=("$argument")
+    fi
+  done
+  local mode
+  mode="$(parse_install_mode "${mode_arguments[@]}")" || return 2
+  printf '%s\t%s\n' "$mode" "$verbose"
+}
+
+create_install_diagnostic_log() {
+  (($# == 1)) || return 2
+  local data_root="$1"
+  local log_dir log_path
+  [[ "$data_root" == /* && ! -L "$data_root" ]] || return 1
+  install -d -m 0700 "$data_root" || return 1
+  [[ -d "$data_root" && ! -L "$data_root" && \
+     "$(path_uid "$data_root")" == "$(id -u)" && \
+     "$(path_mode "$data_root")" == 700 ]] || return 1
+  log_dir="$data_root/logs"
+  [[ ! -e "$log_dir" || ( -d "$log_dir" && ! -L "$log_dir" ) ]] || \
+    return 1
+  install -d -m 0700 "$log_dir" || return 1
+  [[ "$(path_uid "$log_dir")" == "$(id -u)" && \
+     "$(path_mode "$log_dir")" == 700 ]] || return 1
+  umask 077
+  log_path="$(mktemp "$log_dir/install.XXXXXX.log")" || return 1
+  chmod 0600 "$log_path" || return 1
+  printf '%s\n' "$log_path"
+}
+
+print_install_outcome() {
+  (($# == 3)) || return 2
+  local provider_pending="$1"
+  local optional_shell="$2"
+  local log_path="$3"
+  case "$provider_pending" in
+    true)
+      printf 'Orichum is installed.\nNext: orichum setup\n'
+      ;;
+    false)
+      printf 'Orichum is ready.\n'
+      ;;
+    *) return 2 ;;
+  esac
+  if [[ -n "$optional_shell" ]]; then
+    printf '\nOptional next step\n'
+    printf '  Review %s completion setup: %s\n' \
+      "$optional_shell" "$log_path"
+  fi
+}
+
 component_state_matches() {
   local manifest="$1"
   local name="$2"
@@ -2762,6 +2821,8 @@ PY
   case "$status" in
     0) return 0 ;;
     10)
+      # shellcheck disable=SC2034 # Consumed by install.sh after this call.
+      ORICHUM_COMPLETION_OPTIONAL_SHELL="$shell"
       printf 'WARNING: retained unsafe or drifted Orichum completion profile: %s\n' \
         "$profile" >&2
       printf 'Manual %s activation: %s\n' "$shell" "$manual" >&2

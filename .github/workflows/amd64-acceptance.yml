@@ -86,6 +86,21 @@ jobs:
           }
           trap report_acceptance_failure ERR
           ./install.sh | tee "$RUNNER_TEMP/orichum-fresh.log"
+          grep -Fxq 'Orichum is installed.' \
+            "$RUNNER_TEMP/orichum-fresh.log"
+          grep -Fxq 'Next: orichum setup' \
+            "$RUNNER_TEMP/orichum-fresh.log"
+          if grep -Eq 'COMPONENT|127\.0\.0\.1|Runtime release:' \
+              "$RUNNER_TEMP/orichum-fresh.log"; then
+            exit 1
+          fi
+          fresh_install_log="$(
+            find "$ORICHUM_DATA_HOME/logs" -type f -name 'install.*.log' |
+              sort | tail -1
+          )"
+          test -n "$fresh_install_log"
+          test "$(stat -c %a "$ORICHUM_DATA_HOME/logs")" = 700
+          test "$(stat -c %a "$fresh_install_log")" = 600
           managed_python="$ORICHUM_DATA_HOME/bin/orichum-python"
           test -x "$managed_python"
           test -x "$ORICHUM_DATA_HOME/bin/lean-ctx"
@@ -242,34 +257,14 @@ jobs:
           test "$before_python_target" = "$(
             readlink "$ORICHUM_DATA_HOME/bin/orichum-python"
           )"
-          for component in \
-              Python CLIProxyAPI Claudex LeanCTX; do
-            grep -Eq \
-              "^${component}[[:space:]]+reused[[:space:]]*$" \
-              "$RUNNER_TEMP/orichum-fast.log"
-          done
-          grep -Eq \
-            '^Routing[[:space:]]+reused[[:space:]]*$' \
+          grep -Fxq 'Orichum is ready.' \
             "$RUNNER_TEMP/orichum-fast.log"
-          grep -Eq \
-            '^Controller plugin[[:space:]]+reused[[:space:]]*$' \
-            "$RUNNER_TEMP/orichum-fast.log"
-          grep -Fq 'Fast readiness checks passed.' \
-            "$RUNNER_TEMP/orichum-fast.log"
-          if grep -Fq 'Running Orichum doctor' \
+          if grep -Eq 'COMPONENT|127\.0\.0\.1|Runtime release:' \
               "$RUNNER_TEMP/orichum-fast.log"; then
             exit 1
           fi
-          grep -Fq \
-            "  Claudex runtime:   $ORICHUM_DATA_HOME/bin/claudex" \
-            "$RUNNER_TEMP/orichum-fast.log"
-          grep -Fq \
-            "  CLIProxyAPI:       $ORICHUM_DATA_HOME/bin/cli-proxy-api" \
-            "$RUNNER_TEMP/orichum-fast.log"
-          grep -Fq \
-            "  LeanCTX:           $ORICHUM_DATA_HOME/bin/lean-ctx" \
-            "$RUNNER_TEMP/orichum-fast.log"
-          ./install.sh --upgrade | tee "$RUNNER_TEMP/orichum-upgrade.log"
+          ./install.sh --upgrade --verbose | \
+            tee "$RUNNER_TEMP/orichum-upgrade.log"
           for component in \
               Python CLIProxyAPI Claudex LeanCTX Routing; do
             grep -Eq \
@@ -303,6 +298,26 @@ jobs:
             "$RUNNER_TEMP/orichum-setup-first.log"
           script --quiet --return --command "$setup_command" \
             "$RUNNER_TEMP/orichum-setup-repeat.log"
+          grep -Fq 'Orichum is ready.' \
+            "$RUNNER_TEMP/orichum-setup-first.log"
+          grep -Fq '✓ Already configured' \
+            "$RUNNER_TEMP/orichum-setup-repeat.log"
+          if grep -Eq '127\.0\.0\.1|Runtime release:|\.service' \
+              "$RUNNER_TEMP/orichum-setup-repeat.log"; then
+            exit 1
+          fi
+          printf -v verbose_setup 'orichum setup --verbose %q' \
+            "$GITHUB_WORKSPACE"
+          script --quiet --return --command "$verbose_setup" \
+            "$RUNNER_TEMP/orichum-setup-verbose.log"
+          grep -Fq 'Orichum local components are ready.' \
+            "$RUNNER_TEMP/orichum-setup-verbose.log"
+          setup_log="$(
+            find "$ORICHUM_DATA_HOME/logs" -type f -name 'setup-*.log' |
+              sort | tail -1
+          )"
+          test -n "$setup_log"
+          test "$(stat -c %a "$setup_log")" = 600
           jq -e '(.accounts | length) == 2' \
             "$ORICHUM_CONFIG_HOME/accounts.json" >/dev/null
           jq --arg root "$GITHUB_WORKSPACE" -e '
@@ -388,7 +403,7 @@ jobs:
           RUN apt-get update \
               && apt-get install --yes --no-install-recommends \
                 ca-certificates curl dbus-user-session gh git iproute2 jq python3 \
-                ripgrep sudo systemd systemd-sysv tar xz-utils \
+                ripgrep sudo systemd systemd-sysv tar util-linux xz-utils \
               && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
               && apt-get install --yes --no-install-recommends nodejs \
               && npm install --global @anthropic-ai/claude-code \
@@ -449,7 +464,22 @@ jobs:
             bash -lc '
               set -euo pipefail
               cd /home/orichum/workspace
-              ./install.sh
+              ./install.sh | tee /tmp/orichum-install-normal.log
+              grep -Fxq "Orichum is installed." \
+                /tmp/orichum-install-normal.log
+              grep -Fxq "Next: orichum setup" \
+                /tmp/orichum-install-normal.log
+              if grep -Eq "COMPONENT|127\\.0\\.0\\.1|Runtime release:" \
+                  /tmp/orichum-install-normal.log; then
+                exit 1
+              fi
+              install_log="$(
+                find "$ORICHUM_DATA_HOME/logs" -type f \
+                  -name "install.*.log" | sort | tail -1
+              )"
+              test -n "$install_log"
+              test "$(stat -c %a "$ORICHUM_DATA_HOME/logs")" = 700
+              test "$(stat -c %a "$install_log")" = 600
               jq -e '\''
                 keys == [
                   "claudexProxyPort",
@@ -462,4 +492,38 @@ jobs:
               test "$(systemctl --user is-enabled orichum-cliproxy.service)" = enabled
               test "$(systemctl --user is-active orichum-cliproxy.service)" = active
               test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
+              umask 077
+              mkdir -p "$ORICHUM_DATA_HOME/auth"
+              printf "%s\n" '\''{
+                "type": "codex",
+                "email": "wsl-acceptance@example.invalid",
+                "access_token": "acceptance-placeholder-not-a-secret",
+                "refresh_token": "acceptance-placeholder-not-a-secret",
+                "disabled": false
+              }'\'' >"$ORICHUM_DATA_HOME/auth/codex-wsl.json"
+              orichum provider account add \
+                "WSL GPT" openai codex-wsl.json shared --priority primary
+              ./install.sh --verbose | tee /tmp/orichum-install-verbose.log
+              grep -Eq "^CLIProxyAPI[[:space:]]+reused[[:space:]]*$" \
+                /tmp/orichum-install-verbose.log
+              test "$(systemctl --user is-active orichum-route-proxy.service)" = active
+              script --quiet --return --command \
+                "orichum setup /home/orichum/workspace" \
+                /tmp/orichum-setup-normal.log
+              grep -Fq "Orichum is ready." /tmp/orichum-setup-normal.log
+              if grep -Eq "127\\.0\\.0\\.1|Runtime release:|\\.service" \
+                  /tmp/orichum-setup-normal.log; then
+                exit 1
+              fi
+              script --quiet --return --command \
+                "orichum setup --verbose /home/orichum/workspace" \
+                /tmp/orichum-setup-verbose.log
+              grep -Fq "Orichum local components are ready." \
+                /tmp/orichum-setup-verbose.log
+              setup_log="$(
+                find "$ORICHUM_DATA_HOME/logs" -type f \
+                  -name "setup-*.log" | sort | tail -1
+              )"
+              test -n "$setup_log"
+              test "$(stat -c %a "$setup_log")" = 600
             '

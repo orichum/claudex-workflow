@@ -40,12 +40,6 @@
     }
   },
   "accountPools": {
-    "xebia": {
-      "providers": ["anthropic", "antigravity", "openai"]
-    },
-    "realtime": {
-      "providers": ["anthropic", "antigravity", "openai"]
-    },
     "shared": {
       "providers": ["anthropic", "antigravity", "kimi", "openai"]
     }

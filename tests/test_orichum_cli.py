@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -431,7 +432,7 @@ class OrichumCliTests(unittest.TestCase):
                 name="Work Claude",
                 provider="anthropic",
                 credential_ref="claude-work.json",
-                pool="xebia",
+                pool="shared",
                 routing_prefix="oc-r-1111111111111111",
                 priority=100,
                 state="active",
@@ -582,6 +583,177 @@ class OrichumCliTests(unittest.TestCase):
         )
         run.assert_not_called()
 
+    def test_setup_accepts_verbose_diagnostics(self) -> None:
+        parser = orichum_cli.build_parser()
+
+        self.assertTrue(parser.parse_args(["setup", "--verbose"]).verbose)
+
+    def test_setup_diagnostics_are_private_bounded_and_redacted(self) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+        callback = (
+            "http://localhost:1455/auth/callback?code=secret-code"
+            "&state=secret-state"
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            status = diagnostics.run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "print('callback " + callback + "')\n"
+                        "print('Authorization: Bearer secret-token')\n"
+                        "print('Authorization: Token header-secret')\n"
+                        "print('{\"accessToken\":\"camel-secret\",'"
+                        "      '\"client_secret\":\"client-secret\"}')\n"
+                        "print('API_KEY=environment-secret')"
+                    ),
+                ],
+                cwd=self.root,
+            )
+        diagnostics.close()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(diagnostics.path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(diagnostics.path.stat().st_mode & 0o777, 0o600)
+        logged = diagnostics.path.read_text(encoding="utf-8")
+        self.assertNotIn(callback, logged)
+        self.assertNotIn("secret-code", logged)
+        self.assertNotIn("secret-state", logged)
+        self.assertNotIn("secret-token", logged)
+        self.assertNotIn("header-secret", logged)
+        self.assertNotIn("camel-secret", logged)
+        self.assertNotIn("client-secret", logged)
+        self.assertNotIn("environment-secret", logged)
+        self.assertIn("[REDACTED]", logged)
+
+    def test_setup_diagnostics_truncate_noisy_newline_free_children(
+        self,
+    ) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+
+        try:
+            with mock.patch.object(
+                orichum_cli,
+                "_MAX_SETUP_TECHNICAL_BYTES",
+                1024,
+                create=True,
+            ):
+                status = diagnostics.run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stdout.write('x' * 8192)",
+                    ],
+                    cwd=self.root,
+                )
+        finally:
+            diagnostics.close()
+
+        self.assertEqual(status, 0)
+        logged = diagnostics.path.read_text(encoding="utf-8")
+        self.assertLessEqual(logged.count("x"), 1024)
+        self.assertIn("[technical diagnostics truncated]", logged)
+
+    def test_managed_provider_login_prints_owned_progress_without_secrets(
+        self,
+    ) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+        session = SimpleNamespace(
+            url="https://auth.openai.com/oauth?state=secret-state",
+            state="secret-state",
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                orichum_cli, "load_management_endpoint", return_value=object()
+            ),
+            mock.patch.object(
+                orichum_cli, "start_oauth", return_value=session
+            ),
+            mock.patch.object(
+                orichum_cli, "oauth_status", side_effect=("wait", "ok")
+            ),
+            mock.patch.object(orichum_cli.webbrowser, "open", return_value=True),
+            mock.patch.object(orichum_cli.time, "sleep"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = orichum_cli._managed_provider_login(
+                {"data": data},
+                "codex",
+                "OpenAI",
+                diagnostics,
+            )
+        diagnostics.close()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            stdout.getvalue(),
+            "OpenAI authentication\n"
+            "  Opening your browser…\n"
+            "  Waiting for authentication…\n"
+            "  ✓ Signed in\n",
+        )
+        logged = diagnostics.path.read_text(encoding="utf-8")
+        self.assertNotIn(session.url, logged)
+        self.assertNotIn(session.state, logged)
+
+    def test_managed_provider_login_cancels_failed_session(self) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+        endpoint = object()
+        session = SimpleNamespace(
+            url="https://auth.openai.com/oauth?state=secret-state",
+            state="secret-state",
+        )
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "load_management_endpoint",
+                return_value=endpoint,
+            ),
+            mock.patch.object(
+                orichum_cli, "start_oauth", return_value=session
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "oauth_status",
+                side_effect=orichum_cli.ManagementError("failed"),
+            ),
+            mock.patch.object(orichum_cli, "cancel_oauth") as cancel,
+            mock.patch.object(orichum_cli.webbrowser, "open", return_value=True),
+            self.assertRaises(orichum_cli.ManagementError),
+        ):
+            orichum_cli._managed_provider_login(
+                {"data": data},
+                "codex",
+                "OpenAI",
+                diagnostics,
+            )
+        diagnostics.close()
+
+        cancel.assert_called_once_with(endpoint, session.state)
+
     def test_setup_runs_only_missing_phases_and_verifies_project(self) -> None:
         project = self.root / "project"
         project.mkdir()
@@ -633,8 +805,10 @@ class OrichumCliTests(unittest.TestCase):
                 side_effect=(False, True),
             ) as ready,
             mock.patch.object(
-                orichum_cli, "run_stack_wizard", return_value=0
-            ) as wizard,
+                orichum_cli,
+                "create_recommended_stack",
+                return_value="recommended",
+            ) as recommended,
             mock.patch.object(
                 orichum_cli, "_run_external", return_value=0
             ) as external,
@@ -644,27 +818,31 @@ class OrichumCliTests(unittest.TestCase):
                 status = orichum_cli._setup(paths, config, str(project))
 
         self.assertEqual(status, 0)
-        provider.assert_called_once_with(paths, config)
-        reconcile.assert_called_once_with()
+        provider.assert_called_once_with(
+            paths,
+            config,
+            onboarding=True,
+            diagnostics=mock.ANY,
+        )
+        reconcile.assert_called_once_with(mock.ANY)
         external.assert_has_calls(
             (
                 mock.call(
                     "orichum-context",
                     ["add", str(project), "--pool", "xebia"],
+                    diagnostics=mock.ANY,
                 ),
-                mock.call("orichum-doctor", []),
+                mock.call(
+                    "orichum-doctor", [], diagnostics=mock.ANY
+                ),
             )
         )
-        wizard.assert_called_once_with(
-            paths,
-            refreshed,
-            launch_dir=project,
-            assignment_default=True,
+        recommended.assert_called_once_with(
+            paths, refreshed, launch_dir=project
         )
         self.assertEqual(ready.call_count, 2)
-        self.assertIn(f"Orichum is ready for {project}.", stdout.getvalue())
-        self.assertIn(f"cd {project}", stdout.getvalue())
-        self.assertIn("orichum", stdout.getvalue())
+        self.assertIn("Models\n  ✓ Recommended stack created", stdout.getvalue())
+        self.assertTrue(stdout.getvalue().endswith("Orichum is ready.\n"))
 
     def test_setup_reuses_completed_account_runtime_context_and_stack(
         self,
@@ -680,11 +858,18 @@ class OrichumCliTests(unittest.TestCase):
             documents={"projects": {"contexts": [{"root": str(project)}]}}
         )
 
+        stdout = io.StringIO()
         with (
             mock.patch.object(
                 orichum_cli,
                 "_active_provider_accounts",
-                return_value=(SimpleNamespace(name="Personal GPT"),),
+                return_value=(
+                    SimpleNamespace(
+                        name="Personal GPT",
+                        pool="shared",
+                        priority=100,
+                    ),
+                ),
             ),
             mock.patch.object(
                 orichum_cli, "_provider_configure", return_value=0
@@ -707,6 +892,7 @@ class OrichumCliTests(unittest.TestCase):
             mock.patch.object(
                 orichum_cli, "_run_external", return_value=0
             ) as external,
+            contextlib.redirect_stdout(stdout),
         ):
             status = orichum_cli._setup(paths, config, str(project))
 
@@ -714,7 +900,18 @@ class OrichumCliTests(unittest.TestCase):
         provider.assert_not_called()
         reconcile.assert_not_called()
         wizard.assert_not_called()
-        external.assert_called_once_with("orichum-doctor", [])
+        external.assert_called_once_with(
+            "orichum-doctor", [], diagnostics=mock.ANY
+        )
+        output = stdout.getvalue()
+        self.assertIn("Setting up Orichum…", output)
+        self.assertIn("Account\n  Name: Personal GPT", output)
+        self.assertIn("Projects\n", output)
+        self.assertIn("Models\n  ✓ Already configured", output)
+        self.assertIn("Services\n  ✓ Ready", output)
+        self.assertTrue(output.endswith("Orichum is ready.\n"))
+        self.assertNotIn("127.0.0.1", output)
+        self.assertNotIn("Next:", output)
 
     def test_setup_stops_when_provider_configuration_is_cancelled(self) -> None:
         project = self.root / "project"
@@ -746,7 +943,7 @@ class OrichumCliTests(unittest.TestCase):
         reconcile.assert_not_called()
         external.assert_not_called()
 
-    def test_setup_rejects_successful_provider_wizard_without_account(
+    def test_setup_reports_recovery_when_provider_registration_is_incomplete(
         self,
     ) -> None:
         project = self.root / "project"
@@ -758,6 +955,7 @@ class OrichumCliTests(unittest.TestCase):
         }
         config = SimpleNamespace(documents={"projects": {"contexts": []}})
 
+        stdout = io.StringIO()
         with (
             mock.patch.object(
                 orichum_cli, "_active_provider_accounts", return_value=()
@@ -768,12 +966,16 @@ class OrichumCliTests(unittest.TestCase):
             mock.patch.object(
                 orichum_cli, "_load", return_value=(paths, config)
             ),
-            self.assertRaisesRegex(
-                orichum_cli.CliError,
-                "setup stopped before a provider account was registered",
-            ),
+            contextlib.redirect_stdout(stdout),
         ):
-            orichum_cli._setup(paths, config, str(project))
+            status = orichum_cli._setup(paths, config, str(project))
+
+        self.assertEqual(status, 2)
+        output = stdout.getvalue()
+        self.assertIn("Setup stopped while configuring Orichum.", output)
+        self.assertIn("  orichum setup", output)
+        self.assertIn("  orichum doctor", output)
+        self.assertNotIn("orichum doctor --verbose", output)
 
     def test_setup_reconciliation_uses_active_runtime_installer(self) -> None:
         runtime = self.root / "runtime"
@@ -844,22 +1046,10 @@ class OrichumCliTests(unittest.TestCase):
             arguments: list[str],
             *,
             environment: dict[str, str] | None = None,
+            diagnostics: object | None = None,
         ) -> int:
-            del environment
+            del environment, diagnostics
             calls.append((name, tuple(arguments)))
-            if name == "orichum-login":
-                credential.write_text(
-                    json.dumps(
-                        {
-                            "type": "codex",
-                            "email": "private@example.com",
-                            "access_token": "DO-NOT-PRINT",
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-                credential.chmod(0o600)
-                return 0
             if name == "orichum-context":
                 return project_context.context_main(
                     [
@@ -876,7 +1066,21 @@ class OrichumCliTests(unittest.TestCase):
                 return 0
             raise AssertionError(f"unexpected external command: {name}")
 
-        def reconcile() -> int:
+        def managed_login(*_arguments, **_kwargs) -> int:
+            credential.write_text(
+                json.dumps(
+                    {
+                        "type": "codex",
+                        "email": "private@example.com",
+                        "access_token": "DO-NOT-PRINT",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            credential.chmod(0o600)
+            return 0
+
+        def reconcile(_diagnostics: object) -> int:
             runtime["ready"] = True
             return 0
 
@@ -901,6 +1105,11 @@ class OrichumCliTests(unittest.TestCase):
             mock.patch.object(
                 orichum_cli, "_reconcile_runtime", side_effect=reconcile
             ) as reconcile_call,
+            mock.patch.object(
+                orichum_cli,
+                "_managed_provider_login",
+                side_effect=managed_login,
+            ) as login,
             mock.patch.object(orichum_cli, "_verify_runtime"),
             mock.patch.object(
                 orichum_cli,
@@ -923,12 +1132,13 @@ class OrichumCliTests(unittest.TestCase):
 
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(second[0], 0, second[2])
-        reconcile_call.assert_called_once_with()
+        reconcile_call.assert_called_once_with(mock.ANY)
+        login.assert_called_once()
+        self.assertEqual(login.call_args.args[2], "OpenAI")
         wizard.assert_not_called()
         self.assertEqual(
             [name for name, _arguments in calls],
             [
-                "orichum-login",
                 "orichum-context",
                 "orichum-doctor",
                 "orichum-doctor",
@@ -941,9 +1151,9 @@ class OrichumCliTests(unittest.TestCase):
             (config_home / "projects.json").read_text(encoding="utf-8")
         )["contexts"]
         self.assertEqual(len(accounts), 1)
-        self.assertEqual(accounts[0]["pool"], "xebia")
+        self.assertEqual(accounts[0]["pool"], "shared")
         self.assertEqual(len(contexts), 1)
-        self.assertEqual(contexts[0]["accountPools"], ["xebia"])
+        self.assertEqual(contexts[0]["accountPools"], ["shared"])
         combined_output = first[1] + second[1]
         self.assertNotIn(credential.name, combined_output)
         self.assertNotIn("private@example.com", combined_output)
@@ -1054,6 +1264,16 @@ class OrichumCliTests(unittest.TestCase):
         config_home = self.root / "private-config"
         shutil.copytree(REPOSITORY_ROOT / "config", config_home)
         config_home.chmod(0o700)
+        providers_path = config_home / "providers.json"
+        providers = json.loads(providers_path.read_text(encoding="utf-8"))
+        providers["accountPools"]["xebia"] = {
+            "providers": ["anthropic", "antigravity", "openai"]
+        }
+        providers["accountPools"]["realtime"] = {
+            "providers": ["anthropic", "antigravity", "openai"]
+        }
+        providers_path.write_text(json.dumps(providers), encoding="utf-8")
+        providers_path.chmod(0o600)
         data_home = self.root / "private-data"
         auth_dir = data_home / "auth"
         auth_dir.mkdir(parents=True, mode=0o700)
@@ -1209,6 +1429,70 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn(credential.name, stdout)
         self.assertNotIn("work@example.com", stdout)
         self.assertNotIn("DO-NOT-PRINT", stdout)
+
+    def test_onboarding_registers_first_account_without_advanced_prompts(
+        self,
+    ) -> None:
+        config_home, credential = self.provision_account_runtime()
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, self.environment, clear=False),
+            mock.patch("builtins.input", side_effect=("1", "Work Claude")),
+            contextlib.redirect_stdout(stdout),
+        ):
+            paths, config = orichum_cli._load()
+            status = orichum_cli._provider_configure(
+                paths,
+                config,
+                onboarding=True,
+            )
+
+        self.assertEqual(status, 0)
+        account = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )["accounts"][0]
+        self.assertEqual(account["name"], "Work Claude")
+        self.assertEqual(account["credentialRef"], credential.name)
+        self.assertEqual(account["pool"], "shared")
+        self.assertEqual(account["priority"], 100)
+        output = stdout.getvalue()
+        self.assertNotIn("Choose where this account is available", output)
+        self.assertNotIn("Choose account priority", output)
+        self.assertNotIn("Register this account", output)
+        self.assertNotIn("Account summary", output)
+
+    def test_setup_project_folder_defaults_to_projects_and_creates_it(
+        self,
+    ) -> None:
+        home = self.root / "home"
+        home.mkdir()
+
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False),
+            mock.patch("builtins.input", return_value=""),
+        ):
+            project = orichum_cli._setup_project_path(None)
+
+        self.assertEqual(project, home / "projects")
+        self.assertTrue(project.is_dir())
+
+        with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+            self.assertEqual(
+                orichum_cli._display_setup_path(project),
+                "~/projects",
+            )
+
+    def test_setup_explicit_project_folder_must_already_exist(self) -> None:
+        missing = self.root / "missing"
+
+        with self.assertRaisesRegex(
+            orichum_cli.CliError,
+            "project root is unavailable",
+        ):
+            orichum_cli._setup_project_path(str(missing))
+
+        self.assertFalse(missing.exists())
 
     def test_provider_configure_reuses_prior_unregistered_login(self) -> None:
         config_home, credential = self.provision_account_runtime()

@@ -12,30 +12,36 @@ from unittest import mock
 from integrations.common.cliproxy_management import (
     ManagementEndpoint,
     ManagementError,
+    cancel_oauth,
     _open_attested_connection,
     attest_owned_connection,
     load_management_endpoint,
+    oauth_status,
     patch_auth_fields,
+    start_oauth,
 )
 
 
 class _Response:
-    status = 200
+    def __init__(self, body: bytes = b'{"status":"ok"}', status: int = 200):
+        self.body = body
+        self.status = status
 
     def read(self, _limit: int) -> bytes:
-        return b'{"status":"ok"}'
+        return self.body
 
 
 class _Connection:
-    def __init__(self) -> None:
+    def __init__(self, response: _Response | None = None) -> None:
         self.request_args = None
         self.closed = False
+        self.response = response or _Response()
 
     def request(self, *args, **kwargs) -> None:
         self.request_args = (args, kwargs)
 
     def getresponse(self) -> _Response:
-        return _Response()
+        return self.response
 
     def close(self) -> None:
         self.closed = True
@@ -132,6 +138,101 @@ class CliProxyManagementTests(unittest.TestCase):
             with self.subTest(reference=reference, fields=fields):
                 with self.assertRaises(ManagementError):
                     patch_auth_fields(endpoint, reference, fields)
+
+    def test_oauth_start_uses_structured_authenticated_management_api(
+        self,
+    ) -> None:
+        endpoint = load_management_endpoint(self.data)
+        url = (
+            "https://auth.openai.com/oauth/authorize?state=secret-state"
+        )
+        connection = _Connection(
+            _Response(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "url": url,
+                        "state": "secret-state",
+                    }
+                ).encode()
+            )
+        )
+        with mock.patch(
+            "integrations.common.cliproxy_management._open_attested_connection",
+            return_value=connection,
+        ):
+            session = start_oauth(endpoint, "codex")
+
+        self.assertEqual(session.provider, "codex")
+        self.assertEqual(session.url, url)
+        self.assertEqual(session.state, "secret-state")
+        self.assertNotIn(url, repr(session))
+        self.assertNotIn("secret-state", repr(session))
+        arguments, keywords = connection.request_args
+        self.assertEqual(
+            arguments,
+            (
+                "GET",
+                "/v0/management/codex-auth-url?is_webui=true",
+            ),
+        )
+        self.assertEqual(
+            keywords["headers"]["X-Management-Key"], "a" * 48
+        )
+        self.assertTrue(connection.closed)
+
+    def test_oauth_status_and_cancel_use_state_bound_requests(self) -> None:
+        endpoint = load_management_endpoint(self.data)
+        waiting = _Connection(_Response(b'{"status":"wait"}'))
+        completed = _Connection(
+            _Response(b'{"status":"ok","cancelled":true}')
+        )
+        with mock.patch(
+            "integrations.common.cliproxy_management._open_attested_connection",
+            side_effect=(waiting, completed),
+        ):
+            self.assertEqual(oauth_status(endpoint, "state-123"), "wait")
+            self.assertTrue(cancel_oauth(endpoint, "state-123"))
+
+        self.assertEqual(
+            waiting.request_args[0],
+            (
+                "GET",
+                "/v0/management/get-auth-status?state=state-123",
+            ),
+        )
+        self.assertEqual(
+            completed.request_args[0],
+            (
+                "DELETE",
+                "/v0/management/oauth-session?state=state-123",
+            ),
+        )
+
+    def test_oauth_management_rejects_malformed_or_failed_responses(
+        self,
+    ) -> None:
+        endpoint = load_management_endpoint(self.data)
+        responses = (
+            _Response(b'{"status":"ok","url":"file:///tmp/x","state":"s"}'),
+            _Response(b'{"status":"ok","url":"https://example.com","state":"../bad"}'),
+            _Response(b'{"status":"error","error":"denied"}'),
+            _Response(b"not-json"),
+            _Response(b"{}", status=500),
+        )
+        for response in responses:
+            with (
+                self.subTest(response=response.body),
+                mock.patch(
+                    "integrations.common.cliproxy_management._open_attested_connection",
+                    return_value=_Connection(response),
+                ),
+                self.assertRaises(ManagementError),
+            ):
+                start_oauth(endpoint, "codex")
+
+        with self.assertRaises(ManagementError):
+            start_oauth(endpoint, "unsupported")
 
     def test_connection_is_attested_after_connect_before_header_use(self) -> None:
         endpoint = ManagementEndpoint(
