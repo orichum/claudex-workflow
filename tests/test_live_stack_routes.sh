@@ -459,10 +459,23 @@ root = sys.argv[1]
 child, terminal = pty.fork()
 if child == 0:
     code = """
+import json
+import os
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 sys.path.insert(0, sys.argv[1])
-from integrations.common import orichum_cli
+from integrations.common import orichum_cli, stack_wizard
+ports = json.loads(
+    (Path(os.environ["ORICHUM_DATA_HOME"]) / "service-ports.json").read_text(
+        encoding="utf-8"
+    )
+)
 orichum_cli._verify_runtime = lambda _paths: None
+stack_wizard.load_management_endpoint = lambda _data: SimpleNamespace(
+    port=ports["cliproxyPort"]
+)
+stack_wizard.attest_owned_connection = lambda _endpoint, _client_port: None
 raise SystemExit(orichum_cli.main(["stack", "configure"]))
 """
     os.execve(

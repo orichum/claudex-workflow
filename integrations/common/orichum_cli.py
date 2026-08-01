@@ -2323,6 +2323,10 @@ def _setup(
         if not stack_reused:
             create_recommended_stack(paths, config, launch_dir=project)
             paths, config = _load()
+            status = _reconcile_runtime(diagnostics)
+            if status != 0:
+                return stopped("starting Orichum services", status)
+            paths, config = _load()
             if not _setup_project_ready(paths, config, project):
                 raise CliError(
                     "setup is incomplete: the project has no usable model stack"
@@ -4047,6 +4051,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     end="",
                 )
                 return 0
+            _verify_runtime(paths)
             return run_stack_wizard(
                 paths, config, launch_dir=Path.cwd()
             )

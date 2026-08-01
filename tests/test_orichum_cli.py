@@ -554,6 +554,33 @@ class OrichumCliTests(unittest.TestCase):
         )
         wizard.assert_not_called()
 
+    def test_stack_configure_verifies_full_runtime_before_wizard(
+        self,
+    ) -> None:
+        paths = {"data": self.root / "data"}
+        config = object()
+        with (
+            mock.patch.object(
+                orichum_cli, "_interactive_terminal", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli, "_load", return_value=(paths, config)
+            ),
+            mock.patch.object(orichum_cli, "_verify_runtime") as verify,
+            mock.patch.object(
+                orichum_cli, "run_stack_wizard", return_value=0
+            ) as wizard,
+        ):
+            status = orichum_cli.main(["stack", "configure"])
+
+        self.assertEqual(status, 0)
+        verify.assert_called_once_with(paths)
+        wizard.assert_called_once_with(
+            paths,
+            config,
+            launch_dir=Path.cwd(),
+        )
+
     def test_provider_configure_rejects_non_tty_before_login(self) -> None:
         with mock.patch.object(
             orichum_cli, "_run_external", return_value=0
@@ -1076,7 +1103,11 @@ class OrichumCliTests(unittest.TestCase):
             onboarding=True,
             diagnostics=mock.ANY,
         )
-        reconcile.assert_called_once_with(mock.ANY)
+        self.assertEqual(reconcile.call_count, 2)
+        self.assertEqual(
+            reconcile.call_args_list,
+            [mock.call(mock.ANY), mock.call(mock.ANY)],
+        )
         external.assert_has_calls(
             (
                 mock.call(
@@ -1164,6 +1195,63 @@ class OrichumCliTests(unittest.TestCase):
         self.assertTrue(output.endswith("Orichum is ready.\n"))
         self.assertNotIn("127.0.0.1", output)
         self.assertNotIn("Next:", output)
+
+    def test_setup_reconciles_healthy_runtime_after_creating_stack(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+            "state": self.root / "state",
+        }
+        config = SimpleNamespace(
+            documents={"projects": {"contexts": [{"root": str(project)}]}}
+        )
+        account = SimpleNamespace(
+            name="Personal GPT",
+            pool="shared",
+            priority=100,
+        )
+
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "_active_provider_accounts",
+                return_value=(account,),
+            ),
+            mock.patch.object(
+                orichum_cli, "_runtime_ready", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli, "_reconcile_runtime", return_value=0
+            ) as reconcile,
+            mock.patch.object(
+                orichum_cli, "_project_context_mapped", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_setup_project_ready",
+                side_effect=(False, True),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "create_recommended_stack",
+                return_value="recommended",
+            ),
+            mock.patch.object(
+                orichum_cli, "_load", return_value=(paths, config)
+            ),
+            mock.patch.object(
+                orichum_cli, "_run_external", return_value=0
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = orichum_cli._setup(paths, config, str(project))
+
+        self.assertEqual(status, 0)
+        reconcile.assert_called_once_with(mock.ANY)
 
     def test_setup_stops_when_provider_configuration_is_cancelled(self) -> None:
         project = self.root / "project"
