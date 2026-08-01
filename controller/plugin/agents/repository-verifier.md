@@ -15,6 +15,6 @@ durable knowledge. Do not require broader scope than the claim needs.
 Return confirmed claims, rejected claims, gaps, and file:line evidence. Use no
 more than four inspection rounds. If requested evidence is unavailable through
 the allowed tools, record it as a gap instead of continuing to search. When a
-schema is requested, make exactly one StructuredOutput call as your final
-action. Do not end with ordinary prose or
+schema is requested, make exactly one StructuredOutput call as
+your final action. Do not end with ordinary prose or
 another repository tool call.
