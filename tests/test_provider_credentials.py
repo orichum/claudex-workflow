@@ -106,6 +106,31 @@ class ProviderCredentialTests(unittest.TestCase):
         self.assertNotIn("ACCESS-SECRET", output)
         self.assertNotIn("REFRESH-SECRET", output)
 
+    def test_repair_credential_modes_secures_regular_files(self) -> None:
+        credential = self.credential("codex-user.json", "codex")
+        credential.chmod(0o644)
+
+        repaired = provider_credentials.repair_credential_modes(
+            self.auth_dir
+        )
+
+        self.assertEqual(repaired, (credential.name,))
+        self.assertEqual(stat.S_IMODE(credential.stat().st_mode), 0o600)
+        self.assertEqual(
+            provider_credentials.repair_credential_modes(self.auth_dir),
+            (),
+        )
+
+    def test_repair_credential_modes_refuses_symlinks(self) -> None:
+        target = self.credential("target", "codex")
+        target.chmod(0o644)
+        (self.auth_dir / "linked.json").symlink_to(target)
+
+        with self.assertRaisesRegex(CredentialError, "regular file"):
+            provider_credentials.repair_credential_modes(self.auth_dir)
+
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+
     def test_resolve_credential_ref_is_bounded_and_checks_provider_type(self) -> None:
         credential = self.credential(
             "codex-e200239f-arvind9981@gmail.com-pro.json",

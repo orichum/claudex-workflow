@@ -242,6 +242,82 @@ def list_credentials(auth_dir: Path) -> tuple[Credential, ...]:
         os.close(dir_fd)
 
 
+def repair_credential_modes(auth_dir: Path) -> tuple[str, ...]:
+    auth_dir = Path(auth_dir)
+    dir_fd = _open_auth_directory(auth_dir)
+    repaired: list[str] = []
+    try:
+        try:
+            names = sorted(
+                name for name in os.listdir(dir_fd) if name.endswith(".json")
+            )
+        except OSError as error:
+            raise CredentialError(
+                "credential directory could not be read"
+            ) from error
+        for name in names:
+            try:
+                before = os.stat(
+                    name,
+                    dir_fd=dir_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise CredentialError(
+                    f"credential {name!r} is unavailable"
+                ) from error
+            if not stat.S_ISREG(before.st_mode):
+                raise CredentialError(
+                    f"credential {name!r} must be a regular file"
+                )
+            if before.st_uid != os.getuid():
+                raise CredentialError(
+                    f"credential {name!r} must belong to current user"
+                )
+
+            flags = os.O_RDONLY
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                file_fd = os.open(name, flags, dir_fd=dir_fd)
+            except OSError as error:
+                raise CredentialError(
+                    f"credential {name!r} could not be opened safely"
+                ) from error
+            try:
+                opened = os.fstat(file_fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise CredentialError(
+                        f"credential {name!r} must be a regular file"
+                    )
+                if opened.st_uid != os.getuid():
+                    raise CredentialError(
+                        f"credential {name!r} must belong to current user"
+                    )
+                if not _same_file(opened, before.st_dev, before.st_ino):
+                    raise CredentialError(
+                        f"credential {name!r} changed while opening"
+                    )
+                if stat.S_IMODE(opened.st_mode) != 0o600:
+                    os.fchmod(file_fd, 0o600)
+                    secured = os.fstat(file_fd)
+                    _validate_open_credential(secured, name)
+                    if not _same_file(
+                        secured,
+                        before.st_dev,
+                        before.st_ino,
+                    ):
+                        raise CredentialError(
+                            f"credential {name!r} changed while securing"
+                        )
+                    repaired.append(name)
+            finally:
+                os.close(file_fd)
+    finally:
+        os.close(dir_fd)
+    return tuple(repaired)
+
+
 def resolve_credential_ref(
     auth_dir: Path,
     credential_ref: str,

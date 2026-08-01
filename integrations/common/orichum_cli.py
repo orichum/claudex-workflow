@@ -43,6 +43,7 @@ from .cliproxy_management import (
     oauth_status,
     patch_auth_fields,
     start_oauth,
+    submit_oauth_callback,
 )
 from .github_identity import GithubIdentityError, ensure_github_identity
 from .leanctx_contract import (
@@ -91,6 +92,7 @@ from .provider_credentials import (
     CredentialError,
     credential_metadata_transaction,
     list_credentials,
+    repair_credential_modes,
     resolve_credential_ref,
 )
 from .route_selection import RouteError, validate_route_credential
@@ -1830,30 +1832,46 @@ def _managed_provider_login(
     endpoint = load_management_endpoint(paths["data"])
     session = start_oauth(endpoint, login_type)
     diagnostics.emit(f"{provider_label} authentication")
-    diagnostics.emit("  Opening your browser…")
+    diagnostics.emit("  Open this URL:")
+    diagnostics.sensitive(f"    {session.url}")
     try:
-        browser_opened = webbrowser.open(session.url, new=2)
-    except KeyboardInterrupt as error:
-        try:
-            cancel_oauth(endpoint, session.state)
-        except ManagementError:
-            pass
-        raise CliError("setup cancelled") from error
-    except (OSError, webbrowser.Error):
+        headless = bool(
+            os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY")
+        )
         browser_opened = False
-    if not browser_opened:
-        diagnostics.emit("  Browser did not open automatically.")
-        diagnostics.emit("  Open this URL:")
-        diagnostics.sensitive(f"    {session.url}")
-    diagnostics.emit("  Waiting for authentication…")
-    deadline = time.monotonic() + 30 * 60
-    try:
+        if headless:
+            diagnostics.emit(
+                "  SSH session detected; open the URL on your machine."
+            )
+        else:
+            diagnostics.emit("  Opening your browser…")
+            try:
+                browser_opened = webbrowser.open(session.url, new=2)
+            except (OSError, webbrowser.Error):
+                browser_opened = False
+            if not browser_opened:
+                diagnostics.emit("  Browser did not open automatically.")
+        if headless or not browser_opened:
+            diagnostics.emit(
+                "  Paste the final callback URL, or press Enter if the "
+                "callback completed automatically."
+            )
+            callback_url = _prompt_input("Callback URL: ").strip()
+            if callback_url:
+                submit_oauth_callback(
+                    endpoint,
+                    session.state,
+                    callback_url,
+                )
+
+        diagnostics.emit("  Waiting for authentication…")
+        deadline = time.monotonic() + 30 * 60
         while time.monotonic() < deadline:
             if oauth_status(endpoint, session.state) == "ok":
                 diagnostics.emit("  ✓ Signed in")
                 return 0
             time.sleep(1)
-    except ManagementError:
+    except (CliError, ManagementError):
         try:
             cancel_oauth(endpoint, session.state)
         except ManagementError:
@@ -1891,9 +1909,11 @@ def _provider_configure(
     provider_name = _prompt_choice("Choose a provider:", provider_choices)
     provider = providers[provider_name]
     auth_dir = paths["data"] / "auth"
-    before_credentials = (
-        list_credentials(auth_dir) if auth_dir.exists() else ()
-    )
+    if auth_dir.exists():
+        repair_credential_modes(auth_dir)
+        before_credentials = list_credentials(auth_dir)
+    else:
+        before_credentials = ()
     before_refs = {credential.path.name for credential in before_credentials}
     registry = paths["config"] / "accounts.json"
     accounts = load_accounts(registry)
@@ -1959,6 +1979,7 @@ def _provider_configure(
         diagnostics.emit(f"{label} authentication")
         diagnostics.emit("  ✓ Already configured")
 
+    repair_credential_modes(auth_dir)
     compatible = tuple(
         credential
         for credential in list_credentials(auth_dir)

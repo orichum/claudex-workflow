@@ -13,7 +13,7 @@ import socket
 import stat
 import subprocess
 from typing import Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 _KEY = re.compile(r"[A-Za-z0-9._~-]{32,256}")
@@ -28,6 +28,7 @@ _OAUTH_PROVIDERS = {
     "kimi": "kimi",
 }
 _MAX_MANAGEMENT_RESPONSE = 64 * 1024
+_MAX_OAUTH_CALLBACK_URL = 16 * 1024
 
 
 class ManagementError(RuntimeError):
@@ -347,6 +348,89 @@ def oauth_status(endpoint: ManagementEndpoint, state: str) -> str:
     if status == "ok":
         return "ok"
     raise ManagementError("provider authentication failed")
+
+
+def submit_oauth_callback(
+    endpoint: ManagementEndpoint,
+    state: str,
+    redirect_url: str,
+) -> None:
+    state = _oauth_state(state)
+    if (
+        not isinstance(redirect_url, str)
+        or not redirect_url
+        or len(redirect_url) > _MAX_OAUTH_CALLBACK_URL
+        or redirect_url.strip() != redirect_url
+        or any(ord(character) < 0x20 for character in redirect_url)
+    ):
+        raise ManagementError("provider callback URL is invalid")
+    try:
+        parsed = urlparse(redirect_url)
+        port = parsed.port
+    except ValueError as failure:
+        raise ManagementError("provider callback URL is invalid") from failure
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is None
+        or port < 1
+        or port > 65535
+        or parsed.fragment
+    ):
+        raise ManagementError("provider callback URL is invalid")
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if query.get("state") != [state]:
+        raise ManagementError("provider callback state does not match")
+    if not any(
+        any(value for value in query.get(name, ()))
+        for name in ("code", "error", "error_description")
+    ):
+        raise ManagementError("provider callback result is missing")
+
+    payload = json.dumps(
+        {"redirect_url": redirect_url, "state": state},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    connection = None
+    try:
+        connection = _open_attested_connection(endpoint)
+        connection.request(
+            "POST",
+            "/v0/management/oauth-callback",
+            body=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Management-Key": endpoint.key,
+            },
+        )
+        response = connection.getresponse()
+        response_payload = response.read(_MAX_MANAGEMENT_RESPONSE + 1)
+        if response.status != 200:
+            raise ManagementError("CLIProxyAPI rejected provider callback")
+        if len(response_payload) > _MAX_MANAGEMENT_RESPONSE:
+            raise ManagementError("CLIProxyAPI management response is too large")
+        document = json.loads(response_payload.decode("utf-8"))
+        if not isinstance(document, dict) or document.get("status") != "ok":
+            raise ManagementError("CLIProxyAPI provider callback failed")
+    except ManagementError:
+        raise
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        http.client.HTTPException,
+        TimeoutError,
+        OSError,
+    ) as failure:
+        raise ManagementError(
+            "CLIProxyAPI provider callback request failed"
+        ) from failure
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def cancel_oauth(endpoint: ManagementEndpoint, state: str) -> bool:
