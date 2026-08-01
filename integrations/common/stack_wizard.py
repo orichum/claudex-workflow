@@ -137,6 +137,7 @@ class StackWizard:
         *,
         refresh_catalog: Callable[[], LiveCatalog] | None = None,
         projects: Mapping[str, object] | None = None,
+        assignment_default: bool = False,
     ) -> None:
         self._snapshot = snapshot
         self._catalog = catalog
@@ -149,6 +150,7 @@ class StackWizard:
         self._io = io
         self._refresh_catalog = refresh_catalog or (lambda: self._catalog)
         self._projects = projects
+        self._assignment_default = assignment_default
         self._pending_draft: _Draft | None = None
 
     def run(self, launch_dir: Path) -> WizardResult:
@@ -1129,7 +1131,7 @@ class StackWizard:
                 "Step 5/5 · Activate\n"
                 f"Assign {stack_name} to the current project "
                 f"({launch_dir})?",
-                default=False,
+                default=self._assignment_default,
             )
         resolved = resolve_control_plane_context(
             self._projects, launch_dir
@@ -1145,7 +1147,8 @@ class StackWizard:
         root = str(route["contextRootReal"])
         self._io.show(f"Step 5/5 · Activate\nMatched project: {root}")
         return self._io.confirm(
-            f"Assign {stack_name} to {root}?", default=False
+            f"Assign {stack_name} to {root}?",
+            default=self._assignment_default,
         )
 
 
@@ -1478,6 +1481,8 @@ def run_stack_wizard(
     paths: Mapping[str, Path],
     config: ResolvedConfig,
     launch_dir: Path,
+    *,
+    assignment_default: bool = False,
 ) -> int:
     """Run one interactive proposal and persist only its confirmed result."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -1514,6 +1519,7 @@ def run_stack_wizard(
         TerminalWizardIO(),
         refresh_catalog=refresh,
         projects=config.documents["projects"],
+        assignment_default=assignment_default,
     )
     result = wizard.run(Path(launch_dir))
     if not result.save:

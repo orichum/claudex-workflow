@@ -50,8 +50,18 @@ The MiniLM embedding model remains lazy: LeanCTX downloads it automatically on
 the first semantic search and reuses it from Orichum's shared LeanCTX cache.
 
 Without a logged-in provider, installation completes in
-`pending-provider-login` state and prints the login command instead of failing
-the full route check.
+`pending-provider-login` state instead of failing the full route check. It
+prints one next command:
+
+```bash
+orichum setup
+```
+
+The setup wizard authenticates and registers a provider account, invokes the
+active runtime's normal idempotent installer path to publish models and
+reconcile services, configures a usable stack and project mapping, and runs the
+final doctor check. Re-running it resumes from durable state instead of
+duplicating accounts or contexts.
 
 ## Fast reconciliation or explicit upgrade
 

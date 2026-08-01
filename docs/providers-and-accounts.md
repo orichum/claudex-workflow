@@ -6,7 +6,17 @@ Secrets remain in CLIProxyAPI's private authentication directory.
 
 ## Add an account
 
-Use the interactive wizard:
+For initial machine and project onboarding, use the complete setup wizard:
+
+```bash
+orichum setup
+```
+
+It combines authentication, account registration, runtime reconciliation,
+stack configuration, project mapping, and final verification.
+
+To add another account to an already configured installation, use the focused
+provider wizard:
 
 ```bash
 orichum provider configure
@@ -18,9 +28,17 @@ and priority. Credential filenames and contents are not displayed.
 
 Run the wizard again for each additional account.
 
-## Low-level commands
+Authentication and account registration are separate internally. CLIProxyAPI
+authentication creates a private OAuth credential; Orichum account
+registration gives that credential a display name, provider adapter, pool, and
+routing priority. The normal wizards perform both steps together and never ask
+for a credential filename. If a previous low-level login already succeeded,
+the wizard offers to reuse that unregistered credential instead of logging in
+again.
 
-The separate commands remain available for recovery and automation:
+## Advanced and recovery commands
+
+The separate low-level commands remain available for recovery and automation:
 
 ```bash
 orichum provider login codex
@@ -40,7 +58,10 @@ orichum provider account add \
 
 `CREDENTIAL_FILE` means the filename created by CLIProxyAPI inside Orichum's
 auth directory. `shared` is the account pool in which the account is available.
-Normal interactive setup does not require this manual path.
+Normal interactive setup does not require this manual path. Login types and
+provider adapters are intentionally different identifiers in some cases:
+Codex authentication uses login type `codex`, while its Orichum provider
+adapter is `openai`.
 
 ## Manage accounts
 

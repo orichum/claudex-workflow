@@ -24,6 +24,7 @@ Installer modes are separate from the `orichum` command:
 |---|---|
 | `orichum --version` | Print the installed Orichum release identity |
 | `orichum completion zsh\|bash\|fish` | Print the native completion definition for one shell |
+| `orichum setup [PROJECT]` | Resume first-run provider, runtime, stack, project, and readiness setup |
 | `orichum` / `orichum run [--leanctx-profile lean\|full]` | Start a project-aware session; new sessions default to the lean provider-residency profile |
 | `orichum config show` | Show the merged, redacted control plane |
 | `orichum config validate` | Validate focused configuration |

@@ -216,6 +216,13 @@ rg -Fq 'orichum provider configure' \
   "$ROOT/README.md" \
   "$ROOT/docs/providers-and-accounts.md" \
   "$ROOT/docs/cli-reference.md"
+rg -Fq 'orichum setup' \
+  "$ROOT/README.md" \
+  "$ROOT/docs/installation.md" \
+  "$ROOT/docs/providers-and-accounts.md" \
+  "$ROOT/docs/cli-reference.md"
+rg -Fq 'Advanced and recovery commands' \
+  "$ROOT/docs/providers-and-accounts.md"
 rg -Fq 'TARGET_STACK' "$ROOT/docs/sessions.md"
 if rg -Fq 'claude-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md || \
    rg -Fq 'google-heavy' "$ROOT/README.md" "$ROOT/docs"/*.md; then
@@ -247,6 +254,13 @@ rg -Fq \
   "$ROOT/doctor.sh"
 rg -Fq 'Claudex template is pending provider login' "$ROOT/doctor.sh"
 rg -Fq 'provider_login_pending=false' "$ROOT/doctor.sh"
+rg -Fq 'provider setup is pending; run orichum setup' "$ROOT/doctor.sh"
+rg -Fq 'no provider account is registered; run orichum setup' \
+  "$ROOT/integrations/common/orichum_cli.py"
+rg -Fq 'Authentication complete. Next: orichum setup' \
+  "$ROOT/bin/orichum-login"
+rg -Fq 'Manual recovery: orichum provider account add --help' \
+  "$ROOT/bin/orichum-login"
 rg -Fq 'Private CPython 3.14' "$ROOT/doctor.sh"
 rg -Fq 'validate_stack_bindings' "$ROOT/doctor.sh"
 rg -Fq 'load_accounts(config_root / "accounts.json")' "$ROOT/doctor.sh"

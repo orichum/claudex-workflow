@@ -113,11 +113,12 @@ contains_reply() {
   return 1
 }
 
-COMP_WORDS=(orichum st)
+COMP_WORDS=(orichum s)
 COMP_CWORD=1
 _orichum_complete
 contains_reply stack
 contains_reply status
+contains_reply setup
 
 COMP_WORDS=(orichum stack sh)
 COMP_CWORD=2

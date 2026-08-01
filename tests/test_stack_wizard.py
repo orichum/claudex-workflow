@@ -329,6 +329,19 @@ class StackWizardTests(unittest.TestCase):
             all(title.startswith("Step ") for title in io_adapter.titles)
         )
 
+    def test_setup_flow_can_default_project_assignment_to_yes(self) -> None:
+        wizard = StackWizard(
+            self.snapshot,
+            self.catalog,
+            self.accounts,
+            ScriptedIO(),
+            assignment_default=True,
+        )
+
+        self.assertTrue(
+            wizard._assignment_choice(Path("/work/project"), "balanced")
+        )
+
     def test_cancel_and_terminal_loss_return_no_mutation(self) -> None:
         for io_adapter in (
             ScriptedIO(cancel_at=2),

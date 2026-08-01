@@ -2668,7 +2668,9 @@ discovery_entrypoint=discover_models_main_core
 model_discovery_status=0
 if [[ "$routing_decision" != reused ]]; then
   model_discovery_performed=true
-  CLAUDEX_DEFER_MODEL_PRUNE=1 "$discovery_entrypoint" || \
+  CLAUDEX_DEFER_MODEL_PRUNE=1 \
+    ORICHUM_SUPPRESS_SETUP_INSTRUCTION=1 \
+    "$discovery_entrypoint" || \
     model_discovery_status=$?
 fi
 if [[ "$model_discovery_status" -ne 0 ]]; then
@@ -2677,8 +2679,6 @@ if [[ "$model_discovery_status" -ne 0 ]]; then
      [[ "$model_discovery_status" -eq \
         "$MODEL_DISCOVERY_LOGIN_INCOMPLETE" ]]; then
     printf 'NOTICE: persistent Orichum route proxy is pending-provider-login.\n' >&2
-    printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
-      "$SOURCE_ROOT" >&2
   elif [[ -n "$prior_model_generation" ]] && \
        [[ "$ports_changed" == false ]] && \
        [[ "$cliproxy_binary_changed" == false ]] && \
@@ -3035,8 +3035,7 @@ print_install_summary \
     fi
   )"
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
-  printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
-    "$SOURCE_ROOT"
+  printf 'Next: orichum setup\n'
 elif [[ "$INSTALL_MODE" == upgrade || \
         "$home_migration_performed" == true || \
         "$prior_install_state_verified" != true ]]; then

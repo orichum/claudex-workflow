@@ -1933,6 +1933,26 @@ if rg -Fq 'Next: orichum doctor' "$ROOT/install.sh"; then
   printf 'installer still delegates final health verification to the user\n' >&2
   exit 1
 fi
+rg -Fq 'Next: orichum setup' "$ROOT/install.sh"
+rg -Fq 'Next: orichum setup' "$ROOT/discover-models.sh"
+[[ "$(rg -c 'Next: orichum setup' "$ROOT/install.sh")" == 1 ]]
+rg -Fq 'ORICHUM_SUPPRESS_SETUP_INSTRUCTION' "$ROOT/discover-models.sh"
+rg -Fq 'ORICHUM_SUPPRESS_SETUP_INSTRUCTION=1' "$ROOT/install.sh"
+[[ -z "$(
+  ORICHUM_SUPPRESS_SETUP_INSTRUCTION=1 bash -c \
+    'source "$1"; print_model_discovery_instruction' \
+    _ "$ROOT/discover-models.sh" 2>&1
+)" ]]
+[[ "$(
+  ORICHUM_SUPPRESS_SETUP_INSTRUCTION=0 bash -c \
+    'source "$1"; print_model_discovery_instruction' \
+    _ "$ROOT/discover-models.sh" 2>&1
+)" == 'Next: orichum setup' ]]
+if rg -Fq 'Next: orichum provider login <provider>' \
+    "$ROOT/install.sh" "$ROOT/discover-models.sh"; then
+  printf 'first-run guidance still exposes low-level provider login\n' >&2
+  exit 1
+fi
 rg -Fq 'io.orichum.route-proxy' "$ROOT/lib/workflow.sh"
 if rg -Fq 'home=Path.home()' "$ROOT/install.sh"; then
   printf 'installer uses obsolete load_control_plane home argument\n' >&2

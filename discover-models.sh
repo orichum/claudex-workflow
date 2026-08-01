@@ -7,8 +7,9 @@ source "$WORKFLOW_ROOT/lib/workflow.sh"
 MODEL_DISCOVERY_LOGIN_INCOMPLETE=42
 
 print_model_discovery_instruction() {
-  printf 'Next: orichum provider login <provider>; %s/install.sh\n' \
-    "$WORKFLOW_ROOT" >&2
+  if [[ "${ORICHUM_SUPPRESS_SETUP_INSTRUCTION:-0}" != 1 ]]; then
+    printf 'Next: orichum setup\n' >&2
+  fi
 }
 
 discover_models_main_core() {
