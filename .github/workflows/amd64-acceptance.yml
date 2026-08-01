@@ -200,6 +200,24 @@ jobs:
             ' >/dev/null
           orichum doctor
 
+      - name: Verify guided setup and resumability
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf -v setup_command 'orichum setup %q' "$GITHUB_WORKSPACE"
+          script --quiet --return --command "$setup_command" \
+            "$RUNNER_TEMP/orichum-setup-first.log"
+          script --quiet --return --command "$setup_command" \
+            "$RUNNER_TEMP/orichum-setup-repeat.log"
+          jq -e '(.accounts | length) == 2' \
+            "$ORICHUM_CONFIG_HOME/accounts.json" >/dev/null
+          jq --arg root "$GITHUB_WORKSPACE" -e '
+            (.contexts | length) == 1 and
+            .contexts[0].root == $root and
+            .contexts[0].accountPools == ["shared"]
+          ' "$ORICHUM_CONFIG_HOME/projects.json" >/dev/null
+          orichum doctor
+
       - name: Verify LeanCTX code-intelligence contract
         shell: bash
         run: |

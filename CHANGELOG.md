@@ -4,6 +4,32 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.5 - 2026-08-01
+
+### Added
+
+- A resumable `orichum setup` wizard now combines provider authentication,
+  named-account registration, runtime reconciliation, project mapping, model
+  stack configuration, and the final health check.
+
+### Changed
+
+- GPT controller sessions now use a 400,000-token context ceiling and compact
+  at 60% utilization; non-GPT controllers retain their configured context and
+  compaction settings.
+- The mandatory pull-request and `main` contract now runs complete Python test
+  discovery instead of a hand-selected subset.
+- Native macOS ARM64 and Linux AMD64 acceptance now exercise guided setup twice
+  to verify project onboarding and resumability without duplicate state.
+
+### Fixed
+
+- Schema-bound audited workflows preserve successful sibling results and
+  return explicit degraded or failed status when a worker does not produce its
+  required structured result.
+- Provider setup reuses compatible unregistered authentication without
+  exposing private credential filenames or account identity data.
+
 ## 0.1.0-rc.4 - 2026-07-29
 
 ### Added
