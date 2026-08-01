@@ -714,6 +714,170 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn(session.url, logged)
         self.assertNotIn(session.state, logged)
 
+    def test_managed_provider_login_prints_url_when_browser_does_not_open(
+        self,
+    ) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+        endpoint = object()
+        session = SimpleNamespace(
+            url="https://auth.openai.com/oauth?state=secret-state",
+            state="secret-state",
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "load_management_endpoint",
+                return_value=endpoint,
+            ),
+            mock.patch.object(
+                orichum_cli, "start_oauth", return_value=session
+            ),
+            mock.patch.object(
+                orichum_cli, "oauth_status", side_effect=("wait", "ok")
+            ),
+            mock.patch.object(orichum_cli, "cancel_oauth") as cancel,
+            mock.patch.object(
+                orichum_cli.webbrowser, "open", return_value=False
+            ),
+            mock.patch.object(orichum_cli.time, "sleep"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = orichum_cli._managed_provider_login(
+                {"data": data},
+                "codex",
+                "OpenAI",
+                diagnostics,
+            )
+        diagnostics.close()
+
+        self.assertEqual(status, 0)
+        output = stdout.getvalue()
+        self.assertIn("  Browser did not open automatically.\n", output)
+        self.assertIn(f"    {session.url}\n", output)
+        self.assertLess(
+            output.index(session.url),
+            output.index("  Waiting for authentication…"),
+        )
+        cancel.assert_not_called()
+        logged = diagnostics.path.read_text(encoding="utf-8")
+        self.assertNotIn(session.url, logged)
+        self.assertNotIn(session.state, logged)
+
+    def test_managed_provider_login_recovers_from_browser_launcher_errors(
+        self,
+    ) -> None:
+        for browser_error in (
+            OSError("browser launcher unavailable"),
+            orichum_cli.webbrowser.Error("no runnable browser"),
+        ):
+            with self.subTest(browser_error=type(browser_error).__name__):
+                data = self.root / type(browser_error).__name__
+                data.mkdir(mode=0o700)
+                diagnostics = orichum_cli.SetupDiagnostics.create(
+                    {"data": data},
+                    verbose=False,
+                )
+                endpoint = object()
+                session = SimpleNamespace(
+                    url=(
+                        "https://auth.openai.com/oauth?"
+                        "state=secret-state"
+                    ),
+                    state="secret-state",
+                )
+                stdout = io.StringIO()
+                with (
+                    mock.patch.object(
+                        orichum_cli,
+                        "load_management_endpoint",
+                        return_value=endpoint,
+                    ),
+                    mock.patch.object(
+                        orichum_cli, "start_oauth", return_value=session
+                    ),
+                    mock.patch.object(
+                        orichum_cli,
+                        "oauth_status",
+                        side_effect=("wait", "ok"),
+                    ),
+                    mock.patch.object(
+                        orichum_cli, "cancel_oauth"
+                    ) as cancel,
+                    mock.patch.object(
+                        orichum_cli.webbrowser,
+                        "open",
+                        side_effect=browser_error,
+                    ),
+                    mock.patch.object(orichum_cli.time, "sleep"),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    status = orichum_cli._managed_provider_login(
+                        {"data": data},
+                        "codex",
+                        "OpenAI",
+                        diagnostics,
+                    )
+                diagnostics.close()
+
+                self.assertEqual(status, 0)
+                output = stdout.getvalue()
+                self.assertIn(session.url, output)
+                self.assertIn("  Waiting for authentication…", output)
+                cancel.assert_not_called()
+                logged = diagnostics.path.read_text(encoding="utf-8")
+                self.assertNotIn(session.url, logged)
+                self.assertNotIn(session.state, logged)
+
+    def test_managed_provider_login_cancels_when_browser_launch_is_cancelled(
+        self,
+    ) -> None:
+        data = self.root / "data"
+        data.mkdir(mode=0o700)
+        diagnostics = orichum_cli.SetupDiagnostics.create(
+            {"data": data},
+            verbose=False,
+        )
+        endpoint = object()
+        session = SimpleNamespace(
+            url="https://auth.openai.com/oauth?state=secret-state",
+            state="secret-state",
+        )
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "load_management_endpoint",
+                return_value=endpoint,
+            ),
+            mock.patch.object(
+                orichum_cli, "start_oauth", return_value=session
+            ),
+            mock.patch.object(orichum_cli, "cancel_oauth") as cancel,
+            mock.patch.object(
+                orichum_cli.webbrowser,
+                "open",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaisesRegex(orichum_cli.CliError, "setup cancelled"),
+        ):
+            orichum_cli._managed_provider_login(
+                {"data": data},
+                "codex",
+                "OpenAI",
+                diagnostics,
+            )
+        diagnostics.close()
+
+        cancel.assert_called_once_with(endpoint, session.state)
+        logged = diagnostics.path.read_text(encoding="utf-8")
+        self.assertNotIn(session.url, logged)
+        self.assertNotIn(session.state, logged)
+
     def test_managed_provider_login_cancels_failed_session(self) -> None:
         data = self.root / "data"
         data.mkdir(mode=0o700)
@@ -973,9 +1137,21 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(status, 2)
         output = stdout.getvalue()
         self.assertIn("Setup stopped while configuring Orichum.", output)
+        self.assertIn(
+            "Reason:\n"
+            "  setup stopped before a provider account was registered",
+            output,
+        )
         self.assertIn("  orichum setup", output)
-        self.assertIn("  orichum doctor", output)
-        self.assertNotIn("orichum doctor --verbose", output)
+        diagnostic_logs = tuple(
+            (paths["data"] / "logs").glob("setup-*.log")
+        )
+        self.assertEqual(len(diagnostic_logs), 1)
+        self.assertIn(
+            f"Diagnostics:\n  {diagnostic_logs[0]}",
+            output,
+        )
+        self.assertNotIn("  orichum doctor", output)
 
     def test_setup_reconciliation_uses_active_runtime_installer(self) -> None:
         runtime = self.root / "runtime"

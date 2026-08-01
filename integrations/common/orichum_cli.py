@@ -218,6 +218,9 @@ class SetupDiagnostics:
         self._handle.write(redacted)
         self._handle.flush()
 
+    def sensitive(self, value: str) -> None:
+        print(value, flush=True)
+
     def technical(self, value: str) -> None:
         if self._technical_truncated:
             return
@@ -1828,15 +1831,20 @@ def _managed_provider_login(
     session = start_oauth(endpoint, login_type)
     diagnostics.emit(f"{provider_label} authentication")
     diagnostics.emit("  Opening your browser…")
-    if not webbrowser.open(session.url, new=2):
+    try:
+        browser_opened = webbrowser.open(session.url, new=2)
+    except KeyboardInterrupt as error:
         try:
             cancel_oauth(endpoint, session.state)
         except ManagementError:
             pass
-        raise CliError(
-            "browser authentication could not be opened; run "
-            f"'orichum provider login {login_type}'"
-        )
+        raise CliError("setup cancelled") from error
+    except (OSError, webbrowser.Error):
+        browser_opened = False
+    if not browser_opened:
+        diagnostics.emit("  Browser did not open automatically.")
+        diagnostics.emit("  Open this URL:")
+        diagnostics.sensitive(f"    {session.url}")
     diagnostics.emit("  Waiting for authentication…")
     deadline = time.monotonic() + 30 * 60
     try:
@@ -2188,19 +2196,31 @@ def _setup(
         diagnostics = SetupDiagnostics.create(paths, verbose=verbose)
     except (CliError, OSError) as error:
         print("Setup stopped while preparing private diagnostics.")
-        if verbose:
-            print(f"  {_redact_diagnostics(str(error))}")
-        print("\nRun:\n  orichum setup\n\nDetails:\n  orichum doctor")
+        print(f"\nReason:\n  {_redact_diagnostics(str(error))}")
+        print("\nRun:\n  orichum setup")
         return 2
 
-    def stopped(action: str, status: int) -> int:
+    def stopped(
+        action: str,
+        status: int,
+        *,
+        reason: str | None = None,
+    ) -> int:
         diagnostics.emit(f"Setup stopped while {action}.")
+        diagnostics.emit("")
+        diagnostics.emit("Reason:")
+        diagnostics.emit(
+            "  "
+            + _redact_diagnostics(
+                reason or f"the setup step exited with status {status}"
+            )
+        )
         diagnostics.emit("")
         diagnostics.emit("Run:")
         diagnostics.emit("  orichum setup")
         diagnostics.emit("")
-        diagnostics.emit("Details:")
-        diagnostics.emit("  orichum doctor")
+        diagnostics.emit("Diagnostics:")
+        diagnostics.emit(f"  {diagnostics.path}")
         return status
 
     diagnostics.emit("Setting up Orichum…")
@@ -2320,7 +2340,7 @@ def _setup(
         StackStoreError,
     ) as error:
         diagnostics.technical(f"ERROR: {error}\n")
-        return stopped("configuring Orichum", 2)
+        return stopped("configuring Orichum", 2, reason=str(error))
     finally:
         diagnostics.close()
 

@@ -23,9 +23,7 @@ ORICHUM_COMPLETION_OPTIONAL_SHELL=
 install_cleanup() {
   local status="${1:-0}"
   if [[ "$INSTALL_OUTPUT_ACTIVE" == true && "$status" -ne 0 ]]; then
-    printf '\nInstallation stopped.\n\n' >&4
-    printf 'Run:\n  ./install.sh\n\n' >&4
-    printf 'Details:\n  ./install.sh --verbose\n' >&4
+    print_install_failure "$INSTALL_LOG_PATH" >&4
   fi
   workflow_cleanup "$status"
 }
@@ -420,6 +418,9 @@ else
   exec >>"$INSTALL_LOG_PATH" 2>&1
 fi
 INSTALL_OUTPUT_ACTIVE=true
+print_install_progress "$INSTALL_VERBOSE" 'Installing Orichum…' >&3
+print_install_progress \
+  "$INSTALL_VERBOSE" '  Checking existing installation…' >&3
 SERVICE_LABEL="io.orichum.cliproxy"
 runtime_transaction_active=false
 runtime_release=
@@ -957,10 +958,16 @@ if attempt_verified_fast_install; then
   prune_orichum_runtime \
     "$SOURCE_ROOT" "$ORICHUM_HOME_ROOT" "$runtime_release" || \
     printf 'WARNING: obsolete Orichum runtime releases could not be removed.\n' >&2
+  print_install_component_results \
+    reused reused reused reused reused reused reused \
+    "$ORICHUM_COMPLETION_OPTIONAL_SHELL" >&3
   print_install_outcome false "$ORICHUM_COMPLETION_OPTIONAL_SHELL" \
     "$INSTALL_LOG_PATH" >&3
   exit 0
 fi
+
+print_install_progress \
+  "$INSTALL_VERBOSE" '  Installing or updating components…' >&3
 
 if [[ "$controller_plugin_decision" != reused ]]; then
   validation_config="$(mktemp -d "${TMPDIR:-/tmp}/orichum-plugin.XXXXXX")"
@@ -2568,6 +2575,8 @@ require_activation_port_available() {
     "$service_name activation port $port remained occupied; prior state will be restored"
 }
 
+print_install_progress \
+  "$INSTALL_VERBOSE" '  Configuring services…' >&3
 write_service_ports "$WORKFLOW_DATA_ROOT" \
   "$CLIPROXY_PORT" "$CLAUDEX_PROXY_PORT" "$ROUTE_PROXY_LISTEN_PORT" \
   "$LEANCTX_PROXY_PORT" || \
@@ -2853,6 +2862,8 @@ activate_installed_control_plane \
 ORICHUM_CONFIG_ROOT="$INSTALLED_CONFIG_ROOT"
 ORICHUM_CONFIG_HOME="$ORICHUM_CONFIG_ROOT"
 export ORICHUM_CONFIG_HOME
+print_install_progress \
+  "$INSTALL_VERBOSE" '  Verifying installation…' >&3
 verify_committed_control_plane \
   "$ORICHUM_CONFIG_ROOT" "$WORKFLOW_DATA_ROOT" || \
   workflow_die "committed Orichum control plane is invalid"
@@ -3107,6 +3118,10 @@ provider_pending=false
 if [[ "$claudex_proxy_action" == pending-provider-login ]]; then
   provider_pending=true
 fi
+print_install_component_results \
+  "$python_decision" "$cliproxy_decision" "$claudex_decision" \
+  "$leanctx_decision" "$routing_action" "$controller_plugin_decision" \
+  "$completion_decision" "$ORICHUM_COMPLETION_OPTIONAL_SHELL" >&3
 print_install_outcome \
   "$provider_pending" "$ORICHUM_COMPLETION_OPTIONAL_SHELL" \
   "$INSTALL_LOG_PATH" >&3

@@ -66,6 +66,10 @@ print_install_outcome() {
   local provider_pending="$1"
   local optional_shell="$2"
   local log_path="$3"
+  case "$optional_shell" in
+    ''|bash|fish|zsh) ;;
+    *) return 2 ;;
+  esac
   case "$provider_pending" in
     true)
       printf 'Orichum is installed.\nNext: orichum setup\n'
@@ -75,11 +79,54 @@ print_install_outcome() {
       ;;
     *) return 2 ;;
   esac
-  if [[ -n "$optional_shell" ]]; then
-    printf '\nOptional next step\n'
-    printf '  Review %s completion setup: %s\n' \
-      "$optional_shell" "$log_path"
-  fi
+  printf 'Diagnostics: %s\n' "$log_path"
+}
+
+print_install_progress() {
+  (($# == 2)) || return 2
+  case "$1" in
+    false) printf '%s\n' "$2" ;;
+    true) ;;
+    *) return 2 ;;
+  esac
+}
+
+print_install_failure() {
+  (($# == 1)) || return 2
+  printf '\nInstallation stopped.\n\n'
+  printf 'Run:\n  ./install.sh\n\n'
+  printf 'Diagnostics:\n  %s\n\n' "$1"
+  printf 'Details:\n  ./install.sh --verbose\n'
+}
+
+print_install_component_results() {
+  (($# == 8)) || return 2
+  local optional_shell="${8}"
+  local index
+  local -a labels=(
+    Python CLIProxyAPI Claudex LeanCTX Routing 'Controller plugin' Completion
+  )
+  local -a actions=("${@:1:7}")
+  for index in "${!actions[@]}"; do
+    case "${actions[$index]}" in
+      reused|repaired|upgraded) ;;
+      *) return 2 ;;
+    esac
+  done
+  case "$optional_shell" in
+    ''|bash|fish|zsh) ;;
+    *) return 2 ;;
+  esac
+
+  printf '\nComponents\n'
+  for index in "${!labels[@]}"; do
+    if [[ "$index" -eq 6 && -n "$optional_shell" ]]; then
+      printf '  ⚠ %s completion not activated; existing profile left unchanged\n' \
+        "$optional_shell"
+    else
+      printf '  ✓ %s %s\n' "${labels[$index]}" "${actions[$index]}"
+    fi
+  done
 }
 
 component_state_matches() {

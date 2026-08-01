@@ -251,8 +251,26 @@ diagnostic_log="$(create_install_diagnostic_log "$diagnostic_root")"
 [[ "$(path_mode "$diagnostic_log")" == 600 ]]
 [[ "$(path_mode "$(dirname "$diagnostic_log")")" == 700 ]]
 
-[[ "$(print_install_outcome true '' /private/install.log)" == $'Orichum is installed.\nNext: orichum setup' ]]
-[[ "$(print_install_outcome false zsh /private/install.log)" == $'Orichum is ready.\n\nOptional next step\n  Review zsh completion setup: /private/install.log' ]]
+[[ "$(print_install_progress false 'Installing Orichum…')" == \
+  'Installing Orichum…' ]]
+[[ -z "$(print_install_progress true 'Installing Orichum…')" ]]
+[[ "$(print_install_failure /private/install.log)" == \
+  $'\nInstallation stopped.\n\nRun:\n  ./install.sh\n\nDiagnostics:\n  /private/install.log\n\nDetails:\n  ./install.sh --verbose' ]]
+install_results="$(
+  print_install_component_results \
+    reused upgraded repaired reused upgraded reused upgraded zsh
+)"
+rg -Fq 'Components' <<<"$install_results"
+rg -Fq '  ✓ Python reused' <<<"$install_results"
+rg -Fq '  ✓ CLIProxyAPI upgraded' <<<"$install_results"
+rg -Fq '  ✓ Claudex repaired' <<<"$install_results"
+rg -Fq \
+  '  ⚠ zsh completion not activated; existing profile left unchanged' \
+  <<<"$install_results"
+[[ "$(print_install_outcome true '' /private/install.log)" == \
+  $'Orichum is installed.\nNext: orichum setup\nDiagnostics: /private/install.log' ]]
+[[ "$(print_install_outcome false zsh /private/install.log)" == \
+  $'Orichum is ready.\nDiagnostics: /private/install.log' ]]
 
 workflow_cleanup_init
 mode_lock="$fixture/mode-lock"
