@@ -11,6 +11,7 @@ from pathlib import Path
 import secrets
 import shutil
 import stat
+import subprocess
 from typing import Iterable
 
 
@@ -33,6 +34,8 @@ RUNTIME_TREES = (
     "lib",
 )
 MANIFEST_NAME = "runtime-manifest.json"
+BUILD_IDENTITY_NAME = "build-identity.json"
+BUILD_IDENTITY_SCHEMA_VERSION = 1
 SCHEMA_VERSION = 1
 
 
@@ -150,6 +153,82 @@ def _set_private_directory_modes(root: Path) -> None:
                 )
 
 
+def _git_output(source_root: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ("git", "-C", str(source_root), *arguments),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).stdout.strip()
+
+
+def _source_identity(
+    source_root: Path,
+    relative_paths: tuple[Path, ...],
+) -> dict[str, object]:
+    try:
+        version = _safe_source_file(
+            source_root, Path("VERSION")
+        ).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as error:
+        raise RuntimeBundleError("runtime version is unavailable") from error
+    identity: dict[str, object] = {
+        "schemaVersion": BUILD_IDENTITY_SCHEMA_VERSION,
+        "version": version,
+        "sourceKind": "source",
+        "sourceCommit": None,
+        "dirty": False,
+        "exactTag": False,
+    }
+    try:
+        top_level = Path(
+            _git_output(source_root, "rev-parse", "--show-toplevel")
+        ).resolve(strict=True)
+        if top_level != source_root:
+            return identity
+        commit = _git_output(source_root, "rev-parse", "HEAD")
+        tracked_changes = _git_output(
+            source_root,
+            "diff",
+            "--name-only",
+            "HEAD",
+            "--",
+            *RUNTIME_FILES,
+            *RUNTIME_TREES,
+        )
+        status = _git_output(
+            source_root,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            *(path.as_posix() for path in relative_paths),
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return identity
+    expected_tag = f"v{version}"
+    try:
+        tag = _git_output(
+            source_root,
+            "describe",
+            "--tags",
+            "--exact-match",
+            "--match",
+            expected_tag,
+            "HEAD",
+        )
+    except (OSError, subprocess.SubprocessError):
+        tag = ""
+    identity.update({
+        "sourceKind": "git",
+        "sourceCommit": commit,
+        "dirty": bool(tracked_changes or status),
+        "exactTag": tag == expected_tag,
+    })
+    return identity
+
+
 def build(source_root: Path, staging_root: Path) -> Path:
     """Copy the declared runtime payload into a content-addressed staging tree."""
     source_root = source_root.resolve(strict=True)
@@ -174,8 +253,16 @@ def build(source_root: Path, staging_root: Path) -> Path:
             with source.open("rb") as reader, destination.open("xb") as writer:
                 shutil.copyfileobj(reader, writer, 1024 * 1024)
             destination.chmod(mode)
+        identity_path = candidate / BUILD_IDENTITY_NAME
+        identity_path.write_bytes(
+            _canonical(_source_identity(source_root, relative_paths))
+        )
+        identity_path.chmod(0o644)
         _set_private_directory_modes(candidate)
-        entries = _entries(candidate, relative_paths)
+        entries = _entries(
+            candidate,
+            (*relative_paths, Path(BUILD_IDENTITY_NAME)),
+        )
         digest = hashlib.sha256(_canonical(entries)).hexdigest()
         manifest = {
             "schemaVersion": SCHEMA_VERSION,

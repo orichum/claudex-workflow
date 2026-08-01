@@ -20,6 +20,11 @@ Installer modes are separate from the `orichum` command:
 # Also permanently remove Orichum's saved configuration and private data.
 ```
 
+`orichum --version` prints a plain version only for an exact clean release tag.
+Development builds add `+g.COMMIT`; `.dirty` means a declared runtime payload
+file differed from that commit. Builds without Git metadata add
+`+src.DIGEST`, using the content-addressed runtime digest.
+
 | Command | Purpose |
 |---|---|
 | `orichum --version` | Print the installed Orichum release identity |

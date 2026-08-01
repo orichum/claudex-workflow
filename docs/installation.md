@@ -153,6 +153,11 @@ atomically only after the release validates. Services and the launcher bind to
 the physical release, so later checkout edits cannot change a running install.
 After a successful reconciliation, obsolete releases are removed.
 
+Run `orichum --version` to inspect provenance. A plain version identifies an
+exact clean release tag. `+g.COMMIT` identifies a Git development build,
+`.dirty` marks changes within the declared runtime payload, and `+src.DIGEST`
+identifies a build made without Git metadata.
+
 The only normal paths outside `ORICHUM_HOME` are:
 
 - `~/.local/bin/orichum`, a launcher symlink;

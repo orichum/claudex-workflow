@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -29,6 +30,45 @@ class RuntimeBundleTests(unittest.TestCase):
         self.home = self.root / "home"
         self.stage = self.root / "stage"
 
+    def copy_source(self, name: str) -> Path:
+        source = self.root / name
+        shutil.copytree(
+            REPOSITORY_ROOT,
+            source,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                ".worktrees",
+                "__pycache__",
+                "*.pyc",
+            ),
+        )
+        return source
+
+    def git(self, source: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ("git", "-C", str(source), *arguments),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+
+    def git_source(self) -> tuple[Path, str]:
+        source = self.copy_source("git-source")
+        self.git(source, "init", "--quiet")
+        self.git(source, "config", "user.name", "Orichum Tests")
+        self.git(source, "config", "user.email", "tests@orichum.invalid")
+        self.git(source, "add", "--all")
+        self.git(source, "commit", "--quiet", "-m", "baseline")
+        return source, self.git(source, "rev-parse", "HEAD")
+
+    @staticmethod
+    def build_identity(release: Path) -> dict[str, object]:
+        return json.loads(
+            (release / "build-identity.json").read_text(encoding="utf-8")
+        )
+
     def test_build_copies_only_the_runtime_allowlist(self) -> None:
         release = build(REPOSITORY_ROOT, self.stage)
 
@@ -41,6 +81,7 @@ class RuntimeBundleTests(unittest.TestCase):
         )
         self.assertTrue((release / "controller" / "settings.json").is_file())
         self.assertTrue((release / "config" / "runtime.json").is_file())
+        self.assertTrue((release / "build-identity.json").is_file())
         self.assertTrue((release / "runtime-manifest.json").is_file())
         self.assertFalse((release / "README.md").exists())
         self.assertFalse((release / "docs").exists())
@@ -49,6 +90,78 @@ class RuntimeBundleTests(unittest.TestCase):
         self.assertFalse(any(release.rglob("__pycache__")))
         self.assertFalse(any(release.rglob("*.pyc")))
         validate(release)
+
+    def test_build_records_clean_git_source_identity(self) -> None:
+        source, commit = self.git_source()
+
+        identity = self.build_identity(build(source, self.stage))
+
+        self.assertEqual(
+            identity,
+            {
+                "schemaVersion": 1,
+                "version": "0.1.0-rc.5",
+                "sourceKind": "git",
+                "sourceCommit": commit,
+                "dirty": False,
+                "exactTag": False,
+            },
+        )
+
+    def test_build_records_exact_matching_release_tag(self) -> None:
+        source, commit = self.git_source()
+        self.git(source, "tag", "v0.1.0-rc.5")
+
+        identity = self.build_identity(build(source, self.stage))
+
+        self.assertEqual(identity["sourceCommit"], commit)
+        self.assertTrue(identity["exactTag"])
+        self.assertFalse(identity["dirty"])
+
+    def test_build_marks_declared_payload_changes_dirty(self) -> None:
+        source, _ = self.git_source()
+        runtime_config = source / "config" / "runtime.json"
+        runtime_config.write_bytes(runtime_config.read_bytes() + b"\n")
+
+        identity = self.build_identity(build(source, self.stage))
+
+        self.assertTrue(identity["dirty"])
+        self.assertFalse(identity["exactTag"])
+
+    def test_build_marks_deleted_payload_file_dirty(self) -> None:
+        source, _ = self.git_source()
+        (source / "controller" / "plugin" / "agents" /
+         "repository-explorer.md").unlink()
+
+        identity = self.build_identity(build(source, self.stage))
+
+        self.assertTrue(identity["dirty"])
+
+    def test_build_ignores_unrelated_dirty_files(self) -> None:
+        source, _ = self.git_source()
+        readme = source / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"\nlocal note\n")
+
+        identity = self.build_identity(build(source, self.stage))
+
+        self.assertFalse(identity["dirty"])
+
+    def test_build_uses_source_identity_without_git_metadata(self) -> None:
+        source = self.copy_source("source-without-git")
+
+        identity = self.build_identity(build(source, self.stage))
+
+        self.assertEqual(
+            identity,
+            {
+                "schemaVersion": 1,
+                "version": "0.1.0-rc.5",
+                "sourceKind": "source",
+                "sourceCommit": None,
+                "dirty": False,
+                "exactTag": False,
+            },
+        )
 
     def test_build_is_content_addressed_and_reproducible(self) -> None:
         first = build(REPOSITORY_ROOT, self.stage / "first")
