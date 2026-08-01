@@ -1601,10 +1601,18 @@ def build_recommended_stack(
     raw_stacks = document["stacks"]
     if not isinstance(raw_models, dict) or not isinstance(raw_stacks, dict):
         raise RoutingError("model stack configuration is invalid")
+    default_is_live = _stack_is_live_compatible(
+        snapshot,
+        catalog,
+        snapshot.stacks.default_stack,
+    )
     existing = snapshot.stacks.stacks.get(stack_name)
     if existing is not None:
         if _stack_is_live_compatible(snapshot, catalog, stack_name):
-            return snapshot.stacks
+            if default_is_live:
+                return snapshot.stacks
+            document["defaultStack"] = stack_name
+            return normalize_model_stacks(document)
         raise RoutingError(
             f"stack {stack_name} already exists with another definition"
         )
@@ -1643,6 +1651,8 @@ def build_recommended_stack(
             for role in ROLES
         },
     }
+    if not default_is_live:
+        document["defaultStack"] = stack_name
     updated = normalize_model_stacks(document)
     return updated
 
