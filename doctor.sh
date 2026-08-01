@@ -71,7 +71,7 @@ if "$WORKFLOW_ROOT/bin/orichum-runtime-ready" "$data_root" \
     >/dev/null 2>&1; then
   ok 'CLIProxyAPI, LeanCTX proxy, and route proxy are owned and ready'
 elif [[ "$provider_login_pending" == true ]]; then
-  fail 'provider login is pending; register an account, then re-run install.sh'
+  fail 'provider setup is pending; run orichum setup'
 else
   fail 'one or more Orichum services are absent, foreign, or unhealthy'
 fi

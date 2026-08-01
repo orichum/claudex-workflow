@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 from integrations.common import orichum_cli
+from integrations.common import project_context
 from integrations.common import stack_bindings
 from integrations.common.leanctx_monitor import (
     LeanctxGainSummary,
@@ -172,6 +173,7 @@ class OrichumCliTests(unittest.TestCase):
     def test_help_explains_top_level_commands(self) -> None:
         help_text = orichum_cli.build_parser().format_help().casefold()
 
+        self.assertIn("complete first-run setup", help_text)
         self.assertIn("start a project-aware session", help_text)
         self.assertIn("manage provider accounts", help_text)
         self.assertIn("inspect and monitor leanctx", help_text)
@@ -454,6 +456,387 @@ class OrichumCliTests(unittest.TestCase):
         )
         run.assert_not_called()
 
+    def test_setup_rejects_non_tty_before_mutation(self) -> None:
+        with mock.patch.object(
+            orichum_cli, "_run_external", return_value=0
+        ) as run:
+            status, stdout, stderr = self.run_cli("setup")
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout, "")
+        self.assertEqual(
+            stderr,
+            "ERROR: setup requires an interactive terminal\n",
+        )
+        run.assert_not_called()
+
+    def test_setup_runs_only_missing_phases_and_verifies_project(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+            "state": self.root / "state",
+        }
+        config = SimpleNamespace(documents={"projects": {"contexts": []}})
+        refreshed = SimpleNamespace(
+            documents={"projects": {"contexts": [{"root": str(project)}]}}
+        )
+
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "_active_provider_accounts",
+                side_effect=(
+                    (),
+                    (
+                        SimpleNamespace(
+                            name="Work Claude",
+                            pool="xebia",
+                            priority=100,
+                        ),
+                    ),
+                ),
+            ),
+            mock.patch.object(
+                orichum_cli, "_provider_configure", return_value=0
+            ) as provider,
+            mock.patch.object(
+                orichum_cli, "_runtime_ready", return_value=False
+            ),
+            mock.patch.object(
+                orichum_cli, "_reconcile_runtime", return_value=0
+            ) as reconcile,
+            mock.patch.object(
+                orichum_cli, "_load", return_value=(paths, refreshed)
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_project_context_mapped",
+                side_effect=(False, True),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_setup_project_ready",
+                side_effect=(False, True),
+            ) as ready,
+            mock.patch.object(
+                orichum_cli, "run_stack_wizard", return_value=0
+            ) as wizard,
+            mock.patch.object(
+                orichum_cli, "_run_external", return_value=0
+            ) as external,
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                status = orichum_cli._setup(paths, config, str(project))
+
+        self.assertEqual(status, 0)
+        provider.assert_called_once_with(paths, config)
+        reconcile.assert_called_once_with()
+        external.assert_has_calls(
+            (
+                mock.call(
+                    "orichum-context",
+                    ["add", str(project), "--pool", "xebia"],
+                ),
+                mock.call("orichum-doctor", []),
+            )
+        )
+        wizard.assert_called_once_with(
+            paths,
+            refreshed,
+            launch_dir=project,
+            assignment_default=True,
+        )
+        self.assertEqual(ready.call_count, 2)
+        self.assertIn(f"Orichum is ready for {project}.", stdout.getvalue())
+        self.assertIn(f"cd {project}", stdout.getvalue())
+        self.assertIn("orichum", stdout.getvalue())
+
+    def test_setup_reuses_completed_account_runtime_context_and_stack(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+            "state": self.root / "state",
+        }
+        config = SimpleNamespace(
+            documents={"projects": {"contexts": [{"root": str(project)}]}}
+        )
+
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "_active_provider_accounts",
+                return_value=(SimpleNamespace(name="Personal GPT"),),
+            ),
+            mock.patch.object(
+                orichum_cli, "_provider_configure", return_value=0
+            ) as provider,
+            mock.patch.object(
+                orichum_cli, "_runtime_ready", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli, "_reconcile_runtime", return_value=0
+            ) as reconcile,
+            mock.patch.object(
+                orichum_cli, "_project_context_mapped", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli, "_setup_project_ready", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli, "run_stack_wizard", return_value=0
+            ) as wizard,
+            mock.patch.object(
+                orichum_cli, "_run_external", return_value=0
+            ) as external,
+        ):
+            status = orichum_cli._setup(paths, config, str(project))
+
+        self.assertEqual(status, 0)
+        provider.assert_not_called()
+        reconcile.assert_not_called()
+        wizard.assert_not_called()
+        external.assert_called_once_with("orichum-doctor", [])
+
+    def test_setup_stops_when_provider_configuration_is_cancelled(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+            "state": self.root / "state",
+        }
+        config = SimpleNamespace(documents={"projects": {"contexts": []}})
+
+        with (
+            mock.patch.object(
+                orichum_cli, "_active_provider_accounts", return_value=()
+            ),
+            mock.patch.object(
+                orichum_cli, "_provider_configure", return_value=7
+            ),
+            mock.patch.object(
+                orichum_cli, "_reconcile_runtime", return_value=0
+            ) as reconcile,
+            mock.patch.object(
+                orichum_cli, "_run_external", return_value=0
+            ) as external,
+        ):
+            status = orichum_cli._setup(paths, config, str(project))
+
+        self.assertEqual(status, 7)
+        reconcile.assert_not_called()
+        external.assert_not_called()
+
+    def test_setup_rejects_successful_provider_wizard_without_account(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+            "state": self.root / "state",
+        }
+        config = SimpleNamespace(documents={"projects": {"contexts": []}})
+
+        with (
+            mock.patch.object(
+                orichum_cli, "_active_provider_accounts", return_value=()
+            ),
+            mock.patch.object(
+                orichum_cli, "_provider_configure", return_value=0
+            ),
+            mock.patch.object(
+                orichum_cli, "_load", return_value=(paths, config)
+            ),
+            self.assertRaisesRegex(
+                orichum_cli.CliError,
+                "setup stopped before a provider account was registered",
+            ),
+        ):
+            orichum_cli._setup(paths, config, str(project))
+
+    def test_setup_reconciliation_uses_active_runtime_installer(self) -> None:
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        installer = runtime / "install.sh"
+        installer.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        installer.chmod(0o700)
+        completed = SimpleNamespace(returncode=0)
+
+        with (
+            mock.patch.object(orichum_cli, "WORKFLOW_ROOT", runtime),
+            mock.patch.object(
+                orichum_cli.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            status = orichum_cli._reconcile_runtime()
+
+        self.assertEqual(status, 0)
+        run.assert_called_once_with(
+            [str(installer)],
+            cwd=str(runtime),
+            check=False,
+        )
+
+    def test_setup_persists_and_reuses_completed_phases(self) -> None:
+        config_home, obsolete = self.provision_account_runtime()
+        obsolete.unlink()
+        project = self.root / "project"
+        project.mkdir()
+        model_path = config_home / "model-stacks.json"
+        model_document = json.loads(model_path.read_text(encoding="utf-8"))
+        model = "gpt-5.6-sol"
+        model_document["defaultStack"] = "setup"
+        model_document["stacks"] = {
+            "setup": {
+                "controller": [
+                    {
+                        "id": "oc-c-0000000000000001",
+                        "model": model,
+                        "providers": ["openai"],
+                    }
+                ],
+                "agents": {
+                    role: [
+                        {
+                            "id": f"oc-c-{index:016x}",
+                            "model": model,
+                            "providers": ["openai"],
+                        }
+                    ]
+                    for index, role in enumerate(
+                        orichum_cli.ROLES, start=2
+                    )
+                },
+            }
+        }
+        model_path.write_text(
+            json.dumps(model_document), encoding="utf-8"
+        )
+        model_path.chmod(0o600)
+        data_home = Path(self.environment["ORICHUM_DATA_HOME"])
+        credential = data_home / "auth" / "codex-work.json"
+        runtime = {"ready": False}
+        calls: list[tuple[str, tuple[str, ...]]] = []
+
+        def external(
+            name: str,
+            arguments: list[str],
+            *,
+            environment: dict[str, str] | None = None,
+        ) -> int:
+            del environment
+            calls.append((name, tuple(arguments)))
+            if name == "orichum-login":
+                credential.write_text(
+                    json.dumps(
+                        {
+                            "type": "codex",
+                            "email": "private@example.com",
+                            "access_token": "DO-NOT-PRINT",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                credential.chmod(0o600)
+                return 0
+            if name == "orichum-context":
+                return project_context.context_main(
+                    [
+                        "--config",
+                        str(config_home / "projects.json"),
+                        "--routing-config",
+                        str(model_path),
+                        "--providers-config",
+                        str(config_home / "providers.json"),
+                        *arguments,
+                    ]
+                )
+            if name == "orichum-doctor":
+                return 0
+            raise AssertionError(f"unexpected external command: {name}")
+
+        def reconcile() -> int:
+            runtime["ready"] = True
+            return 0
+
+        def live_models(_paths: dict[str, Path]) -> frozenset[str]:
+            accounts = json.loads(
+                (config_home / "accounts.json").read_text(encoding="utf-8")
+            )["accounts"]
+            return frozenset(
+                f"{account['routingPrefix']}/{model}"
+                for account in accounts
+            )
+
+        with (
+            mock.patch.object(
+                orichum_cli, "_interactive_terminal", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_runtime_ready",
+                side_effect=lambda _paths: runtime["ready"],
+            ),
+            mock.patch.object(
+                orichum_cli, "_reconcile_runtime", side_effect=reconcile
+            ) as reconcile_call,
+            mock.patch.object(orichum_cli, "_verify_runtime"),
+            mock.patch.object(
+                orichum_cli,
+                "_live_models",
+                side_effect=live_models,
+            ),
+            mock.patch.object(
+                orichum_cli, "_run_external", side_effect=external
+            ),
+            mock.patch.object(
+                orichum_cli, "run_stack_wizard", return_value=0
+            ) as wizard,
+            mock.patch(
+                "builtins.input",
+                side_effect=("4", "Work GPT", "1", "", ""),
+            ),
+        ):
+            first = self.run_cli("setup", str(project))
+            second = self.run_cli("setup", str(project))
+
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(second[0], 0, second[2])
+        reconcile_call.assert_called_once_with()
+        wizard.assert_not_called()
+        self.assertEqual(
+            [name for name, _arguments in calls],
+            [
+                "orichum-login",
+                "orichum-context",
+                "orichum-doctor",
+                "orichum-doctor",
+            ],
+        )
+        accounts = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )["accounts"]
+        contexts = json.loads(
+            (config_home / "projects.json").read_text(encoding="utf-8")
+        )["contexts"]
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["pool"], "xebia")
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["accountPools"], ["xebia"])
+        combined_output = first[1] + second[1]
+        self.assertNotIn(credential.name, combined_output)
+        self.assertNotIn("private@example.com", combined_output)
+        self.assertNotIn("DO-NOT-PRINT", combined_output)
+
     def test_external_diagnostics_use_argv_runner_without_shell(self) -> None:
         with mock.patch.object(orichum_cli, "_run_external", return_value=8) as run:
             status, _, _ = self.run_cli("doctor")
@@ -712,7 +1095,64 @@ class OrichumCliTests(unittest.TestCase):
         self.assertEqual(account["state"], "active")
         self.assertIn("Provider account ready: Work Claude", stdout)
         self.assertNotIn(credential.name, stdout)
+        self.assertNotIn("work@example.com", stdout)
         self.assertNotIn("DO-NOT-PRINT", stdout)
+
+    def test_provider_configure_reuses_prior_unregistered_login(self) -> None:
+        config_home, credential = self.provision_account_runtime()
+
+        with (
+            mock.patch.object(
+                orichum_cli, "_interactive_terminal", return_value=True
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "_run_external",
+                return_value=99,
+            ) as run,
+            mock.patch(
+                "builtins.input",
+                side_effect=("", "", "Work Claude", "", "", ""),
+            ),
+        ):
+            status, stdout, stderr = self.run_cli(
+                "provider", "configure"
+            )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stderr, "")
+        run.assert_not_called()
+        document = json.loads(
+            (config_home / "accounts.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(document["accounts"]), 1)
+        account = document["accounts"][0]
+        self.assertEqual(account["name"], "Work Claude")
+        self.assertEqual(account["provider"], "anthropic")
+        self.assertEqual(account["credentialRef"], credential.name)
+        self.assertIn("Provider account ready: Work Claude", stdout)
+        self.assertNotIn(credential.name, stdout)
+        self.assertNotIn("work@example.com", stdout)
+        self.assertNotIn("DO-NOT-PRINT", stdout)
+
+    def test_provider_configuration_handles_terminal_interrupt_cleanly(
+        self,
+    ) -> None:
+        self.provision_account_runtime()
+
+        with (
+            mock.patch.object(
+                orichum_cli, "_interactive_terminal", return_value=True
+            ),
+            mock.patch("builtins.input", side_effect=KeyboardInterrupt),
+        ):
+            status, stdout, stderr = self.run_cli(
+                "provider", "configure"
+            )
+
+        self.assertEqual(status, 2)
+        self.assertTrue(stdout.startswith("Choose a provider:\n"))
+        self.assertEqual(stderr, "ERROR: setup cancelled\n")
 
     def test_account_remove_rejects_stack_candidate_binding(self) -> None:
         config_home, credential = self.provision_account_runtime()

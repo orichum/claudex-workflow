@@ -44,10 +44,18 @@ cd orichum
 ./install.sh
 ```
 
-The first install performs the complete setup. When a provider route is
-available, it also finishes with the full health check. Without one, it
-completes in `pending-provider-login` state and prints the next login command.
-Orichum installs its runtime and all user-managed state under `~/.orichum`;
+The installer prepares the complete local runtime. Without a provider account,
+it completes safely in `pending-provider-login` state and prints one next
+command:
+
+```bash
+orichum setup
+```
+
+That resumable wizard combines provider authentication, named-account
+registration, model and service reconciliation, stack configuration, project
+mapping, and the final health check. Orichum installs its runtime and all
+user-managed state under `~/.orichum`;
 the checkout remains source code only, so editing configuration never dirties
 the repository and moving the checkout does not break the installed command.
 Later `./install.sh` runs quickly when everything is already verified and
@@ -73,89 +81,20 @@ remove Orichum's saved configuration and data.
 
 ## Your first Orichum session
 
-This walkthrough creates the smallest useful setup: one provider, one named
-account, one model stack, and one project.
-
-### 1. Connect one provider account
-
-Start the provider wizard:
+Run the guided setup after installation. Pass a project or parent directory,
+or omit it and confirm the directory in the prompt:
 
 ```bash
-orichum provider configure
+orichum setup ~/projects
 ```
 
-Choose the provider, complete its CLIProxyAPI login, then name the account and
-select its pool and priority. Orichum detects the new private credential and
-registers it without asking you to find or copy a credential filename.
+The wizard asks only for user choices. It hides credential filenames and the
+internal distinction between the Codex login type and the OpenAI provider
+adapter. If setup is interrupted, run the same command again; completed
+account, runtime, project, and usable-stack phases are reused.
 
-Confirm that the account is active:
-
-```bash
-orichum provider accounts
-```
-
-See [Providers and accounts](docs/providers-and-accounts.md) for other
-providers and account-management commands.
-
-### 2. Create a model stack
-
-A stack assigns live models to the main controller and optional specialist
-roles. Start the interactive wizard:
-
-```bash
-orichum stack configure
-```
-
-The wizard lists the models currently available through your registered
-accounts. Choose a controller model, accept or change the specialist choices,
-review the result, and save the stack.
-
-Inspect saved stacks with:
-
-```bash
-orichum stack list
-orichum stack show STACK
-```
-
-See [Model stacks](docs/model-stacks.md) for provider locks, account policies,
-and role behavior.
-
-### 3. Add a project
-
-A context tells Orichum which settings belong to a parent directory and every
-repository below it. This example adds `~/projects` using the shared account
-pool:
-
-```bash
-orichum context add ~/projects --pool shared
-```
-
-This saves the directory mapping immediately. LeanCTX builds source,
-relationship, and project-knowledge context only when the session needs it;
-there is no mining or population step.
-
-Jira is optional. Configure it only for a project that needs Atlassian:
-
-```bash
-orichum context jira ~/projects
-```
-
-The command stores the Jira URL, username, and token directly on that private
-project entry. New sessions below the root receive a dedicated
-`mcp-atlassian` process; projects without a binding load no Atlassian tools.
-
-Check the configured directory mappings:
-
-```bash
-orichum context list
-```
-
-See [Project contexts](docs/project-contexts.md) for GitHub identities,
-multiple parent directories, repository discovery, and context maintenance.
-
-### 4. Start Orichum
-
-Enter a repository below the configured parent and launch:
+When setup reports readiness, enter a repository below the configured parent
+and launch:
 
 ```bash
 cd ~/projects/my-app
@@ -176,6 +115,12 @@ If launch fails, start with:
 ```bash
 orichum doctor
 ```
+
+Use `orichum provider configure`, `orichum stack configure`, and
+`orichum context add` later when you deliberately want additional accounts,
+stacks, or project mappings. See [Providers and accounts](docs/providers-and-accounts.md),
+[Model stacks](docs/model-stacks.md), and
+[Project contexts](docs/project-contexts.md) for those advanced workflows.
 
 ## Daily use
 

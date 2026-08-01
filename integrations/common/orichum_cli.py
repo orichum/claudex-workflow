@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -893,9 +894,7 @@ def _verify_runtime(paths: Mapping[str, Path]) -> None:
             accounts = ()
         if not accounts:
             raise CliError(
-                "no provider account is registered; run "
-                "orichum provider login <provider>, add the named account, "
-                "then re-run install.sh"
+                "no provider account is registered; run orichum setup"
             )
         raise CliError("Orichum services are not owned and ready; run install.sh")
 
@@ -1547,7 +1546,7 @@ def _prompt_choice(
         suffix = " [default]" if index - 1 == default else ""
         print(f"  {index}. {label}{suffix}")
     while True:
-        raw = input(f"Select [{default + 1}]: ").strip()
+        raw = _prompt_input(f"Select [{default + 1}]: ").strip()
         if not raw:
             return choices[default][1]
         if raw.isdigit() and 1 <= int(raw) <= len(choices):
@@ -1556,18 +1555,27 @@ def _prompt_choice(
 
 
 def _prompt_text(label: str, default: str) -> str:
-    raw = input(f"{label} [{default}]: ").strip()
+    raw = _prompt_input(f"{label} [{default}]: ").strip()
     return raw or default
 
 
 def _prompt_confirm() -> bool:
     while True:
-        raw = input("Register this account? [Y/n]: ").strip().lower()
+        raw = _prompt_input(
+            "Register this account? [Y/n]: "
+        ).strip().lower()
         if raw in {"", "y", "yes"}:
             return True
         if raw in {"n", "no"}:
             return False
         print("Enter y or n.")
+
+
+def _prompt_input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt) as error:
+        raise CliError("setup cancelled") from error
 
 
 def _provider_configure(
@@ -1590,17 +1598,48 @@ def _provider_configure(
         list_credentials(auth_dir) if auth_dir.exists() else ()
     )
     before_refs = {credential.path.name for credential in before_credentials}
-    login_status = _run_external(
-        "orichum-login",
-        [provider["authType"]],
-        environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
-    )
-    if login_status != 0:
-        return login_status
-
     registry = paths["config"] / "accounts.json"
     accounts = load_accounts(registry)
     assigned = {account.credential_ref for account in accounts}
+    existing = tuple(
+        credential
+        for credential in before_credentials
+        if (
+            credential.provider == provider["authType"]
+            and not credential.disabled
+            and credential.path.name not in assigned
+        )
+    )
+    credential = None
+    if existing:
+        selected_ref = _prompt_choice(
+            "Use an existing authentication or sign in again:",
+            (
+                *(
+                    (
+                        f"Existing {provider_name.title()} authentication "
+                        f"{index}",
+                        item.path.name,
+                    )
+                    for index, item in enumerate(existing, start=1)
+                ),
+                ("Authenticate another account", "__login__"),
+            ),
+        )
+        if selected_ref != "__login__":
+            credential = next(
+                item for item in existing if item.path.name == selected_ref
+            )
+
+    if credential is None:
+        login_status = _run_external(
+            "orichum-login",
+            [provider["authType"]],
+            environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
+        )
+        if login_status != 0:
+            return login_status
+
     compatible = tuple(
         credential
         for credential in list_credentials(auth_dir)
@@ -1610,7 +1649,7 @@ def _provider_configure(
             and credential.path.name not in assigned
         )
     )
-    if not compatible:
+    if credential is None and not compatible:
         registered = tuple(
             account.name
             for account in accounts
@@ -1629,29 +1668,30 @@ def _provider_configure(
             "authentication completed, but no unregistered compatible "
             "credential was found; inspect 'orichum provider accounts'"
         )
-    new_credentials = tuple(
-        credential
-        for credential in compatible
-        if credential.path.name not in before_refs
-    )
-    if len(new_credentials) == 1:
-        credential = new_credentials[0]
-    else:
-        selected_ref = _prompt_choice(
-            "Choose the authenticated account:",
-            tuple(
-                (item.account, item.path.name)
-                for item in compatible
-            ),
+    if credential is None:
+        new_credentials = tuple(
+            item
+            for item in compatible
+            if item.path.name not in before_refs
         )
-        credential = next(
-            item for item in compatible if item.path.name == selected_ref
-        )
-    default_name = (
-        credential.account
-        if credential.account != "hidden"
-        else f"{provider_name.title()} account"
-    )
+        if len(new_credentials) == 1:
+            credential = new_credentials[0]
+        else:
+            selected_ref = _prompt_choice(
+                "Choose the authenticated account:",
+                tuple(
+                    (
+                        f"Authenticated {provider_name.title()} account "
+                        f"{index}",
+                        item.path.name,
+                    )
+                    for index, item in enumerate(compatible, start=1)
+                ),
+            )
+            credential = next(
+                item for item in compatible if item.path.name == selected_ref
+            )
+    default_name = f"{provider_name.title()} account"
     name = _prompt_text("Account name", default_name)
     pools = tuple(
         pool_name
@@ -1695,6 +1735,174 @@ def _provider_configure(
         config,
     )
     print(f"Provider account ready: {name}")
+    return 0
+
+
+def _active_provider_accounts(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+) -> tuple[Account, ...]:
+    accounts = load_accounts(paths["config"] / "accounts.json")
+    validate_account_bindings(accounts, config.documents["providers"])
+    return tuple(account for account in accounts if account.state == "active")
+
+
+def _runtime_ready(paths: Mapping[str, Path]) -> bool:
+    try:
+        _verify_runtime(paths)
+    except CliError:
+        return False
+    return True
+
+
+def _reconcile_runtime() -> int:
+    installer = WORKFLOW_ROOT / "install.sh"
+    if not installer.is_file() or installer.is_symlink():
+        raise CliError("active runtime installer is unavailable")
+    completed = subprocess.run(
+        [str(installer)],
+        cwd=str(WORKFLOW_ROOT),
+        check=False,
+    )
+    return completed.returncode
+
+
+def _setup_project_path(requested: str | None) -> Path:
+    raw = requested or _prompt_text("Project root", str(Path.cwd()))
+    try:
+        project = Path(raw).expanduser().resolve(strict=True)
+    except OSError as error:
+        raise CliError("project root is unavailable") from error
+    if not project.is_dir():
+        raise CliError("project root must be a directory")
+    return project
+
+
+def _project_context_mapped(config: ResolvedConfig, project: Path) -> bool:
+    resolved = resolve_control_plane_context(
+        config.documents["projects"], project
+    )
+    return isinstance(resolved.get("route"), dict)
+
+
+def _setup_project_ready(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    project: Path,
+) -> bool:
+    try:
+        _verify_runtime(paths)
+        context = resolve_control_plane_context(
+            config.documents["projects"], project
+        )
+        route = context.get("route")
+        if not isinstance(route, dict):
+            return False
+        accounts = load_accounts(paths["config"] / "accounts.json")
+        validate_account_bindings(accounts, config.documents["providers"])
+        available = _live_models(paths)
+        plan = resolve_session_plan(
+            config.documents,
+            accounts,
+            pools=tuple(route["accountPools"]),
+            requested_stack=route["modelStack"],
+            health={},
+            selection_ordinal=0,
+            bindings=load_stack_bindings(
+                paths["config"] / "stack-bindings.json"
+            ),
+            available_models=available,
+        )
+        _validate_plan_routes(
+            controller=plan.controller,
+            agents=plan.agents,
+            accounts=accounts,
+            auth_dir=paths["data"] / "auth",
+            provider_document=config.documents["providers"],
+        )
+        _validate_live_models(
+            paths, plan.controller, plan.agents, available=available
+        )
+    except (
+        AccountError,
+        CliError,
+        CredentialError,
+        LogicalSessionError,
+        RouteError,
+        StackBindingError,
+    ):
+        return False
+    return True
+
+
+def _setup(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    requested_project: str | None,
+) -> int:
+    active_accounts = _active_provider_accounts(paths, config)
+    if not active_accounts:
+        status = _provider_configure(paths, config)
+        if status != 0:
+            return status
+        paths, config = _load()
+        active_accounts = _active_provider_accounts(paths, config)
+        if not active_accounts:
+            raise CliError(
+                "setup stopped before a provider account was registered"
+            )
+
+    if not _runtime_ready(paths):
+        status = _reconcile_runtime()
+        if status != 0:
+            return status
+        paths, config = _load()
+
+    project = _setup_project_path(requested_project)
+    if not _project_context_mapped(config, project):
+        pools = tuple(
+            dict.fromkeys(
+                account.pool
+                for account in sorted(
+                    active_accounts,
+                    key=lambda account: -account.priority,
+                )
+            )
+        )
+        context_arguments = ["add", str(project)]
+        for pool in pools:
+            context_arguments.extend(("--pool", pool))
+        status = _run_external(
+            "orichum-context",
+            context_arguments,
+        )
+        if status != 0:
+            return status
+        paths, config = _load()
+
+    if not _setup_project_ready(paths, config, project):
+        print(f"Configure a model stack for {project}.")
+        status = run_stack_wizard(
+            paths,
+            config,
+            launch_dir=project,
+            assignment_default=True,
+        )
+        if status != 0:
+            return status
+        paths, config = _load()
+        if not _setup_project_ready(paths, config, project):
+            raise CliError(
+                "setup is incomplete: the project has no usable model stack"
+            )
+
+    status = _run_external("orichum-doctor", [])
+    if status != 0:
+        return status
+    print(f"Orichum is ready for {project}.")
+    print("Next:")
+    print(f"  cd {shlex.quote(str(project))}")
+    print("  orichum")
     return 0
 
 
@@ -2434,6 +2642,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Claude Code arguments forwarded after '--'",
     )
 
+    setup = command(
+        commands,
+        "setup",
+        "Complete first-run setup.",
+        description=(
+            "Configure a provider account, reconcile the installed runtime, "
+            "prepare a model stack, map a project, and verify readiness."
+        ),
+    )
+    set_completion(
+        setup.add_argument(
+            "project",
+            nargs="?",
+            metavar="PROJECT",
+            help="project root or parent directory; prompts when omitted",
+        ),
+        "directory",
+    )
+
     config = command(
         commands,
         "config",
@@ -3033,6 +3260,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise CliError(
                 "provider configuration requires an interactive terminal"
             )
+        if parsed.command == "setup" and not _interactive_terminal():
+            raise CliError("setup requires an interactive terminal")
         if parsed.command == "status":
             session_id = parsed.session_id or os.environ.get(
                 "ORICHUM_SESSION_ID"
@@ -3045,6 +3274,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not re.fullmatch(r"oc-s-[a-f0-9]{16}", session_id):
                 raise CliError("logical session ID is invalid")
         paths, config = _load()
+        if parsed.command == "setup":
+            return _setup(paths, config, parsed.project)
         if parsed.command == "status":
             print(_session_status(paths, session_id), end="")
             return 0
