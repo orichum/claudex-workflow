@@ -117,7 +117,7 @@ class CliError(RuntimeError):
     """An Orichum command cannot be completed safely."""
 
 
-def _release_version() -> str:
+def _base_release_version() -> str:
     try:
         version = (WORKFLOW_ROOT / "VERSION").read_text(
             encoding="ascii"
@@ -134,6 +134,94 @@ def _release_version() -> str:
         )
         else "unknown"
     )
+
+
+def _runtime_manifest_digest() -> str | None:
+    try:
+        document = json.loads(
+            (WORKFLOW_ROOT / "runtime-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if type(document) is not dict:
+        return None
+    digest = document.get("digest")
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        return None
+    return digest
+
+
+def _build_identity(version: str) -> dict[str, object] | None:
+    try:
+        document = json.loads(
+            (WORKFLOW_ROOT / "build-identity.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        type(document) is not dict
+        or set(document) != {
+            "schemaVersion",
+            "version",
+            "sourceKind",
+            "sourceCommit",
+            "dirty",
+            "exactTag",
+        }
+        or type(document["schemaVersion"]) is not int
+        or document["schemaVersion"] != 1
+        or document["version"] != version
+        or type(document["dirty"]) is not bool
+        or type(document["exactTag"]) is not bool
+    ):
+        return None
+    source_kind = document["sourceKind"]
+    commit = document["sourceCommit"]
+    if source_kind == "source":
+        return (
+            document
+            if commit is None
+            and not document["dirty"]
+            and not document["exactTag"]
+            else None
+        )
+    if (
+        source_kind != "git"
+        or type(commit) is not str
+        or len(commit) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        return None
+    return document
+
+
+def _source_fallback_version(version: str) -> str:
+    digest = _runtime_manifest_digest()
+    return f"{version}+src.{digest[:12] if digest else 'unknown'}"
+
+
+def _release_version() -> str:
+    version = _base_release_version()
+    if version == "unknown":
+        return version
+    identity = _build_identity(version)
+    if identity is None or identity["sourceKind"] == "source":
+        return _source_fallback_version(version)
+    if identity["exactTag"] and not identity["dirty"]:
+        return version
+    commit = str(identity["sourceCommit"])
+    suffix = f"+g.{commit[:12]}"
+    if identity["dirty"]:
+        suffix += ".dirty"
+    return version + suffix
 
 
 @dataclass(frozen=True)
