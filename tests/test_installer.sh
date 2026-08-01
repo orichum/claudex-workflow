@@ -577,6 +577,30 @@ rg -Fq \
 rg -Fq \
   'Use `ctx_shell` for every finite, non-interactive shell' \
   "$ROOT/controller/plugin/agents/implementation-worker.md"
+rg -Fq \
+  'Prefer an existing project pattern over a new abstraction.' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'Do not add speculative abstractions, dependencies, configurability,' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'Every changed line must trace to the requested outcome' \
+  "$ROOT/config/controller-policy.md"
+rg -Fq \
+  'Recommend the least-complex safe design' \
+  "$ROOT/controller/plugin/agents/architecture-advisor.md"
+rg -Fq \
+  'Treat unnecessary complexity as an actionable finding' \
+  "$ROOT/controller/plugin/agents/correctness-critic.md"
+rg -Fq \
+  'Do not add unrequested flexibility' \
+  "$ROOT/controller/plugin/agents/implementation-worker.md"
+rg -Fq \
+  'Stop when sufficient evidence answers the assigned question' \
+  "$ROOT/controller/plugin/agents/repository-explorer.md"
+rg -Fq \
+  'Do not require broader scope than the claim needs' \
+  "$ROOT/controller/plugin/agents/repository-verifier.md"
 
 leanctx_probe="$fixture/lean-ctx"
 cat >"$leanctx_probe" <<'PY'
