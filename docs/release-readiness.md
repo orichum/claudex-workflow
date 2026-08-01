@@ -7,12 +7,14 @@ isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.5` candidate passes deterministic regression coverage. Its
-native macOS ARM64 and Linux AMD64 release gates must be rerun after the
-release metadata is merged. The latest provider-backed installation and
-service evidence is carried forward from the `0.1.0-rc.4` baseline. WSL2 with
-systemd shares the Linux service implementation and has deterministic contract
-coverage; it has not been presented here as a native WSL acceptance run.
+The `0.1.0-rc.5` candidate passes native macOS ARM64, native Linux AMD64,
+WSL-compatible service-contract, and deterministic regression coverage. The
+final contract and both native release gates ran against the exact runtime
+behavior commit `2d88a7c28b3976132bb6b8fa65c9471a51e8bb8b`. The latest real
+provider-backed request evidence is carried forward from the `0.1.0-rc.4`
+baseline. WSL2 with systemd shares the Linux service implementation and has
+deterministic contract coverage; it has not been presented here as a native
+WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -39,18 +41,18 @@ The following observed installation and service evidence was recorded on
 | Linux/systemd | Fresh and repeat installs completed in an Ubuntu 24.04 systemd-user container; the repeat completed in 7 seconds with one runtime release and no traceback |
 | Provider-free install | CLIProxyAPI remained active, the route proxy remained intentionally inactive, and the installer reported the bounded `pending-provider-login` state |
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
-| Local regression | The `0.1.0-rc.5` metadata branch passed 533 Python tests and all eight shell acceptance suites on 2026-08-01 |
+| Local regression | The final RC5 runtime behavior passed 533 Python tests and all eight shell acceptance suites on 2026-08-01 |
 
-## Latest published native baseline
+## 0.1.0-rc.5 release gates
 
-The latest published native release gates passed against the `0.1.0-rc.4`
-runtime behavior commit `1d90fca31691858e6e9ada88436a72c8f78962ba`:
+The final deterministic and native release gates passed against runtime
+behavior commit `2d88a7c28b3976132bb6b8fa65c9471a51e8bb8b`:
 
 | Gate | Result |
 |---|---|
-| [Main Contract](https://github.com/orichum/orichum/actions/runs/30444560822) | Pass |
-| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30444614933) | Pass |
-| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30444615186) | Pass |
+| [Main Contract](https://github.com/orichum/orichum/actions/runs/30699179697) | Pass |
+| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30699189183) | Pass |
+| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30699188131) | Pass |
 
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
