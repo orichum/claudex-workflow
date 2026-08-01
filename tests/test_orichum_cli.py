@@ -168,7 +168,7 @@ class OrichumCliTests(unittest.TestCase):
             orichum_cli.build_parser().parse_args(["--version"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.4\n")
+        self.assertEqual(stdout.getvalue(), "Orichum 0.1.0-rc.5\n")
 
     def test_help_explains_top_level_commands(self) -> None:
         help_text = orichum_cli.build_parser().format_help().casefold()
@@ -3090,7 +3090,7 @@ class OrichumCliTests(unittest.TestCase):
             environment["GH_CONFIG_DIR"], "/caller/github-config"
         )
 
-    def test_session_environment_context_headroom_is_model_aware(self) -> None:
+    def test_session_environment_context_limits_are_model_aware(self) -> None:
         paths = {
             "state": self.root / "state",
             "config": self.root / "config",
