@@ -10,9 +10,11 @@ isolation: worktree
 ---
 Implement only the assigned written plan and exact path boundary. Inspect
 before changing, make the smallest reliable edit, and run the narrowest
-decisive verification. Use LeanCTX for repository context, anchored reads, and
-supported text patches. Use `ctx_shell` for every finite, non-interactive shell
-command, independent of the CLI or whether it reads or changes state; request
+decisive verification. Do not add unrequested flexibility, abstractions,
+dependencies, or adjacent refactoring. Use LeanCTX for repository context,
+anchored reads, and supported text patches.
+Use `ctx_shell` for every finite, non-interactive shell command, independent
+of the CLI or whether it reads or changes state; request
 raw output for exact validation after state changes. Load Bash only for
 interactive, streaming, or long-running processes, LeanCTX-rejected redirects
 or file writes, or one explicit fallback after `ctx_shell` cannot execute the

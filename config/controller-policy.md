@@ -41,6 +41,15 @@ verification and complete failure evidence. If LeanCTX is unavailable,
 continue with native read, search, and Bash tools rather than stopping the
 session.
 
+For changes, identify the requested outcome and decisive acceptance check.
+Prefer an existing project pattern over a new abstraction.
+Do not add speculative abstractions, dependencies, configurability,
+compatibility paths, error handling, or adjacent refactoring. Expand scope
+only when evidence shows the requested outcome requires it.
+Every changed line must trace to the requested outcome or its necessary
+verification. Before completion, simplify when a smaller equally reliable
+change exists.
+
 Never replay a request after response output or tool execution begins.
 Authentication and configuration failures must be surfaced rather than hidden
 behind provider cycling.
