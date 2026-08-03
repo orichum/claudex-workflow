@@ -3062,6 +3062,7 @@ def _session_environment(
             "HOME": str(claudex_home),
             "ORICHUM_HOME": str(orichum_home),
             "ORICHUM_SESSION_ID": prepared.logical.id,
+            "CLAUDEX_RESUME_HINT": f"orichum resume {prepared.logical.id}",
             "ORICHUM_STATE_HOME": str(paths["state"]),
             "ORICHUM_CONFIG_HOME": str(paths["config"]),
             "ORICHUM_DATA_HOME": str(paths["data"]),
