@@ -7,15 +7,15 @@ isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.7` candidate passes native macOS ARM64, native Linux AMD64,
-and deterministic regression coverage. All three release gates ran against
-the exact source commit `30d3c561d8f75aee4de65b8a79f5978735fc9c11`. This
-documentation and release-metadata release retains the runtime behavior
-validated for `0.1.0-rc.6` at commit
-`ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`. The latest provider-backed
-request evidence is carried forward from the `0.1.0-rc.4` baseline. WSL2 with
-systemd shares the Linux service implementation and has deterministic contract
-coverage; it has not been presented here as a native WSL acceptance run.
+The `0.1.0-rc.8` candidate passes deterministic regression coverage. Its
+native macOS ARM64 and Linux AMD64 release gates must be rerun after the
+release metadata is merged. This release adds audited built-in planning and
+exploration routing plus private compaction continuity, with runtime behavior
+merged at commit `5eadf627cb748f4db8f01b964f9c5cdb5c5a8c43`. The latest
+provider-backed request evidence is carried forward from the `0.1.0-rc.4`
+baseline. WSL2 with systemd shares the Linux service implementation and has
+deterministic contract coverage; it has not been presented here as a native
+WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -42,12 +42,12 @@ The following observed installation and service evidence was recorded on
 | Linux/systemd | Fresh and repeat installs completed in an Ubuntu 24.04 systemd-user container; the repeat completed in 7 seconds with one runtime release and no traceback |
 | Provider-free install | CLIProxyAPI remained active, the route proxy remained intentionally inactive, and the installer reported the bounded `pending-provider-login` state |
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
-| Local regression | The `0.1.0-rc.7` metadata branch passed 608 Python tests and all eight shell acceptance suites on 2026-08-03 |
+| Local regression | The `0.1.0-rc.8` release branch passed 608 Python tests and all eight shell acceptance suites on 2026-08-03 |
 
-## 0.1.0-rc.7 release gates
+## Latest published native baseline
 
-The final deterministic and native release gates passed against source commit
-`30d3c561d8f75aee4de65b8a79f5978735fc9c11` and runtime behavior commit
+The `0.1.0-rc.7` deterministic and native release gates passed against source
+commit `30d3c561d8f75aee4de65b8a79f5978735fc9c11` and runtime behavior commit
 `ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`:
 
 | Gate | Result |
