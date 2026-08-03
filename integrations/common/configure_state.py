@@ -556,7 +556,9 @@ def load_configuration_snapshot(
         provider_document,
     )
     stack_name = route.get("modelStack")
-    if not isinstance(stack_name, str):
+    if stack_name is None:
+        stack_name = stack_snapshot.stacks.default_stack
+    elif not isinstance(stack_name, str):
         raise RoutingError("project model stack is invalid")
     stack = stack_snapshot.stacks.stacks.get(stack_name)
     if stack is None:

@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
+from unittest import mock
 
 from integrations.common.account_registry import Account
 from integrations.common.configure_state import (
@@ -16,10 +17,12 @@ from integrations.common.configure_state import (
     _live_assignment,
     build_managed_stack,
     compatible_backup_accounts,
+    load_configuration_snapshot,
     managed_stack_name,
     revalidate_draft,
     stack_is_live_compatible,
 )
+from integrations.common.orichum_config import ResolvedConfig
 from integrations.common.stack_bindings import StackBindings
 from integrations.common.stack_catalog import LiveCatalog, LiveModelChoice
 from integrations.common.stack_definition import (
@@ -156,6 +159,60 @@ def _snapshot() -> ConfigurationSnapshot:
 
 
 class ConfigureStateTests(unittest.TestCase):
+    def test_snapshot_uses_default_stack_when_project_inherits_it(self) -> None:
+        existing = _snapshot()
+        providers = {
+            "providers": {"openai": {}},
+            "accountPools": {"shared": {"providers": ["openai"]}},
+        }
+        config = ResolvedConfig(
+            documents={"providers": providers, "projects": {}},
+            sources={},
+        )
+        route = {
+            "contextRootReal": "/work/acme",
+            "modelStack": None,
+            "accountPools": ["shared"],
+        }
+
+        with (
+            mock.patch(
+                "integrations.common.configure_state.load_stack_snapshot",
+                return_value=mock.Mock(
+                    stacks=existing.stacks,
+                    bindings=existing.bindings,
+                ),
+            ),
+            mock.patch(
+                "integrations.common.configure_state.load_accounts",
+                return_value=existing.accounts[:2],
+            ),
+            mock.patch(
+                "integrations.common.configure_state.resolve_control_plane_context",
+                return_value={"route": route},
+            ),
+            mock.patch(
+                "integrations.common.stack_wizard._runtime_catalog_port",
+                return_value=13457,
+            ),
+            mock.patch(
+                "integrations.common.stack_wizard._runtime_catalog_attester",
+                return_value=mock.Mock(),
+            ),
+            mock.patch("integrations.common.configure_state.fetch_live_catalog"),
+            mock.patch(
+                "integrations.common.configure_state.project_live_catalog",
+                return_value=existing.catalog,
+            ),
+        ):
+            loaded = load_configuration_snapshot(
+                {"config": Path("/private/config")},
+                config,
+                Path("/work/acme"),
+            )
+
+        self.assertEqual(loaded.target.stack_name, "balanced")
+
     def test_backup_candidates_are_same_provider_active_and_route_compatible(
         self,
     ) -> None:
