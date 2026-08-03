@@ -4,6 +4,19 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.7 - 2026-08-03
+
+### Added
+
+- A complete installation, setup, and configuration guide covering local and
+  SSH authentication, resumable onboarding, every guided configuration path,
+  review and repair, practical examples, and recovery.
+
+### Changed
+
+- The README, installation guide, and configuration guide now link to the
+  canonical end-to-end setup and configuration guide.
+
 ## 0.1.0-rc.6 - 2026-08-03
 
 ### Added

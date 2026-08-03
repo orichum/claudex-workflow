@@ -7,14 +7,14 @@ isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.6` candidate passes native macOS ARM64, native Linux AMD64,
-and deterministic regression coverage. All three release gates ran against
-the exact source commit `7d37526585859bbf8b1c7136f0e271a92cf2f30a`, whose
-runtime behavior is commit `ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`.
-The latest provider-backed request evidence is carried forward from the
-`0.1.0-rc.4` baseline. WSL2 with systemd shares the Linux service
-implementation and has deterministic contract coverage; it has not been
-presented here as a native WSL acceptance run.
+The `0.1.0-rc.7` candidate passes deterministic regression coverage. Its
+native macOS ARM64 and Linux AMD64 release gates must be rerun after the
+release metadata is merged. This release adds documentation and release
+metadata without changing the runtime behavior validated for `0.1.0-rc.6` at
+commit `ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`. The latest provider-backed
+request evidence is carried forward from the `0.1.0-rc.4` baseline. WSL2 with
+systemd shares the Linux service implementation and has deterministic contract
+coverage; it has not been presented here as a native WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -41,12 +41,12 @@ The following observed installation and service evidence was recorded on
 | Linux/systemd | Fresh and repeat installs completed in an Ubuntu 24.04 systemd-user container; the repeat completed in 7 seconds with one runtime release and no traceback |
 | Provider-free install | CLIProxyAPI remained active, the route proxy remained intentionally inactive, and the installer reported the bounded `pending-provider-login` state |
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
-| Local regression | The final RC6 runtime behavior passed 608 Python tests and all eight shell acceptance suites on 2026-08-03 |
+| Local regression | The `0.1.0-rc.7` metadata branch passed 608 Python tests and all eight shell acceptance suites on 2026-08-03 |
 
-## 0.1.0-rc.6 release gates
+## Latest published native baseline
 
-The final deterministic and native release gates passed against source commit
-`7d37526585859bbf8b1c7136f0e271a92cf2f30a` and runtime behavior commit
+The `0.1.0-rc.6` deterministic and native release gates passed against source
+commit `7d37526585859bbf8b1c7136f0e271a92cf2f30a` and runtime behavior commit
 `ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`:
 
 | Gate | Result |
