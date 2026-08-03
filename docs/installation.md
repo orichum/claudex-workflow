@@ -64,6 +64,10 @@ path, creates a compatible recommended stack without a separate wizard, maps
 the projects folder, and runs the final doctor check. Re-running it resumes from
 durable state instead of duplicating completed phases.
 
+See [Installation, setup, and configuration](setup-and-configuration.md) for
+the complete prompt-by-prompt onboarding flow and every ongoing
+`orichum configure` path.
+
 Normal installer and setup output contains only progress, outcomes, and required
 actions. Use `./install.sh --verbose` or `orichum setup --verbose` to stream the
 technical output that is also retained in private diagnostic logs.
