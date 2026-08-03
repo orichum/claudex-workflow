@@ -299,9 +299,18 @@ jobs:
             .contexts[0].root == $root and
             .contexts[0].accountPools == ["shared"]
           ' "$ORICHUM_CONFIG_HOME/projects.json" >/dev/null
-          printf '6\n' | script -q \
-            "$RUNNER_TEMP/orichum-configure.log" \
-            orichum configure --project "$GITHUB_WORKSPACE"
+          CONFIGURE_LOG="$RUNNER_TEMP/orichum-configure.log" \
+          CONFIGURE_PROJECT="$GITHUB_WORKSPACE" \
+          expect <<'EXPECT'
+          log_file -noappend $env(CONFIGURE_LOG)
+          set timeout 30
+          spawn orichum configure --project $env(CONFIGURE_PROJECT)
+          expect "Selection: "
+          send -- "6\r"
+          expect eof
+          catch wait result
+          exit [lindex $result 3]
+          EXPECT
           grep -Fq 'Configuring Orichum' \
             "$RUNNER_TEMP/orichum-configure.log"
           grep -Fq 'Models and agents' \

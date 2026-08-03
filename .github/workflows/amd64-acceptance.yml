@@ -472,7 +472,7 @@ jobs:
             --env ORICHUM_DATA_HOME=/home/orichum/.orichum \
             --env ORICHUM_CONFIG_HOME=/home/orichum/.orichum/config \
             --env USER_BIN_DIR=/home/orichum/orichum-bin \
-            --env PATH=/home/orichum/.local/bin:/usr/local/bin:/usr/bin:/bin \
+            --env PATH=/home/orichum/orichum-bin:/home/orichum/.local/bin:/usr/local/bin:/usr/bin:/bin \
             "$container" \
             bash -lc '
               set -euo pipefail
