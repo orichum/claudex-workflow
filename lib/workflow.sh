@@ -36,7 +36,11 @@ parse_install_arguments() {
     fi
   done
   local mode
-  mode="$(parse_install_mode "${mode_arguments[@]}")" || return 2
+  if ((${#mode_arguments[@]})); then
+    mode="$(parse_install_mode "${mode_arguments[@]}")" || return 2
+  else
+    mode="$(parse_install_mode)" || return 2
+  fi
   printf '%s\t%s\n' "$mode" "$verbose"
 }
 
