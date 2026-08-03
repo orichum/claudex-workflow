@@ -7,11 +7,12 @@ isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.7` candidate passes deterministic regression coverage. Its
-native macOS ARM64 and Linux AMD64 release gates must be rerun after the
-release metadata is merged. This release adds documentation and release
-metadata without changing the runtime behavior validated for `0.1.0-rc.6` at
-commit `ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`. The latest provider-backed
+The `0.1.0-rc.7` candidate passes native macOS ARM64, native Linux AMD64,
+and deterministic regression coverage. All three release gates ran against
+the exact source commit `30d3c561d8f75aee4de65b8a79f5978735fc9c11`. This
+documentation and release-metadata release retains the runtime behavior
+validated for `0.1.0-rc.6` at commit
+`ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`. The latest provider-backed
 request evidence is carried forward from the `0.1.0-rc.4` baseline. WSL2 with
 systemd shares the Linux service implementation and has deterministic contract
 coverage; it has not been presented here as a native WSL acceptance run.
@@ -43,17 +44,17 @@ The following observed installation and service evidence was recorded on
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
 | Local regression | The `0.1.0-rc.7` metadata branch passed 608 Python tests and all eight shell acceptance suites on 2026-08-03 |
 
-## Latest published native baseline
+## 0.1.0-rc.7 release gates
 
-The `0.1.0-rc.6` deterministic and native release gates passed against source
-commit `7d37526585859bbf8b1c7136f0e271a92cf2f30a` and runtime behavior commit
+The final deterministic and native release gates passed against source commit
+`30d3c561d8f75aee4de65b8a79f5978735fc9c11` and runtime behavior commit
 `ff0422aaf1b9b8079971fc2f8e29fe8ab868f86b`:
 
 | Gate | Result |
 |---|---|
-| [Main Contract](https://github.com/orichum/orichum/actions/runs/30795145120) | Pass |
-| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30795177189) | Pass |
-| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30795177247) | Pass |
+| [Main Contract](https://github.com/orichum/orichum/actions/runs/30798910045) | Pass |
+| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30798941872) | Pass |
+| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30798944273) | Pass |
 
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
