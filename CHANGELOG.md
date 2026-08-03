@@ -4,6 +4,8 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.8 - 2026-08-03
+
 ### Added
 
 - A bounded read-only planning advisor and private per-session compaction
