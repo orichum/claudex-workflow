@@ -7,20 +7,35 @@ readonly MAX_HOOK_INPUT_BYTES=65536
 readonly MAX_CHECKPOINT_BYTES=524288
 
 stat_owner() {
-  stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1" 2>/dev/null
+  case "$(uname -s)" in
+    Darwin) stat -f '%u' "$1" 2>/dev/null ;;
+    Linux) stat -c '%u' "$1" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 stat_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+  case "$(uname -s)" in
+    Darwin) stat -f '%Lp' "$1" 2>/dev/null ;;
+    Linux) stat -c '%a' "$1" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 stat_size() {
-  stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1" 2>/dev/null
+  case "$(uname -s)" in
+    Darwin) stat -f '%z' "$1" 2>/dev/null ;;
+    Linux) stat -c '%s' "$1" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 stat_identity() {
-  stat -f '%d:%i:%z:%m' "$1" 2>/dev/null || \
-    stat -c '%d:%i:%s:%Y' "$1" 2>/dev/null
+  case "$(uname -s)" in
+    Darwin) stat -f '%d:%i:%z:%m' "$1" 2>/dev/null ;;
+    Linux) stat -c '%d:%i:%s:%Y' "$1" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 safe_private_directory() {
