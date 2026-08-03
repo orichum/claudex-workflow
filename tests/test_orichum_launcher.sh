@@ -27,6 +27,13 @@ forwarded="$(
 [[ "$(tail -n 2 <<<"$forwarded")" == $'stack\nlist' ]]
 ! rg -Fxq -- 'run' <<<"$forwarded"
 
+configured="$(
+  ORICHUM_DATA_HOME="$fixture/data" \
+    "$ROOT/bin/orichum" configure --help
+)"
+[[ "$(tail -n 2 <<<"$configured")" == $'configure\n--help' ]]
+! rg -Fxq -- 'run' <<<"$configured"
+
 forwarded_option="$(
   ORICHUM_DATA_HOME="$fixture/data" \
     "$ROOT/bin/orichum" --resume session-id
