@@ -47,7 +47,7 @@ parse_install_arguments() {
 create_install_diagnostic_log() {
   (($# == 1)) || return 2
   local data_root="$1"
-  local log_dir log_path
+  local log_dir log_path temporary_log
   [[ "$data_root" == /* && ! -L "$data_root" ]] || return 1
   install -d -m 0700 "$data_root" || return 1
   [[ -d "$data_root" && ! -L "$data_root" && \
@@ -60,7 +60,12 @@ create_install_diagnostic_log() {
   [[ "$(path_uid "$log_dir")" == "$(id -u)" && \
      "$(path_mode "$log_dir")" == 700 ]] || return 1
   umask 077
-  log_path="$(mktemp "$log_dir/install.XXXXXX.log")" || return 1
+  temporary_log="$(mktemp "$log_dir/install.XXXXXX")" || return 1
+  log_path="$temporary_log.log"
+  if ! mv "$temporary_log" "$log_path"; then
+    rm -f "$temporary_log"
+    return 1
+  fi
   chmod 0600 "$log_path" || return 1
   printf '%s\n' "$log_path"
 }

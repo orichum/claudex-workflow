@@ -247,8 +247,14 @@ fi
 diagnostic_root="$fixture/installer-diagnostics"
 install -d -m 0700 "$diagnostic_root"
 diagnostic_log="$(create_install_diagnostic_log "$diagnostic_root")"
+second_diagnostic_log="$(create_install_diagnostic_log "$diagnostic_root")"
 [[ -f "$diagnostic_log" && ! -L "$diagnostic_log" ]]
+[[ -f "$second_diagnostic_log" && ! -L "$second_diagnostic_log" ]]
+[[ "$second_diagnostic_log" != "$diagnostic_log" ]]
+[[ "$(basename "$diagnostic_log")" == install.*.log ]]
+[[ "$(basename "$second_diagnostic_log")" == install.*.log ]]
 [[ "$(path_mode "$diagnostic_log")" == 600 ]]
+[[ "$(path_mode "$second_diagnostic_log")" == 600 ]]
 [[ "$(path_mode "$(dirname "$diagnostic_log")")" == 700 ]]
 
 [[ "$(print_install_progress false 'Installing Orichum…')" == \
