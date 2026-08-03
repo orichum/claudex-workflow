@@ -18,30 +18,34 @@ verification. First-run setup asks only for provider, account name, and projects
 folder. It assigns the first account Primary priority in the internal `shared`
 pool without exposing pool or priority choices.
 
-To add another account to an already configured installation, use the focused
-provider wizard:
+To add another account or configure an explicit same-provider backup, run the
+guided project configuration:
 
 ```bash
-orichum provider configure
+cd ~/projects/my-app
+orichum configure
 ```
 
-The wizard lists configured providers, runs the selected CLIProxyAPI login,
-detects the new credential, and asks only for the account's display name, pool,
-and priority. Credential filenames and contents are not displayed.
-
-Run the wizard again for each additional account.
+Choose **Accounts and providers**. Orichum lists configured providers and named
+accounts, runs the SSH-safe login flow, asks for a friendly name, derives the
+project placement and account preference, and previews the complete change.
+The backup flow fixes the provider to the selected primary account and derives
+a lower preference automatically. Credential filenames, pools, numeric
+priorities, route prefixes, and internal IDs are not displayed.
 
 Authentication and account registration are separate internally. CLIProxyAPI
 authentication creates a private OAuth credential; Orichum account
 registration gives that credential a display name, provider adapter, pool, and
 routing priority. The normal wizards perform both steps together and never ask
 for a credential filename. If a previous low-level login already succeeded,
-the wizard offers to reuse that unregistered credential instead of logging in
-again.
+`orichum configure` offers to reuse that unregistered credential instead of
+logging in again. Cancelling before the preview is applied leaves it available
+for the next run without registering an account.
 
 ## Advanced and recovery commands
 
-The separate low-level commands remain available for recovery and automation:
+`orichum provider configure` and the separate low-level commands remain
+available for recovery, custom account-group placement, and automation:
 
 ```bash
 orichum provider login codex

@@ -4,15 +4,30 @@ A model stack assigns a controller model and ordered candidates for specialist
 roles. It separates task roles from provider credentials, allowing the same
 workflow to use GPT, Claude, Google, Kimi, or another declared family.
 
-## Build a stack
+## Configure models for a project
+
+```bash
+cd ~/projects/my-app
+orichum configure
+```
+
+Choose **Models and agents**. The guided flow reads the owned live CLIProxyAPI
+catalogue and lets you use Orichum's recommendation, use one model everywhere,
+choose models by work type, or customize each concrete role. Model and provider
+IDs are selected from numbered, searchable choices rather than typed.
+
+The final preview names every concrete role and states that changes apply only
+to new sessions. Live availability is checked again immediately before saving.
+
+The advanced stack wizard remains available for ordered startup candidates and
+named-account locks:
 
 ```bash
 orichum stack available
 orichum stack configure
 ```
 
-The wizard reads the live CLIProxyAPI model catalogue. For each role, it lets
-you choose a live model and either:
+For each role, the advanced wizard lets you choose a live model and either:
 
 - select automatically within one provider; or
 - lock the route to one named account.

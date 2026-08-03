@@ -13,19 +13,25 @@ different providers, without changing the machine-wide active login.
 | Stack candidate | A model/provider/account policy available to a controller or agent role |
 | Logical session | An immutable primary route plus at most one compatible fallback |
 
-## Add multiple accounts for one provider
+## Add a primary and backup account
 
-Run the provider wizard once for each account:
+Run the guided configuration from the project:
 
 ```bash
-orichum provider configure
-orichum provider configure
+cd ~/projects/my-app
+orichum configure
 ```
 
-Choose the same provider both times. Name the first account, select its pool,
-and give it primary priority. Give the second account secondary or reserve
-priority. The same flow works for Claude, OpenAI, Antigravity, and Kimi
-accounts without handling credential filenames manually.
+Choose **Accounts and providers**, then **Configure a backup account**. Select
+the existing primary account; Orichum fixes the provider, authenticates or
+reuses another compatible credential, asks for its friendly name, derives a
+lower preference, and previews the new-session fallback. The flow works for
+Claude, OpenAI, Antigravity, and Kimi without exposing credential filenames,
+pools, or numeric priorities.
+
+Use **Add an account** when the account is not intended as a backup. The guided
+flow can make it preferred, equal-choice, or lower-preference in plain language.
+The low-level aliases remain available for automation:
 
 Priority aliases are `primary` (100), `secondary` (50), and `reserve` (10).
 Numeric priorities from 0 through 1000 are also accepted.
@@ -44,21 +50,23 @@ For an automatic candidate, Orichum:
 A named-account lock always selects that account. It does not roll over to
 another account.
 
-## Configure a stack with the wizard
+## Configure models and agents
 
 ```bash
-orichum stack available
-orichum stack configure
+orichum configure
 ```
 
-The wizard lists models currently advertised by the local inference gateway.
-For each controller or agent candidate, choose:
+Choose **Models and agents**. The wizard lists models currently advertised by
+the owned local gateway and offers:
 
-- **Automatic within provider** to let Orichum select an eligible account.
-- A **named account** to lock the candidate to that account.
+- Orichum's recommendation;
+- one model for everything;
+- models by work type; or
+- every controller and specialist role individually.
 
-Review and save the stack, then optionally assign it to the current project.
-The wizard rechecks live availability immediately before saving.
+Every model is selected from a numbered, searchable live list. The wizard does
+not accept typed model IDs and rechecks live availability immediately before
+saving.
 
 ## Using accounts from different providers
 

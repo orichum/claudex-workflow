@@ -4,6 +4,33 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- `orichum configure` now provides one guided flow for additional provider
+  accounts, explicit same-provider backups, live model selection, controller
+  and specialist-role assignments, project stack selection, review, and local
+  runtime repair.
+- Width-aware numbered and searchable terminal choices, project completion,
+  and native macOS/Linux acceptance coverage for ongoing configuration.
+
+### Changed
+
+- Provider authentication is prepared before preview without registering an
+  account; reusable authentication is retained securely when configuration is
+  cancelled.
+- Ongoing account and model documentation now recommends the guided command,
+  while low-level commands remain available for advanced placement, secrets,
+  recovery, and automation.
+
+### Fixed
+
+- Failed multi-account application compensates every account created earlier
+  in the confirmed draft.
+- Backup validation covers every live project route, including ordered stack
+  fallbacks, and excludes accounts the project does not currently use.
+- Existing stack assignments are revalidated against the live project routes
+  before persistence.
+
 ## 0.1.0-rc.5 - 2026-08-01
 
 ### Added

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_HALF_UP
 import fcntl
 import http.client
@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Mapping, Sequence, TextIO
+from typing import Callable, Mapping, Sequence, TextIO
 import webbrowser
 
 from . import leanctx_monitor
@@ -45,6 +45,16 @@ from .cliproxy_management import (
     start_oauth,
     submit_oauth_callback,
 )
+from .configure_state import (
+    ConfigurationDraft,
+    ConfigurationSnapshot,
+    build_managed_stack,
+    compatible_backup_accounts,
+    load_configuration_snapshot,
+    managed_stack_name,
+    stack_is_live_compatible,
+)
+from .configure_wizard import run_configure
 from .github_identity import GithubIdentityError, ensure_github_identity
 from .leanctx_contract import (
     AUTO_APPROVED_TOOLS as LEANCTX_AUTO_APPROVED_TOOLS,
@@ -86,6 +96,8 @@ from .model_routing import EffectiveStack, ROLES, RoutingError
 from .project_context import (
     ContextError,
     add_context_commands,
+    assign_stack_to_context,
+    control_plane_transaction,
     resolve_control_plane_context,
 )
 from .provider_credentials import (
@@ -109,8 +121,13 @@ from .stack_catalog import (
     fetch_live_catalog,
     project_live_catalog,
 )
-from .stack_store import StackStoreError
+from .stack_store import (
+    StackStoreError,
+    load_stack_snapshot,
+    save_stack,
+)
 from .stack_wizard import create_recommended_stack, run_stack_wizard
+from .terminal_ui import UiCancelled
 from .session_config import (
     SessionError,
     SessionPaths,
@@ -129,6 +146,15 @@ _PROVIDER_LABELS = {
 
 class CliError(RuntimeError):
     """An Orichum command cannot be completed safely."""
+
+
+@dataclass(frozen=True)
+class PendingProviderAccount:
+    """Authenticated provider credential awaiting account registration."""
+
+    provider: str
+    credential_ref: str = field(repr=False)
+    suggested_name: str
 
 
 _CALLBACK_URL = re.compile(
@@ -1774,6 +1800,156 @@ def _mutate_account(
             )
 
 
+def _apply_configuration_draft(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    snapshot: ConfigurationSnapshot,
+    draft: ConfigurationDraft,
+) -> None:
+    """Apply a confirmed guided draft and compensate new accounts on failure."""
+    registry = Path(paths["config"]) / "accounts.json"
+    created: list[Account] = []
+    try:
+        before = load_accounts(registry)
+        known_ids = {account.id for account in before}
+        for pending in draft.pending_accounts:
+            _mutate_account(
+                argparse.Namespace(
+                    account_command="add",
+                    name=pending.name,
+                    provider=pending.provider,
+                    credential_ref=pending.credential_ref,
+                    pool=pending.pool,
+                    priority=str(pending.priority),
+                ),
+                paths,
+                config,
+            )
+            current_accounts = load_accounts(registry)
+            added = tuple(
+                account
+                for account in current_accounts
+                if (
+                    account.id not in known_ids
+                    and account.credential_ref == pending.credential_ref
+                )
+            )
+            if len(added) != 1:
+                raise CliError("new provider account could not be identified")
+            created.append(added[0])
+            known_ids.update(account.id for account in current_accounts)
+        backup_drafts = tuple(
+            pending
+            for pending in draft.pending_accounts
+            if pending.intent == "backup"
+        )
+        if backup_drafts:
+            refreshed = load_configuration_snapshot(
+                paths,
+                config,
+                snapshot.target.root,
+            )
+            created_by_credential = {
+                account.credential_ref: account for account in created
+            }
+            for pending in backup_drafts:
+                if pending.primary_id is None:
+                    raise CliError("backup account has no primary account")
+                primary = find_account(
+                    refreshed.accounts,
+                    pending.primary_id,
+                )
+                backup = created_by_credential.get(pending.credential_ref)
+                if (
+                    backup is None
+                    or backup
+                    not in compatible_backup_accounts(refreshed, primary)
+                ):
+                    raise CliError(
+                        "backup account does not advertise a compatible route"
+                    )
+
+        model_changed = any(
+            draft.role_models.get(role) != snapshot.assignments.get(role)
+            for role in draft.role_models
+        )
+        stack_changed = (
+            draft.project.stack_name != snapshot.target.stack_name
+        )
+        bindings_changed = bool(draft.binding_removals)
+        if not model_changed and not stack_changed and not bindings_changed:
+            return
+        config_root = Path(paths["config"])
+        binding_path = config_root / "stack-bindings.json"
+        current = load_stack_snapshot(
+            config_root / "model-stacks.json",
+            binding_path,
+        )
+        current_snapshot = replace(
+            snapshot,
+            stacks=current.stacks,
+            bindings=current.bindings,
+        )
+        if model_changed:
+            updated = build_managed_stack(current_snapshot, draft)
+            stack_name = managed_stack_name(snapshot.target.root)
+        else:
+            updated = current.stacks
+            stack_name = draft.project.stack_name
+        updated_bindings = StackBindings(
+            {
+                candidate: account
+                for candidate, account in (
+                    current.bindings.candidate_accounts.items()
+                )
+                if candidate not in draft.binding_removals
+            }
+        )
+        if stack_changed and not model_changed:
+            availability = refreshed if backup_drafts else load_configuration_snapshot(
+                paths,
+                config,
+                snapshot.target.root,
+            )
+            compatibility_snapshot = replace(
+                current_snapshot,
+                accounts=availability.accounts,
+                catalog=availability.catalog,
+                bindings=updated_bindings,
+            )
+            if not stack_is_live_compatible(
+                compatibility_snapshot,
+                stack_name,
+            ):
+                raise CliError(
+                    "selected model profile or stack is not usable for this project"
+                )
+        with control_plane_transaction(config_root):
+            with stack_binding_transaction(binding_path):
+                save_stack(current, updated, updated_bindings)
+                if model_changed or stack_changed:
+                    assign_stack_to_context(
+                        config_root / "projects.json",
+                        snapshot.target.root,
+                        stack_name,
+                        updated.stacks,
+                    )
+    except BaseException:
+        for account in reversed(created):
+            try:
+                _mutate_account(
+                    argparse.Namespace(
+                        account_command="remove",
+                        selector=account.id,
+                    ),
+                    paths,
+                    config,
+                )
+            except BaseException:
+                pass
+        raise
+
+
 def _interactive_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -1890,6 +2066,139 @@ def _managed_provider_login(
     raise CliError("provider authentication timed out")
 
 
+def _prepare_provider_account(
+    paths: Mapping[str, Path],
+    config: ResolvedConfig,
+    provider_name: str,
+    *,
+    onboarding: bool = False,
+    diagnostics: SetupDiagnostics | None = None,
+    chooser: Callable[..., str] | None = None,
+) -> PendingProviderAccount:
+    """Authenticate or reuse one credential without registering an account."""
+    provider_document = config.documents["providers"]
+    providers = provider_document["providers"]
+    provider = providers.get(provider_name)
+    if not isinstance(provider, Mapping):
+        raise CliError(f"provider is not configured: {provider_name}")
+    auth_type = provider.get("authType")
+    if not isinstance(auth_type, str):
+        raise CliError("provider authentication configuration is incomplete")
+    choose = _prompt_choice if chooser is None else chooser
+    auth_dir = Path(paths["data"]) / "auth"
+    if auth_dir.exists():
+        repair_credential_modes(auth_dir)
+        before_credentials = list_credentials(auth_dir)
+    else:
+        before_credentials = ()
+    before_refs = {credential.path.name for credential in before_credentials}
+    accounts = load_accounts(Path(paths["config"]) / "accounts.json")
+    assigned = {account.credential_ref for account in accounts}
+    existing = tuple(
+        credential
+        for credential in before_credentials
+        if (
+            credential.provider == auth_type
+            and not credential.disabled
+            and credential.path.name not in assigned
+        )
+    )
+    credential = None
+    if existing:
+        if onboarding:
+            if len(existing) != 1:
+                raise CliError(
+                    "multiple unregistered authentications are available; "
+                    "run 'orichum provider configure' to choose one"
+                )
+            credential = existing[0]
+        else:
+            selected_ref = choose(
+                "Use an existing authentication or sign in again:",
+                (
+                    *(
+                        (
+                            f"Existing {provider_name.title()} "
+                            f"authentication {index}",
+                            item.path.name,
+                        )
+                        for index, item in enumerate(existing, start=1)
+                    ),
+                    ("Authenticate another account", "__login__"),
+                ),
+            )
+            if selected_ref != "__login__":
+                credential = next(
+                    item for item in existing if item.path.name == selected_ref
+                )
+    if credential is None:
+        if onboarding and diagnostics is not None:
+            status = _managed_provider_login(
+                paths,
+                auth_type,
+                _PROVIDER_LABELS.get(provider_name, provider_name.title()),
+                diagnostics,
+            )
+        else:
+            status = _run_external(
+                "orichum-login",
+                [auth_type],
+                environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
+            )
+        if status != 0:
+            raise CliError("provider authentication did not complete")
+    elif onboarding and diagnostics is not None:
+        label = _PROVIDER_LABELS.get(provider_name, provider_name.title())
+        diagnostics.emit(f"{label} authentication")
+        diagnostics.emit("  ✓ Already configured")
+    repair_credential_modes(auth_dir)
+    compatible = tuple(
+        item
+        for item in list_credentials(auth_dir)
+        if (
+            item.provider == auth_type
+            and not item.disabled
+            and item.path.name not in assigned
+        )
+    )
+    if credential is None and not compatible:
+        raise CliError(
+            "authentication completed, but no reusable compatible account "
+            "was found"
+        )
+    if credential is None:
+        created = tuple(
+            item for item in compatible if item.path.name not in before_refs
+        )
+        if len(created) == 1:
+            credential = created[0]
+        elif onboarding:
+            raise CliError(
+                "authentication completed, but its account could not be "
+                "identified uniquely; run 'orichum provider configure'"
+            )
+        else:
+            selected_ref = choose(
+                "Choose the authenticated account:",
+                tuple(
+                    (
+                        f"Authenticated {provider_name.title()} account "
+                        f"{index}",
+                        item.path.name,
+                    )
+                    for index, item in enumerate(compatible, start=1)
+                ),
+            )
+            credential = next(
+                item for item in compatible if item.path.name == selected_ref
+            )
+    return PendingProviderAccount(
+        provider=provider_name,
+        credential_ref=credential.path.name,
+        suggested_name=f"{provider_name.title()} account",
+    )
+
+
 def _provider_configure(
     paths: Mapping[str, Path],
     config: ResolvedConfig,
@@ -1907,137 +2216,14 @@ def _provider_configure(
         for name, details in providers.items()
     )
     provider_name = _prompt_choice("Choose a provider:", provider_choices)
-    provider = providers[provider_name]
-    auth_dir = paths["data"] / "auth"
-    if auth_dir.exists():
-        repair_credential_modes(auth_dir)
-        before_credentials = list_credentials(auth_dir)
-    else:
-        before_credentials = ()
-    before_refs = {credential.path.name for credential in before_credentials}
-    registry = paths["config"] / "accounts.json"
-    accounts = load_accounts(registry)
-    assigned = {account.credential_ref for account in accounts}
-    existing = tuple(
-        credential
-        for credential in before_credentials
-        if (
-            credential.provider == provider["authType"]
-            and not credential.disabled
-            and credential.path.name not in assigned
-        )
+    pending = _prepare_provider_account(
+        paths,
+        config,
+        provider_name,
+        onboarding=onboarding,
+        diagnostics=diagnostics,
     )
-    credential = None
-    if existing:
-        if onboarding:
-            if len(existing) != 1:
-                raise CliError(
-                    "multiple unregistered authentications are available; "
-                    "run 'orichum provider configure' to choose one"
-                )
-            credential = existing[0]
-        else:
-            selected_ref = _prompt_choice(
-                "Use an existing authentication or sign in again:",
-                (
-                    *(
-                        (
-                            f"Existing {provider_name.title()} "
-                            f"authentication {index}",
-                            item.path.name,
-                        )
-                        for index, item in enumerate(existing, start=1)
-                    ),
-                    ("Authenticate another account", "__login__"),
-                ),
-            )
-            if selected_ref != "__login__":
-                credential = next(
-                    item
-                    for item in existing
-                    if item.path.name == selected_ref
-                )
-
-    if credential is None:
-        if onboarding and diagnostics is not None:
-            login_status = _managed_provider_login(
-                paths,
-                provider["authType"],
-                _PROVIDER_LABELS.get(provider_name, provider_name.title()),
-                diagnostics,
-            )
-        else:
-            login_status = _run_external(
-                "orichum-login",
-                [provider["authType"]],
-                environment={"ORICHUM_PROVIDER_CONFIGURE": "1"},
-            )
-        if login_status != 0:
-            return login_status
-    elif onboarding and diagnostics is not None:
-        label = _PROVIDER_LABELS.get(provider_name, provider_name.title())
-        diagnostics.emit(f"{label} authentication")
-        diagnostics.emit("  ✓ Already configured")
-
-    repair_credential_modes(auth_dir)
-    compatible = tuple(
-        credential
-        for credential in list_credentials(auth_dir)
-        if (
-            credential.provider == provider["authType"]
-            and not credential.disabled
-            and credential.path.name not in assigned
-        )
-    )
-    if credential is None and not compatible:
-        registered = tuple(
-            account.name
-            for account in accounts
-            if (
-                account.provider == provider_name
-                and account.credential_ref in assigned
-            )
-        )
-        if registered:
-            print(
-                "Provider account already registered: "
-                + ", ".join(registered)
-            )
-            return 0
-        raise CliError(
-            "authentication completed, but no unregistered compatible "
-            "credential was found; inspect 'orichum provider accounts'"
-        )
-    if credential is None:
-        new_credentials = tuple(
-            item
-            for item in compatible
-            if item.path.name not in before_refs
-        )
-        if len(new_credentials) == 1:
-            credential = new_credentials[0]
-        elif onboarding:
-            raise CliError(
-                "authentication completed, but its credential could not be "
-                "identified uniquely; run 'orichum provider configure'"
-            )
-        else:
-            selected_ref = _prompt_choice(
-                "Choose the authenticated account:",
-                tuple(
-                    (
-                        f"Authenticated {provider_name.title()} account "
-                        f"{index}",
-                        item.path.name,
-                    )
-                    for index, item in enumerate(compatible, start=1)
-                ),
-            )
-            credential = next(
-                item for item in compatible if item.path.name == selected_ref
-            )
-    default_name = f"{provider_name.title()} account"
-    name = _prompt_text("Account name", default_name)
+    name = _prompt_text("Account name", pending.suggested_name)
     if onboarding:
         pool = "shared"
         priority = "primary"
@@ -2076,7 +2262,7 @@ def _provider_configure(
             account_command="add",
             name=name,
             provider=provider_name,
-            credential_ref=credential.path.name,
+            credential_ref=pending.credential_ref,
             pool=pool,
             priority=priority,
         ),
@@ -3144,6 +3330,29 @@ def build_parser() -> argparse.ArgumentParser:
         "directory",
     )
 
+    configure = command(
+        commands,
+        "configure",
+        "Guide ongoing project configuration.",
+        description=(
+            "Configure accounts, models, project settings, and repair for "
+            "one Orichum project through guided live choices."
+        ),
+    )
+    set_completion(
+        configure.add_argument(
+            "--project",
+            metavar="PROJECT",
+            help="configured project root; defaults to the current project",
+        ),
+        "context",
+    )
+    configure.add_argument(
+        "--verbose",
+        action="store_true",
+        help="stream technical diagnostics while retaining the private log",
+    )
+
     config = command(
         commands,
         "config",
@@ -3745,6 +3954,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if parsed.command == "setup" and not _interactive_terminal():
             raise CliError("setup requires an interactive terminal")
+        if parsed.command == "configure" and not _interactive_terminal():
+            raise CliError("configure requires an interactive terminal")
         if parsed.command == "status":
             session_id = parsed.session_id or os.environ.get(
                 "ORICHUM_SESSION_ID"
@@ -3762,6 +3973,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 paths,
                 config,
                 parsed.project,
+                verbose=parsed.verbose,
+            )
+        if parsed.command == "configure":
+            project = (
+                Path(parsed.project).expanduser()
+                if parsed.project is not None
+                else Path.cwd()
+            )
+            return run_configure(
+                paths,
+                config,
+                project,
                 verbose=parsed.verbose,
             )
         if parsed.command == "status":
@@ -4083,6 +4306,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 _mutate_account(parsed, paths, config)
             return 0
+    except UiCancelled:
+        print(
+            "Configuration cancelled.\nRun: orichum configure",
+            file=sys.stderr,
+        )
+        return 130
     except (
         AccountError,
         CatalogError,
