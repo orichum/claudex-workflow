@@ -4,6 +4,8 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.6 - 2026-08-03
+
 ### Added
 
 - `orichum configure` now provides one guided flow for additional provider
