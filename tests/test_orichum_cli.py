@@ -78,7 +78,7 @@ class OrichumCliTests(unittest.TestCase):
             prefix="version-runtime.",
         ))
         (runtime / "VERSION").write_text(
-            "0.1.0-rc.5\n",
+            "0.1.0-rc.6\n",
             encoding="ascii",
         )
         if isinstance(identity, dict):
@@ -521,19 +521,19 @@ class OrichumCliTests(unittest.TestCase):
     def test_version_uses_release_identity_file(self) -> None:
         output = self.version_output({
             "schemaVersion": 1,
-            "version": "0.1.0-rc.5",
+            "version": "0.1.0-rc.6",
             "sourceKind": "git",
             "sourceCommit": "b118c9f5f8e3e9e822be10552184b7e1b1c2cbba",
             "dirty": False,
             "exactTag": True,
         })
 
-        self.assertEqual(output, "Orichum 0.1.0-rc.5\n")
+        self.assertEqual(output, "Orichum 0.1.0-rc.6\n")
 
     def test_version_identifies_clean_git_development_build(self) -> None:
         output = self.version_output({
             "schemaVersion": 1,
-            "version": "0.1.0-rc.5",
+            "version": "0.1.0-rc.6",
             "sourceKind": "git",
             "sourceCommit": "b118c9f5f8e3e9e822be10552184b7e1b1c2cbba",
             "dirty": False,
@@ -542,13 +542,13 @@ class OrichumCliTests(unittest.TestCase):
 
         self.assertEqual(
             output,
-            "Orichum 0.1.0-rc.5+g.b118c9f5f8e3\n",
+            "Orichum 0.1.0-rc.6+g.b118c9f5f8e3\n",
         )
 
     def test_version_identifies_dirty_git_development_build(self) -> None:
         output = self.version_output({
             "schemaVersion": 1,
-            "version": "0.1.0-rc.5",
+            "version": "0.1.0-rc.6",
             "sourceKind": "git",
             "sourceCommit": "b118c9f5f8e3e9e822be10552184b7e1b1c2cbba",
             "dirty": True,
@@ -557,13 +557,13 @@ class OrichumCliTests(unittest.TestCase):
 
         self.assertEqual(
             output,
-            "Orichum 0.1.0-rc.5+g.b118c9f5f8e3.dirty\n",
+            "Orichum 0.1.0-rc.6+g.b118c9f5f8e3.dirty\n",
         )
 
     def test_version_uses_manifest_digest_without_git(self) -> None:
         output = self.version_output({
             "schemaVersion": 1,
-            "version": "0.1.0-rc.5",
+            "version": "0.1.0-rc.6",
             "sourceKind": "source",
             "sourceCommit": None,
             "dirty": False,
@@ -572,24 +572,24 @@ class OrichumCliTests(unittest.TestCase):
 
         self.assertEqual(
             output,
-            "Orichum 0.1.0-rc.5+src.8d8406645ad4\n",
+            "Orichum 0.1.0-rc.6+src.8d8406645ad4\n",
         )
 
     def test_version_missing_or_invalid_identity_never_looks_released(
         self,
     ) -> None:
         for identity, digest, expected in (
-            (None, "8" * 64, "Orichum 0.1.0-rc.5+src.888888888888\n"),
-            ("not json\n", "9" * 64, "Orichum 0.1.0-rc.5+src.999999999999\n"),
+            (None, "8" * 64, "Orichum 0.1.0-rc.6+src.888888888888\n"),
+            ("not json\n", "9" * 64, "Orichum 0.1.0-rc.6+src.999999999999\n"),
             ({
                 "schemaVersion": True,
-                "version": "0.1.0-rc.5",
+                "version": "0.1.0-rc.6",
                 "sourceKind": "git",
                 "sourceCommit": "b118c9f5f8e3e9e822be10552184b7e1b1c2cbba",
                 "dirty": False,
                 "exactTag": True,
-            }, "a" * 64, "Orichum 0.1.0-rc.5+src.aaaaaaaaaaaa\n"),
-            (None, None, "Orichum 0.1.0-rc.5+src.unknown\n"),
+            }, "a" * 64, "Orichum 0.1.0-rc.6+src.aaaaaaaaaaaa\n"),
+            (None, None, "Orichum 0.1.0-rc.6+src.unknown\n"),
         ):
             with self.subTest(identity=identity, digest=digest):
                 self.assertEqual(
