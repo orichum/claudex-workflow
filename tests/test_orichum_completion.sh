@@ -120,6 +120,16 @@ contains_reply stack
 contains_reply status
 contains_reply setup
 
+COMP_WORDS=(orichum c)
+COMP_CWORD=1
+_orichum_complete
+contains_reply configure
+
+COMP_WORDS=(orichum configure --project /work)
+COMP_CWORD=3
+_orichum_complete
+contains_reply '/work/acme project'
+
 COMP_WORDS=(orichum stack sh)
 COMP_CWORD=2
 _orichum_complete

@@ -118,17 +118,26 @@ If launch fails, start with:
 orichum doctor
 ```
 
-Use `orichum provider configure`, `orichum stack configure`, and
-`orichum context add` later when you deliberately want additional accounts,
-stacks, or project mappings. See [Providers and accounts](docs/providers-and-accounts.md),
-[Model stacks](docs/model-stacks.md), and
-[Project contexts](docs/project-contexts.md) for those advanced workflows.
+For ongoing changes, use one guided command from the project you want to
+change:
+
+```bash
+orichum configure
+```
+
+It adds accounts, configures a same-provider backup, discovers live models,
+assigns models by work type or individual role, previews the complete effect,
+and applies it to new sessions. Use `orichum configure --project ROOT` when you
+are administering another configured project. The low-level provider, stack,
+and context commands remain available under the guided Advanced area and for
+automation.
 
 ## Daily use
 
 | What you want to do | Command |
 |---|---|
 | Start in the current project | `orichum` |
+| Configure accounts, backups, models, or project settings | `orichum configure` |
 | Check project mappings | `orichum context list` |
 | Configure project Jira | `orichum context jira ROOT` |
 | Remove project Jira | `orichum context jira ROOT --remove` |
@@ -149,11 +158,11 @@ The complete command map is in the [CLI reference](docs/cli-reference.md).
 
 ## Add capabilities when you need them
 
-- **More accounts:** register additional credentials, name them, and set
-  priorities for new-session selection and same-family recovery. See
+- **More accounts:** use `orichum configure` to add a named account or an
+  explicit same-provider backup without entering pools or priorities. See
   [Multi-account routing](docs/multi-account-usage.md).
-- **More model families:** authenticate another provider and use
-  `orichum stack configure` to add its live models. See
+- **More model families:** use `orichum configure` to authenticate another
+  provider and choose its live models for controller or specialist work. See
   [Model stacks](docs/model-stacks.md).
 - **Resumes and family changes:** resume a frozen session or fork it with a
   bounded handoff onto another stack. See [Sessions](docs/sessions.md).

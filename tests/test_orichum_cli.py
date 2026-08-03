@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import replace
 import io
 import json
 import os
@@ -20,6 +21,10 @@ from unittest import mock
 from integrations.common import orichum_cli
 from integrations.common import project_context
 from integrations.common import stack_bindings
+from integrations.common.configure_state import (
+    ConfigurationDraft,
+    PendingAccount,
+)
 from integrations.common.leanctx_monitor import (
     LeanctxGainSummary,
     LeanctxProxyStats,
@@ -120,6 +125,314 @@ class OrichumCliTests(unittest.TestCase):
                 "state": home / ".orichum" / "state",
             },
         )
+
+    def test_configure_parser_is_goal_based_and_project_targeted(self) -> None:
+        parser = orichum_cli.build_parser()
+        parsed = parser.parse_args(
+            ["configure", "--project", "/work/acme", "--verbose"]
+        )
+
+        self.assertEqual(parsed.command, "configure")
+        self.assertEqual(parsed.project, "/work/acme")
+        self.assertTrue(parsed.verbose)
+        configure = next(
+            action.choices["configure"]
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        help_text = configure.format_help()
+        self.assertIn(
+            "accounts, models, project settings, and repair",
+            help_text,
+        )
+        self.assertNotIn("candidate", help_text.casefold())
+        self.assertNotIn("routing prefix", help_text.casefold())
+
+    def test_configure_dispatches_to_guided_wizard(self) -> None:
+        paths = orichum_cli._paths(self.environment)
+        config = object()
+        with (
+            mock.patch.object(orichum_cli, "_interactive_terminal", return_value=True),
+            mock.patch.object(orichum_cli, "_load", return_value=(paths, config)),
+            mock.patch.object(orichum_cli, "run_configure", return_value=0) as run,
+        ):
+            status = orichum_cli.main(
+                ["configure", "--project", "/work/acme", "--verbose"]
+            )
+
+        self.assertEqual(status, 0)
+        run.assert_called_once_with(
+            paths,
+            config,
+            Path("/work/acme"),
+            verbose=True,
+        )
+
+    def test_configuration_apply_registers_account_and_assigns_stack(self) -> None:
+        from tests.test_configure_state import _snapshot
+
+        snapshot = _snapshot()
+        changed = replace(
+            snapshot.assignments["controller"],
+            model="gpt-5.6-terra",
+            upstream="gpt-5.6-terra",
+        )
+        draft = (
+            ConfigurationDraft.from_snapshot(snapshot)
+            .with_roles(("controller",), changed)
+            .with_pending_account(
+                PendingAccount(
+                    provider="openai",
+                    credential_ref="new-openai.json",
+                    name="OpenAI new",
+                    pool="shared",
+                    priority=50,
+                    intent="additional",
+                )
+            )
+        )
+        created = replace(
+            snapshot.accounts[1],
+            id="oc-a-dddddddddddddddd",
+            routing_prefix="oc-r-dddddddddddddddd",
+            name="OpenAI new",
+            credential_ref="new-openai.json",
+        )
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+        }
+        paths["config"].mkdir(mode=0o700)
+        stack_snapshot = SimpleNamespace(
+            stacks=snapshot.stacks,
+            bindings=snapshot.bindings,
+        )
+        with (
+            mock.patch.object(orichum_cli, "_mutate_account") as mutate,
+            mock.patch.object(
+                orichum_cli,
+                "load_accounts",
+                side_effect=(snapshot.accounts, (*snapshot.accounts, created)),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "load_stack_snapshot",
+                return_value=stack_snapshot,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "build_managed_stack",
+                return_value=snapshot.stacks,
+            ),
+            mock.patch.object(orichum_cli, "save_stack") as save,
+            mock.patch.object(
+                orichum_cli,
+                "assign_stack_to_context",
+            ) as assign,
+            mock.patch.object(
+                orichum_cli,
+                "control_plane_transaction",
+                return_value=contextlib.nullcontext(),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "stack_binding_transaction",
+                return_value=contextlib.nullcontext(),
+            ),
+        ):
+            orichum_cli._apply_configuration_draft(
+                paths,
+                object(),
+                snapshot,
+                draft,
+            )
+
+        self.assertEqual(mutate.call_count, 1)
+        self.assertEqual(mutate.call_args.args[0].account_command, "add")
+        self.assertEqual(mutate.call_args.args[0].priority, "50")
+        save.assert_called_once()
+        assign.assert_called_once_with(
+            paths["config"] / "projects.json",
+            snapshot.target.root,
+            orichum_cli.managed_stack_name(snapshot.target.root),
+            snapshot.stacks.stacks,
+        )
+
+    def test_configuration_apply_removes_incompatible_new_backup(self) -> None:
+        from tests.test_configure_state import _snapshot
+
+        snapshot = _snapshot()
+        primary = snapshot.accounts[0]
+        created = replace(
+            snapshot.accounts[1],
+            id="oc-a-dddddddddddddddd",
+            routing_prefix="oc-r-dddddddddddddddd",
+            name="Unusable backup",
+            credential_ref="unusable-backup.json",
+        )
+        draft = ConfigurationDraft.from_snapshot(snapshot).with_pending_account(
+            PendingAccount(
+                provider="openai",
+                credential_ref=created.credential_ref,
+                name=created.name,
+                pool="shared",
+                priority=50,
+                intent="backup",
+                primary_id=primary.id,
+                primary_name=primary.name,
+            )
+        )
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+        }
+        paths["config"].mkdir(mode=0o700)
+        refreshed = replace(
+            snapshot,
+            accounts=(*snapshot.accounts, created),
+        )
+        with (
+            mock.patch.object(orichum_cli, "_mutate_account") as mutate,
+            mock.patch.object(
+                orichum_cli,
+                "load_accounts",
+                side_effect=(snapshot.accounts, (*snapshot.accounts, created)),
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "load_configuration_snapshot",
+                return_value=refreshed,
+            ),
+            self.assertRaisesRegex(
+                orichum_cli.CliError,
+                "compatible route",
+            ),
+        ):
+            orichum_cli._apply_configuration_draft(
+                paths,
+                object(),
+                snapshot,
+                draft,
+            )
+
+        self.assertEqual(mutate.call_count, 2)
+        self.assertEqual(mutate.call_args_list[0].args[0].account_command, "add")
+        self.assertEqual(
+            mutate.call_args_list[1].args[0].account_command,
+            "remove",
+        )
+
+    def test_configuration_apply_rolls_back_first_when_second_add_fails(self) -> None:
+        from tests.test_configure_state import _snapshot
+
+        snapshot = _snapshot()
+        first = replace(
+            snapshot.accounts[1],
+            id="oc-a-dddddddddddddddd",
+            routing_prefix="oc-r-dddddddddddddddd",
+            name="First new",
+            credential_ref="first-new.json",
+        )
+        draft = ConfigurationDraft.from_snapshot(snapshot)
+        for name, credential in (
+            (first.name, first.credential_ref),
+            ("Second new", "second-new.json"),
+        ):
+            draft = draft.with_pending_account(
+                PendingAccount(
+                    provider="openai",
+                    credential_ref=credential,
+                    name=name,
+                    pool="shared",
+                    priority=50,
+                    intent="additional",
+                )
+            )
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+        }
+        paths["config"].mkdir(mode=0o700)
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "_mutate_account",
+                side_effect=(None, orichum_cli.CliError("second add failed"), None),
+            ) as mutate,
+            mock.patch.object(
+                orichum_cli,
+                "load_accounts",
+                side_effect=(snapshot.accounts, (*snapshot.accounts, first)),
+            ),
+            self.assertRaisesRegex(orichum_cli.CliError, "second add failed"),
+        ):
+            orichum_cli._apply_configuration_draft(
+                paths,
+                object(),
+                snapshot,
+                draft,
+            )
+
+        self.assertEqual(mutate.call_count, 3)
+        self.assertEqual(
+            mutate.call_args_list[2].args[0].account_command,
+            "remove",
+        )
+        self.assertEqual(mutate.call_args_list[2].args[0].selector, first.id)
+
+    def test_configuration_apply_rejects_unusable_existing_stack(self) -> None:
+        from tests.test_configure_state import _snapshot
+
+        snapshot = _snapshot()
+        draft = ConfigurationDraft.from_snapshot(snapshot).with_project(
+            replace(snapshot.target, stack_name="offline")
+        )
+        paths = {
+            "config": self.root / "config",
+            "data": self.root / "data",
+        }
+        paths["config"].mkdir(mode=0o700)
+        stack_snapshot = SimpleNamespace(
+            stacks=snapshot.stacks,
+            bindings=snapshot.bindings,
+        )
+        with (
+            mock.patch.object(
+                orichum_cli,
+                "load_accounts",
+                return_value=snapshot.accounts,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "load_stack_snapshot",
+                return_value=stack_snapshot,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "load_configuration_snapshot",
+                return_value=snapshot,
+            ),
+            mock.patch.object(
+                orichum_cli,
+                "stack_is_live_compatible",
+                return_value=False,
+            ),
+            mock.patch.object(orichum_cli, "save_stack") as save,
+            mock.patch.object(orichum_cli, "assign_stack_to_context") as assign,
+            self.assertRaisesRegex(
+                orichum_cli.CliError,
+                "not usable",
+            ),
+        ):
+            orichum_cli._apply_configuration_draft(
+                paths,
+                object(),
+                snapshot,
+                draft,
+            )
+
+        save.assert_not_called()
+        assign.assert_not_called()
 
     def test_orichum_home_can_be_overridden_as_one_unit(self) -> None:
         home = self.root / "private-orichum"
@@ -1782,6 +2095,28 @@ class OrichumCliTests(unittest.TestCase):
         self.assertNotIn(credential.name, stdout)
         self.assertNotIn("work@example.com", stdout)
         self.assertNotIn("DO-NOT-PRINT", stdout)
+
+    def test_prepare_provider_account_does_not_register_it(self) -> None:
+        config_home, credential = self.provision_account_runtime()
+
+        with (
+            mock.patch.dict(os.environ, self.environment, clear=False),
+            mock.patch("builtins.input", return_value=""),
+        ):
+            paths, config = orichum_cli._load()
+            pending = orichum_cli._prepare_provider_account(
+                paths,
+                config,
+                "anthropic",
+            )
+
+        self.assertEqual(pending.provider, "anthropic")
+        self.assertEqual(pending.credential_ref, credential.name)
+        self.assertNotIn(credential.name, repr(pending))
+        self.assertEqual(
+            orichum_cli.load_accounts(config_home / "accounts.json"),
+            (),
+        )
 
     def test_onboarding_registers_first_account_without_advanced_prompts(
         self,

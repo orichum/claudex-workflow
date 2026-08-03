@@ -22,6 +22,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
       - name: Install contract dependencies
         shell: bash
         run: |
@@ -33,5 +36,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          uvx --from ruff==0.16.1 ruff format --check \
+            integrations/common/terminal_ui.py \
+            integrations/common/configure_state.py \
+            integrations/common/configure_wizard.py \
+            tests/test_terminal_ui.py \
+            tests/test_configure_state.py \
+            tests/test_configure_wizard.py
+          uvx --from ruff==0.16.1 ruff check \
+            integrations/common/terminal_ui.py \
+            integrations/common/configure_state.py \
+            integrations/common/configure_wizard.py \
+            integrations/common/orichum_cli.py \
+            tests/test_terminal_ui.py \
+            tests/test_configure_state.py \
+            tests/test_configure_wizard.py \
+            tests/test_orichum_cli.py \
+            tests/test_orichum_completion.py
           python3 -m unittest discover -s tests -p 'test_*.py'
           bash tests/test_smoke.sh

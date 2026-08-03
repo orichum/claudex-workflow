@@ -27,6 +27,11 @@ class OrichumCompletionTests(unittest.TestCase):
             ["browser", "none", "vscode"],
         )
         self.assertTrue(spec["commands"]["run"]["remainder"])
+        configure = spec["commands"]["configure"]
+        self.assertEqual(
+            configure["options"]["--project"]["completion"],
+            "context",
+        )
         context_add = spec["commands"]["context"]["commands"]["add"]
         self.assertEqual(
             context_add["positionals"][0]["completion"],
@@ -79,6 +84,7 @@ class OrichumCompletionTests(unittest.TestCase):
         self.assertIn("complete -c orichum", rendered["fish"])
         for definition in rendered.values():
             self.assertIn("stack", definition)
+            self.assertIn("configure", definition)
             self.assertIn("--leanctx-profile", definition)
             self.assertIn("lean", definition)
             self.assertIn("full", definition)
