@@ -10,6 +10,8 @@ materially reduce uncertainty or controller context.
 - Independent repository investigation can use an explorer.
 - Verification can use a separate verifier.
 - Correctness and architecture specialists are reserved for relevant risk.
+- Claude Code's built-in `Plan` and `Explore` requests are routed to audited
+  Orichum roles instead of being allowed as generic agents.
 - The controller remains the sole writer and synthesizes all findings.
 - Generic agents and arbitrary workflows are denied.
 - Ultra effort is not the default; controller effort is high.
@@ -30,6 +32,34 @@ Every specialist reuses the session's project-jailed LeanCTX MCP:
   repeated orientation calls and concurrent memory writes;
 - raw native read/search tools are not exposed to specialists, so repository
   context does not silently bypass compression.
+
+## Built-in agent aliases
+
+The orchestration hook preserves the original task input while replacing the
+built-in agent type:
+
+- `Plan` becomes `orichum-controller:planning-advisor`;
+- `Explore` becomes `orichum-controller:repository-explorer`.
+
+The planning advisor is a bounded, read-only, non-delegating role for routine
+implementation and operational planning. It uses the session's routed model
+and LeanCTX tools, and returns validation, rollback, stop conditions, and
+remaining uncertainty. Unknown generic agent types remain denied.
+
+## Compaction continuity
+
+After manual or automatic compaction, Orichum writes a private checkpoint in
+the session run directory. It records the compact summary, repository HEAD and
+dirty state, and only the type and description of successfully completed Agent
+calls. Prompts and agent results are not copied into the checkpoint.
+
+When Claude Code restarts the same session with `source=compact`, Orichum adds a
+short continuity directive. If repository state is unchanged, completed
+investigations must not be repeated. If it changed, only the changed boundary
+should be revalidated. The full compact summary is not injected a second time.
+
+This checkpoint is private, bounded, and transient session state. It is not
+durable LeanCTX knowledge and must not be promoted to project memory.
 
 Session materialization and resume verify this tool contract together with each
 role's frozen model. A modified or outdated agent definition is rejected before
