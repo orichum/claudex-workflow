@@ -232,6 +232,7 @@ historical session contracts, and installer port conflicts.
 
 | Guide | Use it for |
 |---|---|
+| [Installation, setup, and configuration](docs/setup-and-configuration.md) | Complete guided journey from installation through first-run setup and ongoing project configuration |
 | [Installation and upgrades](docs/installation.md) | Platforms, prerequisites, locations, ports, services, and upgrades |
 | [Providers and accounts](docs/providers-and-accounts.md) | Login, credentials, account names, pools, and priorities |
 | [Multi-account routing](docs/multi-account-usage.md) | Multiple accounts from the same or different providers |

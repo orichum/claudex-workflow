@@ -1,5 +1,10 @@
 # Configuration
 
+For normal interactive changes, run `orichum configure` from the target project.
+The complete guided account, backup, model, role, project, review, repair, and
+Advanced flows are documented in
+[Installation, setup, and configuration](setup-and-configuration.md).
+
 Orichum exposes several focused files as one validated control plane. Edit the
 installed copies shown by:
 
