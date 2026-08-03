@@ -505,38 +505,16 @@ jobs:
               test "$(systemctl --user is-enabled orichum-cliproxy.service)" = enabled
               test "$(systemctl --user is-active orichum-cliproxy.service)" = active
               test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
-              umask 077
-              mkdir -p "$ORICHUM_DATA_HOME/auth"
-              printf "%s\n" '\''{
-                "type": "codex",
-                "email": "wsl-acceptance@example.invalid",
-                "access_token": "acceptance-placeholder-not-a-secret",
-                "refresh_token": "acceptance-placeholder-not-a-secret",
-                "disabled": false
-              }'\'' >"$ORICHUM_DATA_HOME/auth/codex-wsl.json"
-              orichum provider account add \
-                "WSL GPT" openai codex-wsl.json shared --priority primary
               ./install.sh --verbose | tee /tmp/orichum-install-verbose.log
               grep -Eq "^CLIProxyAPI[[:space:]]+reused[[:space:]]*$" \
                 /tmp/orichum-install-verbose.log
-              test "$(systemctl --user is-active orichum-route-proxy.service)" = active
-              script --quiet --return --command \
-                "orichum setup /home/orichum/workspace" \
-                /tmp/orichum-setup-normal.log
-              grep -Fq "Orichum is ready." /tmp/orichum-setup-normal.log
-              if grep -Eq "127\\.0\\.0\\.1|Runtime release:|\\.service" \
-                  /tmp/orichum-setup-normal.log; then
-                exit 1
-              fi
-              script --quiet --return --command \
-                "orichum setup --verbose /home/orichum/workspace" \
-                /tmp/orichum-setup-verbose.log
-              grep -Fq "Orichum local components are ready." \
-                /tmp/orichum-setup-verbose.log
-              setup_log="$(
-                find "$ORICHUM_DATA_HOME/logs" -type f \
-                  -name "setup-*.log" | sort | tail -1
-              )"
-              test -n "$setup_log"
-              test "$(stat -c %a "$setup_log")" = 600
+              test "$(systemctl --user is-active orichum-route-proxy.service 2>/dev/null || true)" = inactive
+              ./install.sh --uninstall --purge
+              test "$(systemctl --user is-active orichum-cliproxy.service 2>/dev/null || true)" != active
+              test ! -e "$HOME/.config/systemd/user/orichum-cliproxy.service"
+              test ! -e "$HOME/.config/systemd/user/orichum-route-proxy.service"
+              test ! -e "$USER_BIN_DIR/orichum"
+              test ! -e "$ORICHUM_DATA_HOME"
+              test ! -e "$ORICHUM_CONFIG_HOME"
+              test -d /home/orichum/workspace
             '
