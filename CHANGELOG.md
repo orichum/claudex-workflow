@@ -4,6 +4,18 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- A bounded read-only planning advisor and private per-session compaction
+  checkpoints preserve completed investigation metadata across context
+  compaction without duplicating prompts or agent results.
+
+### Changed
+
+- Claude Code's built-in `Plan` and `Explore` agents are transparently routed
+  to audited Orichum roles, while generic and isolated read-only agents remain
+  denied.
+
 ## 0.1.0-rc.7 - 2026-08-03
 
 ### Added

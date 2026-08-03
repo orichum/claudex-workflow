@@ -23,6 +23,18 @@
         ]
       }
     ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/save-compaction-checkpoint.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume",
@@ -31,6 +43,16 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/check-local-services.sh\"",
             "timeout": 6
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/restore-compaction-checkpoint.sh\"",
+            "timeout": 5
           }
         ]
       }

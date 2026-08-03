@@ -307,9 +307,246 @@ done
 
 audited_workflows="$ROOT/controller/plugin/audited-workflows"
 orchestration_guard="$ROOT/controller/plugin/scripts/guard-orchestration.sh"
+planning_agent="$ROOT/controller/plugin/agents/planning-advisor.md"
 [[ -f "$audited_workflows/investigate.js" ]]
 [[ -f "$audited_workflows/review.js" ]]
 [[ ! -e "$ROOT/controller/plugin/workflows" ]]
+[[ -f "$planning_agent" ]]
+
+routed_plan="$(
+  CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \
+    "$orchestration_guard" <<'JSON'
+{"tool_name":"Agent","tool_input":{"subagent_type":"Plan","description":"Design rollout","prompt":"Produce the safe rollout plan","model":"inherit"}}
+JSON
+)"
+jq -e '
+  .hookSpecificOutput.permissionDecision == "allow"
+  and .hookSpecificOutput.updatedInput.subagent_type
+    == "orichum-controller:planning-advisor"
+  and .hookSpecificOutput.updatedInput.description == "Design rollout"
+  and .hookSpecificOutput.updatedInput.prompt
+    == "Produce the safe rollout plan"
+  and .hookSpecificOutput.updatedInput.model == "inherit"
+' >/dev/null <<<"$routed_plan"
+
+denied_isolated_plan="$(
+  CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \
+    "$orchestration_guard" <<'JSON'
+{"tool_name":"Agent","tool_input":{"subagent_type":"Plan","description":"Design rollout","prompt":"Produce the safe rollout plan","isolation":"worktree"}}
+JSON
+)"
+jq -e '
+  .hookSpecificOutput.permissionDecision == "deny"
+' >/dev/null <<<"$denied_isolated_plan"
+
+routed_explore="$(
+  CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \
+    "$orchestration_guard" <<'JSON'
+{"tool_name":"Agent","tool_input":{"subagent_type":"Explore","description":"Inspect module","prompt":"Find the relevant module"}}
+JSON
+)"
+jq -e '
+  .hookSpecificOutput.permissionDecision == "allow"
+  and .hookSpecificOutput.updatedInput.subagent_type
+    == "orichum-controller:repository-explorer"
+  and .hookSpecificOutput.updatedInput.description == "Inspect module"
+  and .hookSpecificOutput.updatedInput.prompt == "Find the relevant module"
+' >/dev/null <<<"$routed_explore"
+
+denied_generic="$(
+  CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \
+    "$orchestration_guard" <<'JSON'
+{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose","description":"Do everything","prompt":"Act without a bounded role"}}
+JSON
+)"
+jq -e '
+  .hookSpecificOutput.permissionDecision == "deny"
+' >/dev/null <<<"$denied_generic"
+
+checkpoint_writer="$ROOT/controller/plugin/scripts/save-compaction-checkpoint.sh"
+checkpoint_run="$fixture/checkpoint-run"
+checkpoint_repo="$fixture/checkpoint-repo"
+checkpoint_transcript="$fixture/checkpoint-transcript.jsonl"
+jq -e '
+  any(
+    .hooks.PostCompact[]?;
+    .matcher == "manual|auto"
+    and any(
+      .hooks[]?;
+      .command
+        == "\"${CLAUDE_PLUGIN_ROOT}/scripts/save-compaction-checkpoint.sh\""
+      and .timeout == 5
+    )
+  )
+' "$ROOT/controller/plugin/hooks/hooks.json" >/dev/null
+install -d -m 0700 "$checkpoint_run" "$checkpoint_repo"
+git -C "$checkpoint_repo" init --quiet
+git -C "$checkpoint_repo" config user.name "Orichum Tests"
+git -C "$checkpoint_repo" config user.email "tests@orichum.invalid"
+printf 'baseline\n' >"$checkpoint_repo/state.txt"
+git -C "$checkpoint_repo" add state.txt
+git -C "$checkpoint_repo" commit --quiet -m baseline
+checkpoint_head="$(git -C "$checkpoint_repo" rev-parse HEAD)"
+checkpoint_root="$(git -C "$checkpoint_repo" rev-parse --show-toplevel)"
+printf 'dirty\n' >>"$checkpoint_repo/state.txt"
+cat >"$checkpoint_transcript" <<'JSONL'
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","id":"agent-success-1","input":{"subagent_type":"orichum-controller:repository-explorer","description":"Inspect AKS Terraform setup","prompt":"secret prompt that must not be stored"}}]}}
+{"type":"user","toolUseResult":{"status":"completed"},"message":{"content":[{"type":"tool_result","tool_use_id":"agent-success-1","content":[{"type":"text","text":"large result that must not be stored"}]}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","id":"agent-denied","input":{"subagent_type":"Plan","description":"Denied built-in plan","prompt":"must not survive"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"agent-denied","is_error":true,"content":"Agent type is not in the Orichum controller allowlist: Plan"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","id":"agent-incomplete","input":{"subagent_type":"orichum-controller:repository-verifier","description":"Still running","prompt":"must not survive"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","id":"agent-success-2","input":{"subagent_type":"orichum-controller:planning-advisor","description":"Design usa-dev setup plan","prompt":"another secret prompt"}}]}}
+{"type":"user","toolUseResult":{"status":"completed"},"message":{"content":[{"type":"tool_result","tool_use_id":"agent-success-2","content":"completed output that must not be stored"}]}}
+JSONL
+chmod 0600 "$checkpoint_transcript"
+CLAUDEX_RUN_DIR="$checkpoint_run" \
+  "$checkpoint_writer" <<JSON
+{"session_id":"checkpoint-session","trigger":"manual","cwd":"$checkpoint_repo","transcript_path":"$checkpoint_transcript","compact_summary":"Continue with the approved implementation and do not repeat completed reconnaissance."}
+JSON
+checkpoint_file="$checkpoint_run/compaction-checkpoint.json"
+[[ -f "$checkpoint_file" && ! -L "$checkpoint_file" ]]
+[[ "$(path_mode "$checkpoint_file")" == 600 ]]
+jq -e \
+  --arg head "$checkpoint_head" \
+  --arg root "$checkpoint_root" \
+  --arg cwd "$checkpoint_repo" '
+  .schemaVersion == 1
+  and .sessionId == "checkpoint-session"
+  and .trigger == "manual"
+  and .cwd == $cwd
+  and .compactSummary
+    == "Continue with the approved implementation and do not repeat completed reconnaissance."
+  and .repository == {root: $root, head: $head, dirty: true}
+  and .completedAgents == [
+    {
+      type: "orichum-controller:repository-explorer",
+      description: "Inspect AKS Terraform setup"
+    },
+    {
+      type: "orichum-controller:planning-advisor",
+      description: "Design usa-dev setup plan"
+    }
+  ]
+  and (tostring | contains("secret prompt") | not)
+  and (tostring | contains("large result") | not)
+  and (tostring | contains("Denied built-in plan") | not)
+  and (tostring | contains("Still running") | not)
+' "$checkpoint_file" >/dev/null
+
+checkpoint_restore="$ROOT/controller/plugin/scripts/restore-compaction-checkpoint.sh"
+jq -e '
+  any(
+    .hooks.SessionStart[]?;
+    .matcher == "compact"
+    and any(
+      .hooks[]?;
+      .command
+        == "\"${CLAUDE_PLUGIN_ROOT}/scripts/restore-compaction-checkpoint.sh\""
+      and .timeout == 5
+    )
+  )
+' "$ROOT/controller/plugin/hooks/hooks.json" >/dev/null
+restored_checkpoint="$(
+  CLAUDEX_RUN_DIR="$checkpoint_run" \
+    "$checkpoint_restore" <<JSON
+{"session_id":"checkpoint-session","source":"compact","cwd":"$checkpoint_repo"}
+JSON
+)"
+jq -e '
+  .hookSpecificOutput.hookEventName == "SessionStart"
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("The compact summary is authoritative")
+  )
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Repository state matches the compaction checkpoint")
+  )
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Do not redispatch equivalent completed investigations")
+  )
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Inspect AKS Terraform setup")
+  )
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Design usa-dev setup plan")
+  )
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Continue with the approved implementation and do not repeat completed reconnaissance.") |
+    not
+  )
+  and (.hookSpecificOutput.additionalContext | length <= 8192)
+' >/dev/null <<<"$restored_checkpoint"
+
+mismatched_checkpoint="$(
+  CLAUDEX_RUN_DIR="$checkpoint_run" \
+    "$checkpoint_restore" <<JSON
+{"session_id":"different-session","source":"compact","cwd":"$checkpoint_repo"}
+JSON
+)"
+[[ -z "$mismatched_checkpoint" ]]
+
+malformed_checkpoint_run="$fixture/malformed-checkpoint-run"
+install -d -m 0700 "$malformed_checkpoint_run"
+printf 'not-json\n' \
+  >"$malformed_checkpoint_run/compaction-checkpoint.json"
+chmod 0600 "$malformed_checkpoint_run/compaction-checkpoint.json"
+malformed_checkpoint="$(
+  CLAUDEX_RUN_DIR="$malformed_checkpoint_run" \
+    "$checkpoint_restore" <<JSON
+{"session_id":"checkpoint-session","source":"compact","cwd":"$checkpoint_repo"}
+JSON
+)"
+[[ -z "$malformed_checkpoint" ]]
+
+oversized_checkpoint_run="$fixture/oversized-checkpoint-run"
+install -d -m 0700 "$oversized_checkpoint_run"
+head -c 524289 /dev/zero \
+  >"$oversized_checkpoint_run/compaction-checkpoint.json"
+chmod 0600 "$oversized_checkpoint_run/compaction-checkpoint.json"
+oversized_checkpoint="$(
+  CLAUDEX_RUN_DIR="$oversized_checkpoint_run" \
+    "$checkpoint_restore" <<JSON
+{"session_id":"checkpoint-session","source":"compact","cwd":"$checkpoint_repo"}
+JSON
+)"
+[[ -z "$oversized_checkpoint" ]]
+
+symlinked_checkpoint_run="$fixture/symlinked-checkpoint-run"
+install -d -m 0700 "$symlinked_checkpoint_run"
+ln -s "$checkpoint_file" \
+  "$symlinked_checkpoint_run/compaction-checkpoint.json"
+symlinked_checkpoint="$(
+  CLAUDEX_RUN_DIR="$symlinked_checkpoint_run" \
+    "$checkpoint_restore" <<JSON
+{"session_id":"checkpoint-session","source":"compact","cwd":"$checkpoint_repo"}
+JSON
+)"
+[[ -z "$symlinked_checkpoint" ]]
+
+git -C "$checkpoint_repo" add state.txt
+git -C "$checkpoint_repo" commit --quiet -m changed
+changed_checkpoint="$(
+  CLAUDEX_RUN_DIR="$checkpoint_run" \
+    "$checkpoint_restore" <<JSON
+{"session_id":"checkpoint-session","source":"compact","cwd":"$checkpoint_repo"}
+JSON
+)"
+jq -e '
+  .hookSpecificOutput.hookEventName == "SessionStart"
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Repository state changed since the compaction checkpoint")
+  )
+  and (
+    .hookSpecificOutput.additionalContext |
+    contains("Revalidate only the changed repository boundaries")
+  )
+' >/dev/null <<<"$changed_checkpoint"
 
 allowed_workflow="$(
   CLAUDE_PLUGIN_ROOT="$ROOT/controller/plugin" \

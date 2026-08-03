@@ -13,6 +13,27 @@ deny() {
   }'
 }
 
+route_agent() {
+  local target="$1"
+  if [[ -n "${isolation:-}" ]]; then
+    deny "Orichum read-only agents must run in the current checkout without worktree isolation"
+    return 0
+  fi
+  jq -cn \
+    --arg target "$target" \
+    --argjson original "$(jq -c '.tool_input' <<<"$input")" \
+    '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        permissionDecisionReason: (
+          "Routed built-in agent to audited Orichum type: " + $target
+        ),
+        updatedInput: ($original + {subagent_type: $target})
+      }
+    }'
+}
+
 if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$input"; then
   deny "Malformed orchestration hook input is denied"
   exit 0
@@ -25,10 +46,17 @@ case "$tool_name" in
     agent_type="$(jq -r '.tool_input.subagent_type // empty' <<<"$input")"
     isolation="$(jq -r '.tool_input.isolation // empty' <<<"$input")"
     case "$agent_type" in
+      Plan)
+        route_agent "orichum-controller:planning-advisor"
+        ;;
+      Explore)
+        route_agent "orichum-controller:repository-explorer"
+        ;;
       orichum-controller:repository-explorer|\
       orichum-controller:repository-verifier|\
       orichum-controller:correctness-critic|\
-      orichum-controller:architecture-advisor)
+      orichum-controller:architecture-advisor|\
+      orichum-controller:planning-advisor)
         if [[ -n "$isolation" ]]; then
           deny "Orichum read-only agents must run in the current checkout without worktree isolation"
         fi
