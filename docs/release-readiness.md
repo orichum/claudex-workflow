@@ -7,15 +7,18 @@ isolated coverage.
 
 ## Verdict
 
-The `0.1.0-rc.9` candidate passes deterministic regression coverage. Its
-native macOS ARM64 and Linux AMD64 release gates must be rerun after the
-release metadata is merged. This release bounds shared upstream ownership
-attestation, restores Orichum-owned resume commands, and installs the latest
-verified Claudex fork release, with runtime behavior merged at commit
-`3b765fcd4ef8354ed94cac20580b4124da724d16`. The latest provider-backed
-request evidence is carried forward from the `0.1.0-rc.4` baseline. WSL2 with
-systemd shares the Linux service implementation and has deterministic contract
-coverage; it has not been presented here as a native WSL acceptance run.
+The `0.1.0-rc.9` candidate passes native macOS ARM64, native Linux AMD64,
+and deterministic regression coverage. The native gates ran against source
+commit `02e067da0739e1ca6956fab36109783a1c99bf18`; the final deterministic
+contract passed at `59fffa466214f4cb861eb42c5f158a9360b023ad` after a
+test-only SSH-environment isolation fix. This release bounds shared upstream
+ownership attestation, restores Orichum-owned resume commands, and installs
+the latest verified Claudex fork release, with runtime behavior merged at
+commit `3b765fcd4ef8354ed94cac20580b4124da724d16`. The latest
+provider-backed request evidence is carried forward from the `0.1.0-rc.4`
+baseline. WSL2 with systemd shares the Linux service implementation and has
+deterministic contract coverage; it has not been presented here as a native
+WSL acceptance run.
 
 Every pull request and `main` push runs one fast Linux contract check. The
 costlier native macOS ARM64 and Linux AMD64 acceptance workflows remain manual
@@ -42,19 +45,22 @@ The following observed installation and service evidence was recorded on
 | Linux/systemd | Fresh and repeat installs completed in an Ubuntu 24.04 systemd-user container; the repeat completed in 7 seconds with one runtime release and no traceback |
 | Provider-free install | CLIProxyAPI remained active, the route proxy remained intentionally inactive, and the installer reported the bounded `pending-provider-login` state |
 | Migration safety | Consolidated-home migration, failed-install rollback, and retry behavior passed the transaction contract |
-| Local regression | The `0.1.0-rc.9` release branch passed 610 Python tests plus the installer and smoke shell suites on 2026-08-04 |
+| Local regression | The final `0.1.0-rc.9` source passed 610 Python tests and the smoke suite; the native Linux gate passed all eight shell acceptance suites on 2026-08-04 |
 
-## Latest published native baseline
+## 0.1.0-rc.9 release gates
 
-The `0.1.0-rc.8` deterministic and native release gates passed against source
-commit `408dd010eb394ea8867856f3ceed1d781c4f1b7e` and runtime behavior commit
-`5eadf627cb748f4db8f01b964f9c5cdb5c5a8c43`:
+The final deterministic gate passed against source commit
+`59fffa466214f4cb861eb42c5f158a9360b023ad`. The native gates passed against
+source commit `02e067da0739e1ca6956fab36109783a1c99bf18`; the only later
+source change isolates provider-login tests from ambient SSH variables and
+does not alter installed runtime behavior. Runtime behavior remains commit
+`3b765fcd4ef8354ed94cac20580b4124da724d16`:
 
 | Gate | Result |
 |---|---|
-| [Main Contract](https://github.com/orichum/orichum/actions/runs/30809762583) | Pass |
-| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30809783235) | Pass |
-| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30809786012) | Pass |
+| [Main Contract](https://github.com/orichum/orichum/actions/runs/30907073711) | Pass |
+| [macOS ARM64 acceptance](https://github.com/orichum/orichum/actions/runs/30905449680) | Pass |
+| [Linux AMD64 and WSL-compatible acceptance](https://github.com/orichum/orichum/actions/runs/30905451692) | Pass |
 
 Orichum is licensed under Apache-2.0. Its root `LICENSE` and `NOTICE` files
 declare the project terms, while `THIRD_PARTY_NOTICES.md` records the
