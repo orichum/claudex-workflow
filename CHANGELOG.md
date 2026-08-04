@@ -4,6 +4,24 @@ All notable Orichum changes are recorded here.
 
 ## Unreleased
 
+## 0.1.0-rc.9 - 2026-08-04
+
+### Changed
+
+- Orichum now installs the latest standard Claudex release from the maintained
+  `alupao/claudex` fork while retaining asset checksum verification,
+  transactional activation, and rollback.
+
+### Fixed
+
+- Shared upstream ownership attestation is cached for a bounded interval and
+  refreshed once across concurrent requests, preventing verifier process
+  amplification while remaining fail-closed and invalidating after upstream
+  failures.
+- Route-state errors now report ownership-verifier duration, and resumed
+  sessions print the stable `orichum resume SESSION_ID` command instead of
+  lower-level Claudex launch details.
+
 ## 0.1.0-rc.8 - 2026-08-03
 
 ### Added
