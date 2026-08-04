@@ -892,7 +892,7 @@ attempt_verified_fast_install() (
       $c.cliproxy.inputSha256 == $cliproxy_input and
       $c.cliproxy.probeSha256 == $cliproxy_probe and
       ($c.claudex.sourceIdentity |
-        startswith("github:StringKe/claudex@")) and
+        startswith("github:alupao/claudex@")) and
       $c.claudex.artifactSha256 == $claudex_artifact and
       $c.claudex.inputSha256 == $claudex_input and
       $c.claudex.probeSha256 == $claudex_probe and
@@ -1326,7 +1326,7 @@ cliproxy_state="$(stage_github_binary \
   "$cliproxy_recorded_artifact")"
 cliproxy_version="$(jq -r '.version' <<<"$cliproxy_state")"
 claudex_state="$(stage_github_binary \
-  StringKe/claudex 'claudex-v' "-${claudex_arch}-${claudex_os}.tar.gz" \
+  alupao/claudex 'claudex-v' "-${claudex_arch}-${claudex_os}.tar.gz" \
   claudex "$WORKFLOW_DATA_ROOT/bin/claudex" \
   "$installer_temp/claudex" "$claudex_resolve_upstream" \
   "$claudex_recorded_version" "$claudex_recorded_source" \
@@ -2977,7 +2977,7 @@ jq -n \
     },
     claudex: {
       version: $claudex_version,
-      sourceIdentity: ("github:StringKe/claudex@" + $claudex_tag),
+      sourceIdentity: ("github:alupao/claudex@" + $claudex_tag),
       artifactSha256: $claudex_artifact,
       inputSha256: $claudex_input,
       probeSha256: $claudex_probe

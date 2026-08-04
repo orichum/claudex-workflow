@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import http.client
 import io
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
 import threading
 import time
-from types import SimpleNamespace
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from integrations.common.model_routing import ROLES
 from integrations.common.orichum_sessions import RouteBinding
 from integrations.common.route_proxy import (
+    MAX_REQUEST_BYTES,
     AttestationGate,
     Cooldowns,
-    MAX_REQUEST_BYTES,
     ProxyConfig,
-    RouteProxyError,
     RequestTooLarge,
-    RouteProxyServer,
     RouteIndex,
+    RouteProxyError,
+    RouteProxyServer,
     _read_request_body,
 )
 from integrations.common.route_selection import Route
@@ -347,7 +348,6 @@ class RouteProxyTests(unittest.TestCase):
         barrier = threading.Barrier(24)
         full_calls = 0
         calls_lock = threading.Lock()
-        connection_barrier = threading.Barrier(23)
         attested_ports: list[int] = []
         failures: list[BaseException] = []
 
@@ -359,18 +359,10 @@ class RouteProxyTests(unittest.TestCase):
             time.sleep(0.05)
             return 48123
 
-        def connection_verifier(service_pid: int, client_port: int) -> None:
-            self.assertEqual(service_pid, 48123)
-            connection_barrier.wait(timeout=2)
-            with calls_lock:
-                attested_ports.append(client_port)
-
         def attest(client_port: int) -> None:
             try:
                 barrier.wait()
-                gate.verify(
-                    client_port, full_verifier, connection_verifier
-                )
+                gate.verify(client_port, full_verifier)
             except BaseException as failure:
                 failures.append(failure)
 
@@ -385,32 +377,24 @@ class RouteProxyTests(unittest.TestCase):
 
         self.assertEqual(failures, [])
         self.assertEqual(full_calls, 1)
-        self.assertEqual(sorted(attested_ports), list(range(48000, 48024)))
+        self.assertEqual(len(attested_ports), 1)
 
     def test_successful_attestation_expires(self) -> None:
         clock = [100.0]
         gate = AttestationGate(30, clock=lambda: clock[0])
         full_ports: list[int] = []
-        connection_ports: list[int] = []
 
         def full_verifier(client_port: int) -> int:
             full_ports.append(client_port)
             return 48123
 
-        def connection_verifier(
-            service_pid: int, client_port: int
-        ) -> None:
-            self.assertEqual(service_pid, 48123)
-            connection_ports.append(client_port)
-
-        gate.verify(48000, full_verifier, connection_verifier)
+        gate.verify(48000, full_verifier)
         clock[0] = 129.9
-        gate.verify(48001, full_verifier, connection_verifier)
+        gate.verify(48001, full_verifier)
         clock[0] = 130.0
-        gate.verify(48002, full_verifier, connection_verifier)
+        gate.verify(48002, full_verifier)
 
         self.assertEqual(full_ports, [48000, 48002])
-        self.assertEqual(connection_ports, [48001])
 
     def test_failed_attestation_is_not_cached(self) -> None:
         gate = AttestationGate(30)
@@ -424,8 +408,8 @@ class RouteProxyTests(unittest.TestCase):
             return 48123
 
         with self.assertRaises(RouteProxyError):
-            gate.verify(48000, full_verifier, mock.Mock())
-        gate.verify(48001, full_verifier, mock.Mock())
+            gate.verify(48000, full_verifier)
+        gate.verify(48001, full_verifier)
 
         self.assertEqual(calls, 2)
 
@@ -446,7 +430,7 @@ class RouteProxyTests(unittest.TestCase):
         def attest(client_port: int) -> None:
             try:
                 barrier.wait()
-                gate.verify(client_port, failing_full_verifier, mock.Mock())
+                gate.verify(client_port, failing_full_verifier)
             except BaseException as failure:
                 failures.append(failure)
 
@@ -462,9 +446,9 @@ class RouteProxyTests(unittest.TestCase):
         self.assertEqual(full_calls, 1)
         self.assertEqual(len(failures), 24)
 
-        gate.verify(49000, lambda _port: 48123, mock.Mock())
+        gate.verify(49000, lambda _port: 48123)
 
-    def test_connection_failure_refreshes_service_identity(self) -> None:
+    def test_invalidation_refreshes_service_identity(self) -> None:
         gate = AttestationGate(30)
         identities = iter((48123, 48124))
         full_ports: list[int] = []
@@ -473,28 +457,21 @@ class RouteProxyTests(unittest.TestCase):
             full_ports.append(client_port)
             return next(identities)
 
-        def connection_verifier(
-            service_pid: int, _client_port: int
-        ) -> None:
-            if service_pid == 48123:
-                raise RouteProxyError("stale service")
+        gate.verify(48000, full_verifier)
+        gate.verify(48001, full_verifier)
+        gate.invalidate()
+        gate.verify(48002, full_verifier)
 
-        gate.verify(48000, full_verifier, connection_verifier)
-        gate.verify(48001, full_verifier, connection_verifier)
+        self.assertEqual(full_ports, [48000, 48002])
 
-        self.assertEqual(full_ports, [48000, 48001])
-
-    def test_each_production_socket_is_attested(self) -> None:
-        completed = (
-            subprocess.CompletedProcess([], 0, stdout="40541\n"),
-            subprocess.CompletedProcess([], 0, stdout=""),
-        )
+    def test_cached_production_sockets_do_not_rerun_verifier(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="40541\n")
         with RecordingUpstream(
             [(200, b"first"), (200, b"second")]
         ) as upstream:
             with mock.patch(
                 "integrations.common.route_proxy.subprocess.run",
-                side_effect=completed,
+                return_value=completed,
             ) as verifier:
                 with ProxyHarness(
                     upstream.port, {}, data_home=Path("/data")
@@ -506,18 +483,48 @@ class RouteProxyTests(unittest.TestCase):
                         proxy.post(self.primary), (200, b"second")
                     )
 
-        first_arguments = verifier.call_args_list[0].args[0]
-        second_arguments = verifier.call_args_list[1].args[0]
+        self.assertEqual(verifier.call_count, 1)
+        first_arguments = verifier.call_args.args[0]
         self.assertEqual(
             Path(first_arguments[0]).name,
             "orichum-verify-leanctx-proxy",
         )
         self.assertEqual(first_arguments[1:3], ["/data", str(upstream.port)])
-        self.assertEqual(
-            second_arguments[1:4],
-            ["--connection", "40541", str(upstream.port)],
-        )
-        self.assertNotEqual(first_arguments[-1], second_arguments[-1])
+
+    def test_concurrent_routing_shares_one_attestation_refresh(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="40541\n")
+        with RecordingUpstream([(200, b"ok")] * 16) as upstream:
+            with mock.patch(
+                "integrations.common.route_proxy.subprocess.run",
+                return_value=completed,
+            ) as verifier:
+                with ProxyHarness(
+                    upstream.port, {}, data_home=Path("/data")
+                ) as proxy:
+                    with ThreadPoolExecutor(max_workers=16) as executor:
+                        responses = tuple(
+                            executor.map(
+                                lambda _: proxy.post(self.primary),
+                                range(16),
+                            )
+                        )
+
+        self.assertEqual(responses, ((200, b"ok"),) * 16)
+        self.assertEqual(verifier.call_count, 1)
+
+    def test_verifier_timeout_reports_duration(self) -> None:
+        with RecordingUpstream([]) as upstream:
+            with mock.patch(
+                "integrations.common.route_proxy.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("verify", 3),
+            ):
+                with ProxyHarness(
+                    upstream.port, {}, data_home=Path("/data")
+                ) as proxy:
+                    status, body = proxy.post(self.primary)
+
+        self.assertEqual(status, 502)
+        self.assertIn(b"ownership verifier timed out after", body)
 
     def test_invalid_service_identity_is_rejected(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="not-a-pid\n")
