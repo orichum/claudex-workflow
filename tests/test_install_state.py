@@ -25,7 +25,7 @@ from integrations.common.install_state import (
 def _component(
     *,
     version: str = "0.2.4",
-    source: str = "github:StringKe/claudex@v0.2.4",
+    source: str = "github:alupao/claudex@v0.2.5",
 ) -> dict[str, str]:
     return {
         "version": version,

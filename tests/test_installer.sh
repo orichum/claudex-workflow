@@ -12,6 +12,14 @@ trap report_test_failure ERR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../lib/workflow.sh
 source "$ROOT/lib/workflow.sh"
+if ! rg -Fq 'alupao/claudex' "$ROOT/install.sh"; then
+  printf 'Claudex fork provenance is not configured\n' >&2
+  exit 1
+fi
+if rg -Fq 'github:StringKe/claudex@' "$ROOT/install.sh"; then
+  printf 'legacy Claudex provenance remains trusted\n' >&2
+  exit 1
+fi
 export ORICHUM_INSTALL_BOOTSTRAP=true
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orichum-installer-test.XXXXXX")"
 fixture="$(cd -P "$fixture" && pwd)"

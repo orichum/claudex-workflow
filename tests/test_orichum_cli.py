@@ -4110,6 +4110,10 @@ class OrichumCliTests(unittest.TestCase):
             environment["ORICHUM_PYTHON_VALIDATED"],
             environment["ORICHUM_PYTHON"],
         )
+        self.assertEqual(
+            environment["CLAUDEX_RESUME_HINT"],
+            "orichum resume oc-s-0000000000000001",
+        )
 
     def test_session_without_selected_identity_preserves_github_environment(
         self,
