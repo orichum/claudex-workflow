@@ -968,9 +968,12 @@ service_definition_is_owned() {
   local service_kind="$3"
   local ownership_mode="${4:-either}"
   local workflow_root="${5:-}"
+  local allow_previous_leanctx_environment="${6:-false}"
+  [[ "$allow_previous_leanctx_environment" == true || \
+     "$allow_previous_leanctx_environment" == false ]] || return 1
   [[ -f "$service_file" && ! -L "$service_file" ]] || return 1
   workflow_python - "$service_file" "$data_root" "$service_kind" "$ownership_mode" \
-    "$workflow_root" <<'PY'
+    "$workflow_root" "$allow_previous_leanctx_environment" <<'PY'
 import os
 import plistlib
 import shlex
@@ -982,6 +985,7 @@ data_root = sys.argv[2]
 kind = sys.argv[3]
 mode = sys.argv[4]
 workflow_root = sys.argv[5]
+allow_previous_leanctx_environment = sys.argv[6] == "true"
 route_runner = (
     'import os,sys; '
     'sys.path.insert(0, os.environ["ORICHUM_WORKFLOW_ROOT"]); '
@@ -996,6 +1000,16 @@ def valid_port(value):
     except (TypeError, ValueError):
         return False
     return str(port) == str(value) and 1024 <= port <= 65535
+
+
+def leanctx_environment_owned(environment, expected):
+    if environment == expected:
+        return True
+    if not allow_previous_leanctx_environment:
+        return False
+    previous = dict(expected)
+    del previous["LEAN_CTX_RULES_INJECTION"]
+    return environment == previous
 
 
 def claudex_proxy_arguments_owned(arguments):
@@ -1096,16 +1110,20 @@ if b"<plist" in raw[:500]:
             ]
             and port_argument.startswith("--port=")
             and valid_port(port_argument[len("--port="):])
-            and environment == {
-                "HOME": os.environ.get("HOME"),
-                "LEAN_CTX_CACHE_DIR": f"{data_root}/leanctx/proxy/cache",
-                "LEAN_CTX_CONFIG_DIR": f"{data_root}/leanctx/proxy/config",
-                "LEAN_CTX_DATA_DIR": f"{data_root}/leanctx/lean-ctx",
-                "LEAN_CTX_HEADLESS": "1",
-                "LEAN_CTX_MINIMAL": "1",
-                "LEAN_CTX_STATE_DIR": f"{data_root}/leanctx/proxy/state",
-                "XDG_DATA_HOME": f"{data_root}/leanctx",
-            }
+            and leanctx_environment_owned(
+                environment,
+                {
+                    "HOME": os.environ.get("HOME"),
+                    "LEAN_CTX_CACHE_DIR": f"{data_root}/leanctx/proxy/cache",
+                    "LEAN_CTX_CONFIG_DIR": f"{data_root}/leanctx/proxy/config",
+                    "LEAN_CTX_DATA_DIR": f"{data_root}/leanctx/lean-ctx",
+                    "LEAN_CTX_HEADLESS": "1",
+                    "LEAN_CTX_MINIMAL": "1",
+                    "LEAN_CTX_RULES_INJECTION": "off",
+                    "LEAN_CTX_STATE_DIR": f"{data_root}/leanctx/proxy/state",
+                    "XDG_DATA_HOME": f"{data_root}/leanctx",
+                },
+            )
         )
     elif kind == "claudex-proxy":
         environment = document.get("EnvironmentVariables")
@@ -1198,16 +1216,20 @@ if kind == "leanctx-proxy":
         ]
         and port_argument.startswith("--port=")
         and valid_port(port_argument[len("--port="):])
-        and environment == {
-            "HOME": os.environ.get("HOME", ""),
-            "LEAN_CTX_CACHE_DIR": f"{data_root}/leanctx/proxy/cache",
-            "LEAN_CTX_CONFIG_DIR": f"{data_root}/leanctx/proxy/config",
-            "LEAN_CTX_DATA_DIR": f"{data_root}/leanctx/lean-ctx",
-            "LEAN_CTX_HEADLESS": "1",
-            "LEAN_CTX_MINIMAL": "1",
-            "LEAN_CTX_STATE_DIR": f"{data_root}/leanctx/proxy/state",
-            "XDG_DATA_HOME": f"{data_root}/leanctx",
-        }
+        and leanctx_environment_owned(
+            environment,
+            {
+                "HOME": os.environ.get("HOME", ""),
+                "LEAN_CTX_CACHE_DIR": f"{data_root}/leanctx/proxy/cache",
+                "LEAN_CTX_CONFIG_DIR": f"{data_root}/leanctx/proxy/config",
+                "LEAN_CTX_DATA_DIR": f"{data_root}/leanctx/lean-ctx",
+                "LEAN_CTX_HEADLESS": "1",
+                "LEAN_CTX_MINIMAL": "1",
+                "LEAN_CTX_RULES_INJECTION": "off",
+                "LEAN_CTX_STATE_DIR": f"{data_root}/leanctx/proxy/state",
+                "XDG_DATA_HOME": f"{data_root}/leanctx",
+            },
+        )
     )
     raise SystemExit(0 if owned else 1)
 
@@ -1345,7 +1367,8 @@ cliproxy_service_is_owned() {
 }
 
 leanctx_proxy_service_is_owned() {
-  service_definition_is_owned "$1" "$2" leanctx-proxy
+  service_definition_is_owned \
+    "$1" "$2" leanctx-proxy either "" "${3:-false}"
 }
 
 claudex_proxy_service_is_owned() {
@@ -3968,6 +3991,7 @@ provision_leanctx_embeddings() {
   LEAN_CTX_CACHE_DIR="$managed_root/cache" \
   LEAN_CTX_CONFIG_DIR="$config_dir" \
   LEAN_CTX_DATA_DIR="$managed_root/lean-ctx" \
+  LEAN_CTX_RULES_INJECTION=off \
   LEAN_CTX_STATE_DIR="$state_dir" \
   XDG_DATA_HOME="$managed_root" \
     "$leanctx_binary" embeddings provision || {
@@ -4006,6 +4030,7 @@ verified_leanctx_ort_dylib_path() {
     LEAN_CTX_CACHE_DIR="$managed_root/cache" \
     LEAN_CTX_CONFIG_DIR="$config_dir" \
     LEAN_CTX_DATA_DIR="$managed_data_root" \
+    LEAN_CTX_RULES_INJECTION=off \
     LEAN_CTX_STATE_DIR="$state_dir" \
     XDG_DATA_HOME="$managed_root" \
       "$leanctx_binary" embeddings status
@@ -4173,6 +4198,7 @@ PY
     LEAN_CTX_HEADLESS=1 \
     LEAN_CTX_MINIMAL=1 \
     LEAN_CTX_PROJECT_ROOT="$project_root" \
+    LEAN_CTX_RULES_INJECTION=off \
     LEAN_CTX_STATE_DIR="$state_dir" \
     ORT_DYLIB_PATH="$ort_dylib_path" \
     XDG_DATA_HOME="$shared_dir" \
@@ -4593,6 +4619,8 @@ render_leanctx_proxy_launch_agent() {
     '    <string>1</string>' \
     '    <key>LEAN_CTX_MINIMAL</key>' \
     '    <string>1</string>' \
+    '    <key>LEAN_CTX_RULES_INJECTION</key>' \
+    '    <string>off</string>' \
     '    <key>LEAN_CTX_STATE_DIR</key>' \
     "    <string>$escaped_state</string>" \
     '    <key>XDG_DATA_HOME</key>' \
@@ -4626,6 +4654,7 @@ render_leanctx_proxy_systemd_user_unit() {
     "Environment=$(systemd_environment_quote "LEAN_CTX_DATA_DIR=$data_root/leanctx/lean-ctx")" \
     'Environment="LEAN_CTX_HEADLESS=1"' \
     'Environment="LEAN_CTX_MINIMAL=1"' \
+    'Environment="LEAN_CTX_RULES_INJECTION=off"' \
     "Environment=$(systemd_environment_quote "LEAN_CTX_STATE_DIR=$data_root/leanctx/proxy/state")" \
     "Environment=$(systemd_environment_quote "XDG_DATA_HOME=$data_root/leanctx")" \
     'StandardOutput=journal' \

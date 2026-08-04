@@ -152,17 +152,19 @@ class LeanctxMonitorTests(unittest.TestCase):
         actual: int,
         saved: int,
         saved_usd: float,
+        tool: str | None = None,
+        bounce_adjustment: int = 0,
     ) -> dict[str, object]:
         return {
             "ts": timestamp,
-            "tool": "proxy_cache" if mechanism == "caching" else "ctx_read",
+            "tool": tool or ("proxy_cache" if mechanism == "caching" else "ctx_read"),
             "mechanism": mechanism,
             "model_id": "test-model",
             "tokenizer": "o200k_base",
             "baseline_tokens": baseline,
             "actual_tokens": actual,
             "saved_tokens": saved,
-            "bounce_adjustment": 0,
+            "bounce_adjustment": bounce_adjustment,
             "unit_price_per_m_usd": 2.5,
             "saved_usd": saved_usd,
             "repo_hash": "a" * 16,
@@ -611,6 +613,16 @@ class LeanctxMonitorTests(unittest.TestCase):
             environment["LEAN_CTX_PROJECT_ROOT"],
             str(self.xebia),
         )
+        self.assertEqual(environment["LEAN_CTX_RULES_INJECTION"], "off")
+
+    def test_proxy_environment_disables_duplicate_rule_injection(self) -> None:
+        environment = leanctx_monitor.proxy_environment(
+            self.data_root,
+            {"PATH": "/bin"},
+        )
+
+        self.assertEqual(environment["PATH"], "/bin")
+        self.assertEqual(environment["LEAN_CTX_RULES_INJECTION"], "off")
 
     def test_read_stats_uses_selected_run_events_only(self) -> None:
         session = self.create_run(self.xebia)
@@ -765,6 +777,121 @@ class LeanctxMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(observed.compression_saved_usd, 0.1)
         self.assertAlmostEqual(observed.cache_saved_usd, 0.2)
         self.assertAlmostEqual(observed.compression_percent, 40.0)
+
+    def test_rolling_economics_accepts_official_bounce_adjustment(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        self.write_ledger(
+            self.ledger_row(
+                now.isoformat(),
+                "compression",
+                baseline=100,
+                actual=100,
+                saved=0,
+                saved_usd=-0.25,
+                tool="bounce",
+                bounce_adjustment=100,
+            )
+        )
+
+        observed = leanctx_monitor.read_rolling_economics(
+            self.data_root,
+            24,
+            now=now,
+        )
+
+        self.assertEqual(observed.compression_events, 1)
+        self.assertEqual(observed.source_tokens, 100)
+        self.assertEqual(observed.returned_tokens, 100)
+        self.assertEqual(observed.saved_tokens, 0)
+        self.assertAlmostEqual(observed.compression_saved_usd, -0.25)
+
+    def test_rolling_economics_ignores_valid_bounce_outside_window(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        self.write_ledger(
+            self.ledger_row(
+                (now - timedelta(hours=24, microseconds=1)).isoformat(),
+                "compression",
+                baseline=100,
+                actual=100,
+                saved=0,
+                saved_usd=-0.25,
+                tool="bounce",
+                bounce_adjustment=100,
+            )
+        )
+
+        observed = leanctx_monitor.read_rolling_economics(
+            self.data_root,
+            24,
+            now=now,
+        )
+
+        self.assertEqual(observed.compression_events, 0)
+        self.assertAlmostEqual(observed.compression_saved_usd, 0.0)
+
+    def test_rolling_economics_rejects_negative_non_bounce_savings(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        for mechanism, actual, saved in (
+            ("compression", 60, 40),
+            ("caching", 100, 0),
+        ):
+            with self.subTest(mechanism=mechanism):
+                self.write_ledger(
+                    self.ledger_row(
+                        now.isoformat(),
+                        mechanism,
+                        baseline=100,
+                        actual=actual,
+                        saved=saved,
+                        saved_usd=-0.25,
+                    )
+                )
+                with self.assertRaisesRegex(
+                    LeanctxMonitorError,
+                    "ledger is invalid",
+                ):
+                    leanctx_monitor.read_rolling_economics(
+                        self.data_root,
+                        24,
+                        now=now,
+                    )
+
+    def test_rolling_economics_rejects_malformed_bounce_records(self) -> None:
+        now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+        invalid_rows = (
+            self.ledger_row(
+                now.isoformat(),
+                "compression",
+                baseline=100,
+                actual=100,
+                saved=0,
+                saved_usd=0.25,
+                tool="bounce",
+                bounce_adjustment=100,
+            ),
+            self.ledger_row(
+                now.isoformat(),
+                "compression",
+                baseline=100,
+                actual=100,
+                saved=0,
+                saved_usd=-0.25,
+                tool="bounce",
+                bounce_adjustment=0,
+            ),
+        )
+        for row in invalid_rows:
+            with self.subTest(row=row):
+                self.write_ledger(row)
+                with self.assertRaisesRegex(
+                    LeanctxMonitorError,
+                    "ledger is invalid",
+                ):
+                    leanctx_monitor.read_rolling_economics(
+                        self.data_root,
+                        24,
+                        now=now,
+                    )
 
     def test_rolling_economics_zero_source_and_hour_bounds(self) -> None:
         now = datetime(2026, 7, 29, tzinfo=timezone.utc)

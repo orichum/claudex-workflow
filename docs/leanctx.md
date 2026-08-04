@@ -125,6 +125,11 @@ starts the request proxy itself with a small, validated Orichum-owned
 configuration. Provider routing and credentials remain owned by the Orichum
 route proxy and CLIProxyAPI.
 
+Orichum also sets `LEAN_CTX_RULES_INJECTION=off` for every managed LeanCTX
+process. The controller and project policy already provide the required
+steering, so injecting LeanCTX-authored rule files again would add a duplicate
+prompt prefix without adding capabilities or safety controls.
+
 ## Monitor savings
 
 From a project:
@@ -173,6 +178,13 @@ cover every provider request. The all-time summary has a different attribution
 scope and fallback pricing, so Orichum never presents it as rolling-window
 billing or combines it into a fabricated rolling net. ROI is shown as a dash
 when the upstream summary has no recorded tool spend.
+
+LeanCTX can append a negative `bounce` record when a previously estimated
+compression saving must be corrected. Orichum includes that signed correction
+in rolling compression USD only when the record matches LeanCTX's official
+bounce shape; ordinary compression and caching records must remain
+nonnegative. The ledger is validated read-only and is never repaired or
+rewritten by Orichum.
 
 `watch` opens the selected run's terminal observatory, and `dashboard` starts
 its authenticated local web observatory in the foreground. They use that run's

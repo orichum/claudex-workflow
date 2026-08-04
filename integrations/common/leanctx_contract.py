@@ -101,6 +101,7 @@ def mcp_server(
             "LEAN_CTX_HEADLESS": "1",
             "LEAN_CTX_MINIMAL": "1",
             "LEAN_CTX_PROJECT_ROOT": str(project_root),
+            "LEAN_CTX_RULES_INJECTION": "off",
             "LEAN_CTX_SHELL_ALLOWLIST_OVERRIDE": "",
             "LEAN_CTX_STATE_DIR": state,
             "XDG_DATA_HOME": str(shared_data_home),

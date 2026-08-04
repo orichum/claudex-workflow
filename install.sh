@@ -1426,7 +1426,7 @@ if [[ -e "$leanctx_proxy_service_file" || \
       -L "$leanctx_proxy_service_file" ]]; then
   leanctx_proxy_service_was_present=true
   if ! leanctx_proxy_service_is_owned \
-      "$leanctx_proxy_service_file" "$WORKFLOW_DATA_ROOT"; then
+      "$leanctx_proxy_service_file" "$WORKFLOW_DATA_ROOT" true; then
     workflow_die \
       "refusing to overwrite unknown service file: $leanctx_proxy_service_file"
   fi
@@ -1799,6 +1799,7 @@ probe_leanctx_proxy() (
   LEAN_CTX_STATE_DIR="$probe_root/state" \
   LEAN_CTX_CACHE_DIR="$probe_root/cache" \
   LEAN_CTX_DATA_DIR="$probe_root/data/lean-ctx" \
+  LEAN_CTX_RULES_INJECTION=off \
   XDG_DATA_HOME="$probe_root/data" \
     "$leanctx_candidate" config validate >/dev/null || return 1
   LEAN_CTX_CONFIG_DIR="$probe_root/config" \
@@ -1806,6 +1807,7 @@ probe_leanctx_proxy() (
   LEAN_CTX_CACHE_DIR="$probe_root/cache" \
   LEAN_CTX_DATA_DIR="$probe_root/data/lean-ctx" \
   LEAN_CTX_HEADLESS=1 LEAN_CTX_MINIMAL=1 \
+  LEAN_CTX_RULES_INJECTION=off \
   XDG_DATA_HOME="$probe_root/data" \
     "$leanctx_candidate" proxy start "--port=$probe_port" \
     >"$probe_root/proxy.log" 2>&1 &

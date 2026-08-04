@@ -439,6 +439,7 @@ def leanctx_environment(
             "LEAN_CTX_CONFIG_DIR": str(config_dir or directory / "config"),
             "LEAN_CTX_DATA_DIR": str(data_home / "lean-ctx"),
             "LEAN_CTX_PROJECT_ROOT": str(run.project_root),
+            "LEAN_CTX_RULES_INJECTION": "off",
             "LEAN_CTX_STATE_DIR": str(directory / "state"),
             "XDG_DATA_HOME": str(data_home),
         }
@@ -620,6 +621,16 @@ def _nonnegative_finite(document: Mapping[str, object], field: str) -> float:
     return number
 
 
+def _finite_number(document: Mapping[str, object], field: str) -> float:
+    value = document.get(field)
+    if type(value) not in (int, float) or isinstance(value, bool):
+        raise ValueError(f"invalid {field}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"invalid {field}")
+    return number
+
+
 def read_rolling_economics(
     data_root: Path,
     hours: int,
@@ -662,9 +673,23 @@ def read_rolling_economics(
             baseline = _nonnegative_integer(document, "baseline_tokens")
             actual = _nonnegative_integer(document, "actual_tokens")
             saved = _nonnegative_integer(document, "saved_tokens")
-            _nonnegative_integer(document, "bounce_adjustment")
+            bounce_adjustment = _nonnegative_integer(
+                document,
+                "bounce_adjustment",
+            )
             _nonnegative_finite(document, "unit_price_per_m_usd")
-            estimated_usd = _nonnegative_finite(document, "saved_usd")
+            estimated_usd = _finite_number(document, "saved_usd")
+            is_bounce = tool == "bounce"
+            if is_bounce and not (
+                mechanism == "compression"
+                and actual == baseline
+                and saved == 0
+                and 0 < bounce_adjustment <= baseline
+                and estimated_usd < 0
+            ):
+                raise ValueError("invalid bounce correction")
+            if not is_bounce and estimated_usd < 0:
+                raise ValueError("invalid negative savings")
             if (
                 actual > baseline
                 or saved > baseline
@@ -953,6 +978,7 @@ def proxy_environment(
             "LEAN_CTX_DATA_DIR": str(data_root / "leanctx" / "lean-ctx"),
             "LEAN_CTX_HEADLESS": "1",
             "LEAN_CTX_MINIMAL": "1",
+            "LEAN_CTX_RULES_INJECTION": "off",
             "LEAN_CTX_STATE_DIR": str(directory / "state"),
             "XDG_DATA_HOME": str(data_root / "leanctx"),
         }
