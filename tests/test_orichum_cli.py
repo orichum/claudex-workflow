@@ -1022,6 +1022,11 @@ class OrichumCliTests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with (
+            mock.patch.dict(
+                os.environ,
+                {"SSH_CONNECTION": "", "SSH_TTY": ""},
+                clear=False,
+            ),
             mock.patch.object(
                 orichum_cli, "load_management_endpoint", return_value=object()
             ),
@@ -1077,6 +1082,11 @@ class OrichumCliTests(unittest.TestCase):
             "code=secret-code&state=secret-state"
         )
         with (
+            mock.patch.dict(
+                os.environ,
+                {"SSH_CONNECTION": "", "SSH_TTY": ""},
+                clear=False,
+            ),
             mock.patch.object(
                 orichum_cli,
                 "load_management_endpoint",
@@ -1150,6 +1160,11 @@ class OrichumCliTests(unittest.TestCase):
                     "code=secret-code&state=secret-state"
                 )
                 with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"SSH_CONNECTION": "", "SSH_TTY": ""},
+                        clear=False,
+                    ),
                     mock.patch.object(
                         orichum_cli,
                         "load_management_endpoint",
@@ -1277,6 +1292,11 @@ class OrichumCliTests(unittest.TestCase):
             state="secret-state",
         )
         with (
+            mock.patch.dict(
+                os.environ,
+                {"SSH_CONNECTION": "", "SSH_TTY": ""},
+                clear=False,
+            ),
             mock.patch.object(
                 orichum_cli,
                 "load_management_endpoint",
@@ -1319,6 +1339,11 @@ class OrichumCliTests(unittest.TestCase):
             state="secret-state",
         )
         with (
+            mock.patch.dict(
+                os.environ,
+                {"SSH_CONNECTION": "", "SSH_TTY": ""},
+                clear=False,
+            ),
             mock.patch.object(
                 orichum_cli,
                 "load_management_endpoint",
