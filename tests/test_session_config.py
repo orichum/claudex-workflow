@@ -636,6 +636,7 @@ class SessionConfigTests(unittest.TestCase):
                     "LEAN_CTX_HEADLESS": "1",
                     "LEAN_CTX_MINIMAL": "1",
                     "LEAN_CTX_PROJECT_ROOT": str(repository),
+                    "LEAN_CTX_RULES_INJECTION": "off",
                     "LEAN_CTX_SHELL_ALLOWLIST_OVERRIDE": "",
                     "LEAN_CTX_STATE_DIR": str(leanctx_dir / "state"),
                     "XDG_DATA_HOME": str(shared_data),

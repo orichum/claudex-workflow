@@ -666,6 +666,8 @@ state = Path(os.environ["LEAN_CTX_STATE_DIR"])
 cache = Path(os.environ["LEAN_CTX_CACHE_DIR"])
 xdg = Path(os.environ["XDG_DATA_HOME"])
 runtime = data / "addons/bin/onnxruntime/1.24.4/libonnxruntime.dylib"
+if os.environ.get("LEAN_CTX_RULES_INJECTION") != "off":
+    raise SystemExit(3)
 if (
     not config.is_dir()
     or not state.is_dir()
@@ -701,6 +703,7 @@ required = {
     "LEAN_CTX_HEADLESS": "1",
     "LEAN_CTX_AUTONOMY": "false",
     "LEAN_CTX_FULL_TOOLS": "0",
+    "LEAN_CTX_RULES_INJECTION": "off",
 }
 if any(os.environ.get(key) != value for key, value in required.items()):
     raise SystemExit(3)
@@ -1928,6 +1931,44 @@ render_claudex_proxy_launch_agent \
 cliproxy_service_is_owned "$fixture/cliproxy.plist" "$data_root"
 leanctx_proxy_service_is_owned "$fixture/leanctx-proxy.plist" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.plist" "$data_root" "$ROOT"
+rg -Fq '<key>LEAN_CTX_RULES_INJECTION</key>' \
+  "$fixture/leanctx-proxy.plist"
+rg -Fq '<string>off</string>' "$fixture/leanctx-proxy.plist"
+cp "$fixture/leanctx-proxy.plist" "$fixture/previous-leanctx-proxy.plist"
+"$python_bin/python3.14" - "$fixture/previous-leanctx-proxy.plist" <<'PY'
+import plistlib
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+del document["EnvironmentVariables"]["LEAN_CTX_RULES_INJECTION"]
+path.write_bytes(plistlib.dumps(document))
+PY
+if leanctx_proxy_service_is_owned \
+    "$fixture/previous-leanctx-proxy.plist" "$data_root"; then
+  printf 'previous LeanCTX launch agent passed strict ownership\n' >&2
+  exit 1
+fi
+leanctx_proxy_service_is_owned \
+  "$fixture/previous-leanctx-proxy.plist" "$data_root" true
+cp "$fixture/previous-leanctx-proxy.plist" \
+  "$fixture/drifted-leanctx-proxy.plist"
+"$python_bin/python3.14" - "$fixture/drifted-leanctx-proxy.plist" <<'PY'
+import plistlib
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+document["EnvironmentVariables"]["LEAN_CTX_MINIMAL"] = "0"
+path.write_bytes(plistlib.dumps(document))
+PY
+if leanctx_proxy_service_is_owned \
+    "$fixture/drifted-leanctx-proxy.plist" "$data_root" true; then
+  printf 'drifted previous LeanCTX launch agent was accepted\n' >&2
+  exit 1
+fi
 cp "$fixture/route.plist" "$fixture/previous-route.plist"
 "$python_bin/python3.14" - "$fixture/previous-route.plist" <<'PY'
 import plistlib
@@ -1965,6 +2006,17 @@ render_claudex_proxy_systemd_user_unit \
 cliproxy_service_is_owned "$fixture/cliproxy.service" "$data_root"
 leanctx_proxy_service_is_owned "$fixture/leanctx-proxy.service" "$data_root"
 claudex_proxy_service_is_owned "$fixture/route.service" "$data_root" "$ROOT"
+rg -Fq 'Environment="LEAN_CTX_RULES_INJECTION=off"' \
+  "$fixture/leanctx-proxy.service"
+awk '!/^Environment="LEAN_CTX_RULES_INJECTION=/' \
+  "$fixture/leanctx-proxy.service" >"$fixture/previous-leanctx-proxy.service"
+if leanctx_proxy_service_is_owned \
+    "$fixture/previous-leanctx-proxy.service" "$data_root"; then
+  printf 'previous LeanCTX systemd unit passed strict ownership\n' >&2
+  exit 1
+fi
+leanctx_proxy_service_is_owned \
+  "$fixture/previous-leanctx-proxy.service" "$data_root" true
 awk '!/^Environment="ORICHUM_DATA_HOME=/' \
   "$fixture/route.service" >"$fixture/previous-route.service"
 claudex_proxy_service_is_owned \
@@ -1995,6 +2047,8 @@ if rg -q 'for launcher in .*claudex-gpt' "$ROOT/install.sh"; then
   exit 1
 fi
 rg -Fq 'ORICHUM_ROUTE_PROXY_PORT' "$ROOT/install.sh"
+rg -Fq '"$leanctx_proxy_service_file" "$WORKFLOW_DATA_ROOT" true' \
+  "$ROOT/install.sh"
 rg -Fq \
   'workflow_python -I -B - \' \
   "$ROOT/install.sh"

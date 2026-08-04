@@ -42,11 +42,14 @@ patch.
 
 ## Tool-schema efficiency
 
-Orichum keeps nine task-execution LeanCTX tools resident in eligible controller
-requests:
+The default `lean` profile keeps four task-execution LeanCTX tools resident in
+eligible controller requests:
 
-- LeanCTX read, search, tree, expansion, graph, impact, callgraph, patch, and
-  shell tools.
+- LeanCTX read, search, tree, and shell tools.
+
+The `full` profile retains the previous nine-tool resident set by adding
+expansion, graph, impact, callgraph, and patch. All eleven bounded MCP tools
+remain available in both profiles through provider-native tool search.
 
 `ctx_shell` is the visible default for every finite, non-interactive command,
 including unknown or custom CLIs. Orichum's private MCP uses LeanCTX's empty
@@ -64,6 +67,11 @@ the tool-search primitive. Atlassian schemas exist only in physical sessions
 whose project context declares an account.
 Keeping the small execution surface resident makes code routing deterministic
 without paying for unused schemas on every turn.
+
+Every Orichum-managed LeanCTX process disables LeanCTX rule-file injection.
+Orichum already supplies controller and project steering, so this removes a
+duplicate per-request instruction prefix while preserving the same tools,
+project jail, shell policy, indexing, semantic search, and shared caches.
 
 This request transform is enabled only for model protocols that Orichum has
 verified with Claude Code's tool-search contract. Unknown Kimi, Gemini, or
